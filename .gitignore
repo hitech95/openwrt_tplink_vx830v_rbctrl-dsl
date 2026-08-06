@@ -11,6 +11,7 @@ squashfs-root/
 # ── Rust / Cargo build artifacts ────────────────────────────────
 target/
 **/target/
+*.rs.bk
 
 # ── IDE / editor ────────────────────────────────────────────────
 .idea/
