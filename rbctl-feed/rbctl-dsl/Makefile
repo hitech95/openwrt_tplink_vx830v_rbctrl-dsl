@@ -68,6 +68,16 @@ define Package/rbctl-dsl/description
   remote_board + libcmm.so stack on mainline OpenWrt.
 endef
 
-# RustBinPackage provides a default install rule: PKG_INSTALL_DIR/bin/* -> /usr/bin/.
+# RustBinPackage provides Build/Compile + a default install for the binary.
+# We override Package/install to also ship the init script and notify script.
+define Package/rbctl-dsl/install
+	$(INSTALL_DIR) $(1)/usr/sbin
+	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/bin/rbctl-dsl $(1)/usr/sbin/
+	$(INSTALL_DIR) $(1)/etc/init.d
+	$(INSTALL_BIN) ./files/dsl_control $(1)/etc/init.d/dsl_control
+	$(INSTALL_DIR) $(1)/sbin
+	$(INSTALL_BIN) ./files/dsl_notify.sh $(1)/sbin/dsl_notify.sh
+endef
+
 $(eval $(call RustBinPackage,rbctl-dsl))
 $(eval $(call BuildPackage,rbctl-dsl))

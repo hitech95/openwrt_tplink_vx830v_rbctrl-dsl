@@ -1,0 +1,45 @@
+#!/bin/sh /etc/rc.common
+#
+# dsl_control — procd init script for rbctl-dsl
+#
+# Reads UCI network.dsl section and starts the EcoNet xDSL board
+# configuration daemon. On stop, synthesizes a final DOWN event so
+# consumers (LEDs, PPPoA) tear down cleanly.
+#
+# Install as /etc/init.d/dsl_control
+
+START=97
+USE_PROCD=1
+
+PROG=/usr/sbin/rbctl-dsl
+NOTIFY=/sbin/dsl_notify.sh
+
+service_triggers() {
+	procd_add_reload_trigger network
+}
+
+start_service() {
+	local config_iface transport_vlan
+
+	config_load network
+	config_get config_iface   dsl config_iface  "lan0.500"
+	config_get transport_vlan dsl transport_vlan 2001
+
+	procd_open_instance
+	procd_set_param command "$PROG" \
+		-i "$config_iface" \
+		-n "$NOTIFY" \
+		-t "$transport_vlan"
+	procd_set_param respawn
+	procd_set_param term_timeout 10
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+stop_service() {
+	# Synthesize a final DOWN event so LEDs turn off and PPPoA stops.
+	DSL_NOTIFICATION_TYPE="DSL_INTERFACE_STATUS" \
+	DSL_INTERFACE_STATUS="DOWN" \
+		"$NOTIFY" 2>/dev/null
+}
