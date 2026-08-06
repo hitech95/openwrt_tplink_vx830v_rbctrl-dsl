@@ -11,7 +11,7 @@
 //! 0x10    4     sequence (big-endian u32)
 //! 0x14    2     payload_len (big-endian u16, bytes from 0x18 onward)
 //! 0x16    2     checksum (CRC-16/ARC, big-endian, zeroed during compute)
-//! 0x18    ..    payload (byte 0 = payload_type)
+//! 0x18    ..    payload (TX: byte 0 = payload_type; RX: raw data, no echo)
 //! ```
 //!
 //! Multi-byte fields are big-endian on the wire. See `docs/protocol.md`.
@@ -117,8 +117,9 @@ impl<'a> Frame<'a> {
     /// Raw frame bytes (the entire Ethernet + protocol frame).
     pub fn buf(&self) -> &'a [u8] { self.buf }
 
-    /// The payload slice (offset `0x18`, length = `payload_len`). Byte 0 is
-    /// the payload_type; the rest is opcode-specific.
+    /// The payload slice (offset `0x18`, length = `payload_len`).
+    /// TX payloads start with the opcode byte; RX responses contain raw
+    /// data directly (no opcode echo, confirmed via hardware capture).
     pub fn payload(&self) -> &'a [u8] {
         let len = self.payload_len() as usize;
         &self.buf[OFF_PAYLOAD..OFF_PAYLOAD + len]

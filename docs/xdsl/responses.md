@@ -6,6 +6,17 @@ Reverse-engineered from `oal_dsl_msgToLineObj` / `_msgToChannelObj` /
 the opcode-2 and opcode-4 replies). Byte-order cross-checked against
 `proto_postprocess`.
 
+> **Confirmed via hardware capture (sniff on lan0.500):**
+>
+> - RX response payloads contain **raw data only** — the board does **not**
+>   echo the opcode byte at the start of the payload. All offsets below are
+>   relative to the first byte after the 24-byte frame header (offset `0x18`).
+> - The `payload_len` field in the frame header is authoritative for the data
+>   size. Ethernet padding (frames < 60 bytes are zero-padded) is excluded.
+> - Op2 reply: `payload_len` = 63 (59 bytes data + 4 bytes trailing zeros).
+> - Op1/op4/op5 replies: short payloads (4–28 bytes), padded to 60-byte
+>   minimum Ethernet frame by the NIC.
+
 > No pcap is available, so these layouts are **pure static analysis** — the
 > deserializers are authoritative for field offsets and types. Numeric metric
 > names marked *inferred* below follow TR-181 conventions (see
@@ -104,7 +115,10 @@ Parsed by `oal_dsl_msgToChannelStatsTotObj` (`FUN_0032483c`). 7 uint32
 
 ## Open items (deferred to P4 / capture)
 
-- Confirm the 12 + 6 *inferred* metric names against a real reply (the byte map
-  itself is fixed).
+- ~~Confirm the 12 + 6 *inferred* metric names against a real reply~~ — offsets
+  confirmed via hardware capture (all zeros with NoSignal; field names still
+  inferred from TR-181 ordering).
+- The 4 trailing bytes in the op2 reply (payload_len=63, data=59) are
+  undocumented — likely a board-internal footer or alignment padding.
 - Two config bytes (`[0x02]`,`[0x03]` in the opcode-1 TX) round-trip through the
   same struct; a capture will name them.
