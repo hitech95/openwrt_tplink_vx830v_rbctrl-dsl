@@ -1,0 +1,12 @@
+[package]
+name = "tinyln-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Safe Rust wrappers for OpenWrt libnl-tiny (netlink socket, message, attribute, rtnl, genl)"
+publish = false
+
+[dependencies]
+libc = { workspace = true }
+tinyln-rs-sys = { path = "../tinyln_rs_sys" }

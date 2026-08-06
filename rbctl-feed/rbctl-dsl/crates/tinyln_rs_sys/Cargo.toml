@@ -1,0 +1,18 @@
+[package]
+name = "tinyln-rs-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "FFI bindings to OpenWrt libnl-tiny and Linux kernel rtnetlink UAPI"
+publish = false
+build = "build.rs"
+
+[lib]
+name = "tinyln_rs_sys"
+
+[dependencies]
+libc = { workspace = true }
+
+[build-dependencies]
+bindgen = "0.72"
