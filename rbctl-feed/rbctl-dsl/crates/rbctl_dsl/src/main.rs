@@ -2,12 +2,12 @@
 //!
 //! ## Usage
 //!
-//! **Daemon mode** (no existing instance):
+//! **Daemon mode:**
 //! ```text
-//! rbctl-dsl [-i <iface>] [-n <script>] [-t <vlan>] [--annex b] [--line-mode vdsl] ...
+//! rbctl-dsl -d [options]
 //! ```
 //!
-//! **Control mode** (existing instance running):
+//! **Control mode** (talks to a running daemon):
 //! ```text
 //! rbctl-dsl status         → print live line state
 //! rbctl-dsl reload         → reload UCI config
@@ -32,16 +32,17 @@ const HELP: &str = "\
 rbctl-dsl — EcoNet xDSL board configuration daemon
 
 Usage:
-  rbctl-dsl [options]              Start as daemon (or control if running)
+  rbctl-dsl -d [options]           Start as daemon
   rbctl-dsl <command>              Send command to running daemon
 
-Commands (when daemon is running):
+Commands:
   status                           Print live line state and exit
   reload                           Reload UCI config
   restart-line                     Bounce the DSL line (down → up)
   stop                             Shut down the daemon
 
-Options (daemon mode):
+Daemon options:
+  -d, --daemon                     Start in daemon mode
   -i, --config-iface <iface>       Management VLAN interface (default: lan0.500)
   -n, --notify <script>            Hotplug notify script (e.g. /sbin/dsl_notify.sh)
   -t, --transport-vlan <id>        Board transport VLAN id (default: 2001)
@@ -63,17 +64,26 @@ Other modes:
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // Quick check: first positional arg might be a control command
-    if args.len() == 2 {
-        if let Some(cmd) = ipc::IpcCmd::from_arg(&args[1]) {
-            // Control client mode
+    // No args → help
+    if args.len() == 1 {
+        print!("{HELP}");
+        std::process::exit(0);
+    }
+
+    // First positional arg: control command or mode flag
+    match args[1].as_str() {
+        "-h" | "--help" => {
+            print!("{HELP}");
+            std::process::exit(0);
+        }
+        "--selftest" | "--sniff" => { /* handled in arg loop below */ }
+        "-d" | "--daemon" => { /* handled in arg loop below */ }
+        other if ipc::IpcCmd::from_arg(other).is_some() => {
+            let cmd = ipc::IpcCmd::from_arg(other).unwrap();
             match ipc::send_command(ipc::SOCK_PATH, cmd) {
                 Ok(response) => {
                     print!("{response}");
-                    if !response.contains("ERR") {
-                        std::process::exit(0);
-                    }
-                    std::process::exit(1);
+                    std::process::exit(if response.contains("ERR") { 1 } else { 0 });
                 }
                 Err(e) => {
                     eprintln!("Cannot connect to daemon at {}: {e}", ipc::SOCK_PATH);
@@ -81,9 +91,11 @@ fn main() {
                 }
             }
         }
+        _ => {}
     }
 
-    // Parse full arg list for daemon mode / selftest / sniff
+    // Parse full arg list
+    let mut daemon_mode = false;
     let mut config_iface = String::from("lan0.500");
     let mut notify_script: Option<String> = None;
     let mut transport_vlan: u16 = 2001;
@@ -94,10 +106,8 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "-h" | "--help" => {
-                print!("{HELP}");
-                std::process::exit(0);
-            }
+            "-h" | "--help" => { print!("{HELP}"); std::process::exit(0); }
+            "-d" | "--daemon" => daemon_mode = true,
             "-i" | "--config-iface" => { i += 1; if i < args.len() { config_iface = args[i].clone(); } }
             "-n" | "--notify" => { i += 1; if i < args.len() { notify_script = Some(args[i].clone()); } }
             "-t" | "--transport-vlan" => { i += 1; if i < args.len() { transport_vlan = args[i].parse().unwrap_or(2001); } }
@@ -131,18 +141,12 @@ fn main() {
         std::process::exit(code);
     }
 
-    // If a daemon is already running and no overrides specified, show status
-    if overrides == CliOverrides::default() && ipc::daemon_running() {
-        match ipc::send_command(ipc::SOCK_PATH, ipc::IpcCmd::Status) {
-            Ok(response) => {
-                print!("{response}");
-                std::process::exit(0);
-            }
-            Err(_) => { /* socket exists but can't connect — stale, proceed to start */ }
-        }
+    if !daemon_mode {
+        eprintln!("Use 'rbctl-dsl -d' to start the daemon, or 'rbctl-dsl <command>' to control it.");
+        eprintln!("Run 'rbctl-dsl --help' for usage.");
+        std::process::exit(1);
     }
 
-    // Daemon mode
     let code = daemon::run(
         &config_iface,
         notify_script.as_deref(),
