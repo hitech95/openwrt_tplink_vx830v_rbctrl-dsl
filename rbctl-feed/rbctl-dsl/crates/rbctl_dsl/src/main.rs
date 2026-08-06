@@ -1,24 +1,30 @@
 //! rbctl-dsl — EcoNet xDSL board configuration daemon.
 //!
 //! Usage:
-//!   rbctl-dsl [--config-iface <iface>] [--selftest]
+//!   rbctl-dsl [-i <iface>] [-n <script>] [-t <vlan>] [--selftest] [--sniff]
 //!
-//! Without `--selftest`, starts the daemon (Phase 3 — not yet implemented).
+//! Without `--selftest` or `--sniff`, starts the daemon.
 
 mod board;
+mod daemon;
+mod hotplug;
 mod logger;
 mod selftest;
 mod transport;
+mod ubus_obj;
+mod uci_cfg;
 
 use logger::Logger;
 
 const HELP: &str = "\
 rbctl-dsl — EcoNet xDSL board configuration daemon
 
-Usage: rbctl-dsl [-i <iface>] [--selftest] [--sniff]
+Usage: rbctl-dsl [-i <iface>] [-n <script>] [-t <vlan>] [--selftest] [--sniff]
 
 Options:
   -i, --config-iface <iface>  Management VLAN interface (default: lan0.500)
+  -n, --notify <script>       Hotplug notify script (e.g. /sbin/dsl_notify.sh)
+  -t, --transport-vlan <id>   Board transport VLAN id (default: 2001)
   --selftest                  Exercise socket + VLAN + board opcodes, then exit
   --sniff                     Listen for 0x88B5/0x88B6 frames (passive, no send)
   -h, --help                  Show this help
@@ -27,8 +33,9 @@ Options:
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut config_iface = String::from("lan0.500");
+    let mut notify_script: Option<String> = None;
+    let mut transport_vlan: u16 = 2001;
     let mut selftest = false;
-
     let mut sniff = false;
 
     let mut i = 1;
@@ -42,6 +49,18 @@ fn main() {
                 i += 1;
                 if i < args.len() {
                     config_iface = args[i].clone();
+                }
+            }
+            "-n" | "--notify" => {
+                i += 1;
+                if i < args.len() {
+                    notify_script = Some(args[i].clone());
+                }
+            }
+            "-t" | "--transport-vlan" => {
+                i += 1;
+                if i < args.len() {
+                    transport_vlan = args[i].parse().unwrap_or(2001);
                 }
             }
             "--selftest" => selftest = true,
@@ -66,7 +85,11 @@ fn main() {
         std::process::exit(code);
     }
 
-    // Phase 3: daemon mode (UCI config → board init → uloop + ubus)
-    log.line("daemon mode not yet implemented. Use --selftest.");
-    std::process::exit(1);
+    // Daemon mode
+    let code = daemon::run(
+        &config_iface,
+        notify_script.as_deref(),
+        transport_vlan,
+    );
+    std::process::exit(code);
 }
