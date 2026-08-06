@@ -26,7 +26,6 @@ use rbctl_proto::unpack::LinkStatus;
 use crate::board::{Board, BoardError};
 use crate::hotplug::{self, LineEvent};
 use crate::ipc::{IpcListener, StatusSnapshot};
-use crate::logger::Logger;
 use crate::uci_cfg::{AtmConfig, CliOverrides, DslConfig, XferMode};
 use crate::ubus_obj;
 
@@ -180,20 +179,19 @@ pub fn run(
     transport_vlan: u16,
     overrides: &CliOverrides,
 ) -> i32 {
-    let log = Logger::new("daemon");
     install_signal_handlers();
 
     // 1. Load config (UCI + CLI overrides)
     let mut cfg = match DslConfig::load(overrides) {
         Ok(c) => {
-            log.line(format!(
+            log::info!(
                 "config: mod={:?} annex={:?} profiles=0x{:x} xfer={:?}",
                 c.modulation, c.annex, c.profiles.bitmask(), c.xfer_mode
-            ));
+            );
             c
         }
         Err(e) => {
-            log.line(format!("config load failed ({e}), using defaults"));
+            log::warn!("config load failed ({e}), using defaults");
             DslConfig::default()
         }
     };
@@ -202,59 +200,59 @@ pub fn run(
     let sock = match af_packet::RawSocket::open(config_iface, 0x88B5) {
         Ok(s) => s,
         Err(e) => {
-            log.fail("socket", format!("open {config_iface}: {e}"));
+            log::error!("socket: open {config_iface}: {e}");
             return 1;
         }
     };
     let mut board: Board = Board::new(sock);
     board.set_timeout(Duration::from_millis(2000));
     board.set_retries(3);
-    log.line(format!("board socket on {config_iface} (mac={:02x?})", board.local_mac()));
+    log::info!("board socket on {config_iface} (mac={:02x?})", board.local_mac());
 
     // 3. Configure DSL line (op 1)
-    log.line(format!(
+    log::info!(
         "line_config_up: mod={:?} annex={:?} profiles=0x{:x}",
         cfg.modulation, cfg.annex, cfg.profiles.bitmask()
-    ));
+    );
     if let Err(e) = board.line_config_up(cfg.modulation, cfg.annex, cfg.profiles) {
-        log.fail("line_config_up", &e);
+        log::error!("line_config_up: {e}");
     }
 
     // 4. Add data-plane link
     let vlan = match cfg.xfer_mode {
         XferMode::Ptm => {
-            log.line(format!("ptm_link_add: vlan={transport_vlan}"));
+            log::info!("ptm_link_add: vlan={transport_vlan}");
             board.ptm_link_add(0, 0, 0, transport_vlan).unwrap_or(transport_vlan)
         }
         XferMode::Atm => {
             let a = cfg.atm.as_ref();
-            log.line(format!(
+            log::info!(
                 "atm_link_add: vpi={} vci={} encap={:?} vlan={transport_vlan}",
                 a.map(|a| a.vpi).unwrap_or(8),
                 a.map(|a| a.vci).unwrap_or(35),
                 a.map(|a| a.encap).unwrap_or(AtmEncap::Llc),
-            ));
+            );
             let params = atm_params(cfg.atm.as_ref(), transport_vlan);
             board.atm_link_add(&params).unwrap_or(transport_vlan)
         }
     };
-    log.line(format!("board assigned transport vlan: {vlan}"));
+    log::info!("board assigned transport vlan: {vlan}");
 
     // 5. Create host-side transport VLAN
     let parent = parent_iface(config_iface);
     match create_vlan_iface(parent, vlan) {
-        Ok(()) => log.line(format!("created {parent}.{vlan}")),
-        Err(e) => log.line(format!("VLAN create {parent}.{vlan}: {e} (may already exist)")),
+        Ok(()) => log::info!("created {parent}.{vlan}"),
+        Err(e) => log::warn!("VLAN create {parent}.{vlan}: {e} (may already exist)"),
     }
 
     // 6. Bind IPC socket
     let ipc = match IpcListener::bind(crate::ipc::SOCK_PATH) {
         Ok(l) => {
-            log.line(format!("IPC socket at {}", crate::ipc::SOCK_PATH));
+            log::info!("IPC socket at {}", crate::ipc::SOCK_PATH);
             Some(l)
         }
         Err(e) => {
-            log.line(format!("IPC bind failed: {e} — control socket disabled"));
+            log::warn!("IPC bind failed: {e} — control socket disabled");
             None
         }
     };
@@ -268,11 +266,11 @@ pub fn run(
     let ubus_obj = ubus_obj::build_dsl_object(Arc::clone(&state));
     let mut ubus_conn = match connect_ubus(ubus_obj) {
         Some(c) => {
-            log.line("ubus object 'dsl' registered");
+            log::info!("ubus object 'dsl' registered");
             Some(c)
         }
         None => {
-            log.line("ubus unavailable — metrics will not be published");
+            log::warn!("ubus unavailable — metrics will not be published");
             None
         }
     };
@@ -288,7 +286,7 @@ pub fn run(
     let mut up_since: Option<Instant> = None;
     let mut tc_emitted = false;
 
-    log.line("entering poll loop");
+    log::info!("entering poll loop");
     while !SHOULD_EXIT.load(Ordering::SeqCst) {
         // Handle IPC commands
         if let Some(ipc) = &ipc {
@@ -306,29 +304,29 @@ pub fn run(
                     }
                 }
                 Ok(None) => {} // no client
-                Err(e) => log.line(format!("IPC error: {e}")),
+                Err(e) => log::error!("IPC error: {e}"),
             }
         }
 
         // Reload config (SIGHUP or IPC reload)
         if SHOULD_RELOAD.swap(false, Ordering::SeqCst) {
-            log.line("reload — re-reading UCI config");
+            log::info!("reload — re-reading UCI config");
             if let Ok(new_cfg) = DslConfig::load(overrides) {
                 if config_changed(&cfg, &new_cfg) {
-                    log.line("line params changed — reconfiguring");
+                    log::info!("line params changed — reconfiguring");
                     let _ = board.line_config_down();
                     let _ = board.line_config_up(new_cfg.modulation, new_cfg.annex, new_cfg.profiles);
                     cfg = new_cfg;
                     tc_emitted = false;
                 } else {
-                    log.line("no line-param changes");
+                    log::info!("no line-param changes");
                 }
             }
         }
 
         // Restart line (IPC restart-line — bounce without config change)
         if SHOULD_RESTART_LINE.swap(false, Ordering::SeqCst) {
-            log.line("restart-line — bouncing DSL line");
+            log::info!("restart-line — bouncing DSL line");
             let _ = board.line_config_down();
             std::thread::sleep(Duration::from_secs(1));
             let _ = board.line_config_up(cfg.modulation, cfg.annex, cfg.profiles);
@@ -355,7 +353,7 @@ pub fn run(
 
                 if Some(status) != last_status {
                     let event = link_status_to_event(status);
-                    log.line(format!("line state: {status:?} → {event:?}"));
+                    log::info!("line state: {status:?} → {event:?}");
                     if let Some(script) = notify_script {
                         hotplug::emit_status(script, event);
                     }
@@ -369,7 +367,7 @@ pub fn run(
                 }
             }
             Err(BoardError::Timeout) => {}
-            Err(e) => log.line(format!("poll error: {e}")),
+            Err(e) => log::error!("poll error: {e}"),
         }
 
         // Poll ubus (non-blocking)
@@ -381,7 +379,7 @@ pub fn run(
     }
 
     // 10. Clean shutdown
-    log.line("shutting down");
+    log::info!("shutting down");
     if let Some(script) = notify_script {
         hotplug::emit_status(script, LineEvent::Down);
     }

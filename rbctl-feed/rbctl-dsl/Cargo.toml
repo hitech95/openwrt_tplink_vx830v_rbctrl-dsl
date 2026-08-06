@@ -30,6 +30,9 @@ authors = ["rbctl-dsl contributors"]
 # libuci-sys 1.1.0 via the workspace path dep — no [patch.crates-io] needed.
 rust-uci = { git = "https://github.com/namib-project/rust-uci", rev = "3e7b6153" }
 libc = "0.2"
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
 ubus = { package = "ubus-zero", git = "https://github.com/pawelchcki/ubus-zero", rev = "68b55de7" }
 
 [profile.release]

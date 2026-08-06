@@ -50,7 +50,7 @@ pub fn emit_status(notify_script: &str, event: LineEvent) {
         .env("DSL_INTERFACE_STATUS", event.as_str())
         .spawn();
     if let Err(e) = result {
-        eprintln!("[hotplug] failed to exec {notify_script}: {e}");
+        log::error!("hotplug: failed to exec {notify_script}: {e}");
     }
 }
 
@@ -61,7 +61,7 @@ pub fn emit_tc_layer(notify_script: &str, xfer_mode: XferMode) {
         .env("DSL_TC_LAYER_STATUS", tc_layer_status(xfer_mode))
         .spawn();
     if let Err(e) = result {
-        eprintln!("[hotplug] failed to exec {notify_script}: {e}");
+        log::error!("hotplug: failed to exec {notify_script}: {e}");
     }
 }
 

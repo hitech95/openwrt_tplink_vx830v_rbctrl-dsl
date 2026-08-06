@@ -19,3 +19,6 @@ af_packet = { path = "../af_packet" }
 tinyln-rs = { path = "../tinyln_rs" }
 libc      = { workspace = true }
 rbctl_proto = { path = "../rbctl_proto" }
+log       = { workspace = true }
+env_logger = { workspace = true }
+clap      = { workspace = true }
