@@ -177,7 +177,8 @@ impl<T: Transport> Board<T> {
         let mut pl = vec![0x01];
         pl.extend_from_slice(&line);
         let r = self.request(1, &pl)?;
-        if r.len() >= 1 && r[0] != 0 {
+        let data = strip_echo(&r, 0x01);
+        if !data.is_empty() && data[0] != 0 {
             return Err(BoardError::BadResponse("status != 0"));
         }
         Ok(())
@@ -186,7 +187,8 @@ impl<T: Transport> Board<T> {
     /// **Opcode 3** — DSL line config down.
     pub fn line_config_down(&mut self) -> Result<(), BoardError> {
         let r = self.request(3, &[0x03])?;
-        if r.len() >= 1 && r[0] != 0 {
+        let data = strip_echo(&r, 0x03);
+        if !data.is_empty() && data[0] != 0 {
             return Err(BoardError::BadResponse("status != 0"));
         }
         Ok(())
@@ -195,31 +197,37 @@ impl<T: Transport> Board<T> {
     /// **Opcode 2** — get line object.
     pub fn get_line_obj(&mut self) -> Result<LineObj, BoardError> {
         let r = self.request(2, &[0x02])?;
-        if r.len() < 1 + 59 {
+        let data = strip_echo(&r, 0x02);
+        if data.len() < 59 {
             return Err(BoardError::BadResponse("line obj reply too short"));
         }
-        unpack::parse_line_obj(&r[1..]).map_err(BoardError::BadResponse)
+        unpack::parse_line_obj(data).map_err(BoardError::BadResponse)
     }
 
     /// **Opcode 4** — get channel stats.
     pub fn get_channel_stats(&mut self) -> Result<ChannelStats, BoardError> {
         let r = self.request(4, &[0x04])?;
-        if r.len() < 1 + 28 {
+        let data = strip_echo(&r, 0x04);
+        if data.len() < 28 {
             return Err(BoardError::BadResponse("channel stats reply too short"));
         }
-        unpack::parse_channel_stats(&r[1..]).map_err(BoardError::BadResponse)
+        unpack::parse_channel_stats(data).map_err(BoardError::BadResponse)
     }
 
     /// **Opcode 5** — ATM link add (init / VLAN discovery).
+    ///
+    /// Returns the board-assigned transport VLAN id. If the board returns
+    /// a short response (just a status ACK), falls back to the requested VLAN.
     pub fn atm_link_add(&mut self, params: &AtmLinkParams<'_>) -> Result<u16, BoardError> {
         let atm = pack::pack_atm_link(params);
         let mut pl = vec![0x05];
         pl.extend_from_slice(&atm);
         let r = self.request(5, &pl)?;
-        if r.len() < 1 + 0x14 {
-            return Err(BoardError::BadResponse("atm link add reply too short"));
+        let data = strip_echo(&r, 0x05);
+        if data.len() >= 0x14 {
+            return Ok(u16::from_be_bytes([data[0x12], data[0x13]]));
         }
-        Ok(u16::from_be_bytes([r[1 + 0x12], r[1 + 0x13]]))
+        Ok(params.vlan_id)
     }
 
     /// **Opcode 6** — ATM link delete.
@@ -232,6 +240,9 @@ impl<T: Transport> Board<T> {
     }
 
     /// **Opcode 15** — PTM/VDSL link add.
+    ///
+    /// Returns the board-assigned transport VLAN id. Falls back to the
+    /// requested VLAN on short responses.
     pub fn ptm_link_add(
         &mut self, tag_enable: u8, tag_vid: u16, tag_pri: u16, vlan_id: u16,
     ) -> Result<u16, BoardError> {
@@ -239,10 +250,11 @@ impl<T: Transport> Board<T> {
         let mut pl = vec![0x0F];
         pl.extend_from_slice(&ptm);
         let r = self.request(15, &pl)?;
-        if r.len() < 1 + 8 {
-            return Err(BoardError::BadResponse("ptm link add reply too short"));
+        let data = strip_echo(&r, 0x0F);
+        if data.len() >= 8 {
+            return Ok(u16::from_be_bytes([data[6], data[7]]));
         }
-        Ok(u16::from_be_bytes([r[1 + 6], r[1 + 7]]))
+        Ok(vlan_id)
     }
 
     /// **Opcode 16** — PTM/VDSL link delete.
@@ -257,6 +269,22 @@ impl<T: Transport> Board<T> {
     /// Convenience: poll line status.
     pub fn line_status(&mut self) -> Result<LinkStatus, BoardError> {
         Ok(self.get_line_obj()?.link_status)
+    }
+}
+
+// ── response helpers ─────────────────────────────────────────────────────
+
+/// Strip the echoed opcode byte if present.
+///
+/// The board inconsistently echoes the opcode as the first payload byte:
+/// op2 includes it (confirmed), op4/op5 do not (observed shorter responses).
+/// This helper detects the echo by checking if the first byte matches the
+/// opcode — if so, skip it. Otherwise treat the payload as raw data.
+fn strip_echo<'a>(payload: &'a [u8], opcode: u8) -> &'a [u8] {
+    if payload.first() == Some(&opcode) {
+        &payload[1..]
+    } else {
+        payload
     }
 }
 
@@ -542,5 +570,61 @@ mod tests {
         // the Board's checksum verification by checking that valid checksums pass
         let obj = board.get_line_obj();
         assert!(obj.is_ok());
+    }
+
+    // ── no-echo response tests (op4/op5 without payload_type prefix) ──
+
+    #[test]
+    fn op4_response_without_echo() {
+        let mut board = make_board();
+        // 28 bytes raw data, no opcode echo byte
+        let payload = vec![0u8; 28];
+        board.sock.set_response(4, payload);
+        let stats = board.get_channel_stats().unwrap();
+        assert_eq!(stats.receive_blocks, 0);
+    }
+
+    #[test]
+    fn op5_short_response_returns_requested_vlan() {
+        let mut board = make_board();
+        // Just a 4-byte status ACK, no VLAN echo
+        board.sock.set_response(5, vec![0x00, 0x00, 0x00, 0x00]);
+        let vlan = board.atm_link_add(&AtmLinkParams::default()).unwrap();
+        // Falls back to the requested VLAN (default is 0)
+        assert_eq!(vlan, 0);
+    }
+
+    #[test]
+    fn op5_short_response_with_nonzero_vlan() {
+        let mut board = make_board();
+        board.sock.set_response(5, vec![0x00, 0x00, 0x00, 0x00]);
+        let params = AtmLinkParams {
+            vlan_id: 2001, ..Default::default()
+        };
+        let vlan = board.atm_link_add(&params).unwrap();
+        assert_eq!(vlan, 2001);
+    }
+
+    #[test]
+    fn op15_short_response_returns_requested_vlan() {
+        let mut board = make_board();
+        board.sock.set_response(15, vec![0x00, 0x00, 0x00, 0x00]);
+        let vlan = board.ptm_link_add(0, 0, 0, 2001).unwrap();
+        assert_eq!(vlan, 2001);
+    }
+
+    #[test]
+    fn op1_ack_without_echo() {
+        let mut board = make_board();
+        // Just status=0, no opcode echo
+        board.sock.set_response(1, vec![0x00]);
+        assert!(board.line_config_up(Modulation::Vdsl2, Annex::B, Vdsl2Profiles::THIRTY_A).is_ok());
+    }
+
+    #[test]
+    fn strip_echo_logic() {
+        assert_eq!(strip_echo(&[0x04, 0xAA], 0x04), &[0xAA]);
+        assert_eq!(strip_echo(&[0x00, 0xAA], 0x04), &[0x00, 0xAA]);
+        assert_eq!(strip_echo(&[], 0x04), &[] as &[u8]);
     }
 }
