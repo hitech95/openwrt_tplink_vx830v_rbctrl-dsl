@@ -1,0 +1,22 @@
+[package]
+name = "rbctl_proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "rbctl-dsl — 0x88B5 board protocol core (checksum, frame, TX/RX payloads)"
+publish = false
+
+[lib]
+name = "rbctl_proto"
+path = "src/lib.rs"
+
+[dependencies]
+# CRC-16/ARC: poly 0x8005, init 0, refin=refout=true, xorout 0.
+# The crc crate (no_std) gives us the exact algorithm without hand-rolling
+# the nibble table from remote_board's g_awCrcTable.
+crc = "3"
+
+[dev-dependencies]
+# Used in doc examples / round-trip tests only.

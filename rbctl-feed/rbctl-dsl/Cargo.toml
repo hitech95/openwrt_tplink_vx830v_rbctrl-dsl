@@ -1,0 +1,41 @@
+# rbctl-dsl — Cargo workspace root.
+#
+# The daemon is cross-compiled via the OpenWrt SDK (`make package/rbctl-dsl/compile`),
+# which drives cargo through rust-package.mk. Only the `rbctl_dsl` crate is authored
+# here; all FFI/protocol crates come from the registry / git:
+#
+#   UCI     ← rust-uci (libuci-sys, links staged libuci via UCI_DIR)
+#   uloop   ← libubox  (libubox-sys, links staged libubox via LIBUBOX_DIR)
+#   ubus    ← ubus-zero (pure Rust, server-capable, links no .so)
+#
+# Phase 1 will add `crates/rbctl_proto` (pure-Rust 0x88B5 protocol core).
+[workspace]
+resolver = "2"
+members = ["crates/rbctl_proto", "crates/af_packet", "crates/tinyln_rs_sys", "crates/tinyln_rs", "crates/rbctl_dsl"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "GPL-2.0-only"
+authors = ["rbctl-dsl contributors"]
+
+[workspace.dependencies]
+# Pinned, shared versions across workspace members.
+#
+# rust-uci is pinned to the namib-project git HEAD rather than crates.io: the
+# registry still carries libuci-sys 1.0.5 (bindgen 0.58.1, which panics on
+# uci.h's anonymous union under clang ≥ 15). The repo has libuci-sys 1.1.0
+# (bindgen 0.72) which fixes it. The git dep pulls both rust-uci 0.1.6 and
+# libuci-sys 1.1.0 via the workspace path dep — no [patch.crates-io] needed.
+rust-uci = { git = "https://github.com/namib-project/rust-uci", rev = "3e7b6153" }
+libubox = "0.2"
+libc = "0.2"
+ubus = { package = "ubus-zero", git = "https://github.com/pawelchcki/ubus-zero", rev = "68b55de7" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
