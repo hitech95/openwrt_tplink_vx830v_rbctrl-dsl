@@ -215,8 +215,10 @@ impl<'a> Selftest<'a> {
     }
 
     fn test_uloop(&self) -> Result<String, String> {
-        let _u = libubox::uloop::Uloop::new().map_err(|e| format!("uloop_init: {e:?}"))?;
-        Ok("uloop_init OK".into())
+        // libubox uloop is not used — the daemon uses a Rust polling loop
+        // (thread::sleep) and ubus-zero is pure Rust. This test is a stub
+        // that confirms the selftest framework runs all 5 checks.
+        Ok("uloop not used (Rust polling loop)".into())
     }
 }
 

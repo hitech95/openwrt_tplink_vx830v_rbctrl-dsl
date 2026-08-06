@@ -5,8 +5,8 @@
 # here; all FFI/protocol crates come from the registry / git:
 #
 #   UCI     ← rust-uci (libuci-sys, links staged libuci via UCI_DIR)
-#   uloop   ← libubox  (libubox-sys, links staged libubox via LIBUBOX_DIR)
 #   ubus    ← ubus-zero (pure Rust, server-capable, links no .so)
+#   nl      ← tinyln-rs (links staged libnl-tiny via LIBNL_TINY_DIR)
 #
 # Phase 1 will add `crates/rbctl_proto` (pure-Rust 0x88B5 protocol core).
 [workspace]
@@ -29,7 +29,6 @@ authors = ["rbctl-dsl contributors"]
 # (bindgen 0.72) which fixes it. The git dep pulls both rust-uci 0.1.6 and
 # libuci-sys 1.1.0 via the workspace path dep — no [patch.crates-io] needed.
 rust-uci = { git = "https://github.com/namib-project/rust-uci", rev = "3e7b6153" }
-libubox = "0.2"
 libc = "0.2"
 ubus = { package = "ubus-zero", git = "https://github.com/pawelchcki/ubus-zero", rev = "68b55de7" }
 

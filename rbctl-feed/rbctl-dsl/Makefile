@@ -32,7 +32,6 @@ include $(TOPDIR)/feeds/packages/lang/rust/rust-package.mk
 # staged libuci / libubox / libnl-tiny (UCI_DIR / LIBUBOX_DIR / LIBNL_TINY_DIR
 # are honoured by libuci-sys, libubox-sys, and tinylibnl_sys respectively).
 export UCI_DIR:=$(STAGING_DIR)/usr
-export LIBUBOX_DIR:=$(STAGING_DIR)/usr
 export LIBNL_TINY_DIR:=$(STAGING_DIR)/usr
 
 # libuci-sys runs bindgen at build time, which invokes libclang. Without
@@ -58,7 +57,7 @@ define Package/rbctl-dsl
   SECTION:=net
   CATEGORY:=Network
   TITLE:=EcoNet xDSL board configuration daemon
-  DEPENDS:=$(RUST_ARCH_DEPENDS) +libuci +libubox +libnl-tiny
+  DEPENDS:=$(RUST_ARCH_DEPENDS) +libuci +libnl-tiny
   # No +libubus here: ubus-zero is pure Rust and links no shared library.
 endef
 

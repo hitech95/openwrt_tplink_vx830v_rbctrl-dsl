@@ -14,9 +14,8 @@ path = "src/main.rs"
 
 [dependencies]
 rust-uci  = { workspace = true }
-libubox   = { workspace = true }
 ubus      = { workspace = true }
 af_packet = { path = "../af_packet" }
 tinyln-rs = { path = "../tinyln_rs" }
-libc = { workspace = true }
+libc      = { workspace = true }
 rbctl_proto = { path = "../rbctl_proto" }
