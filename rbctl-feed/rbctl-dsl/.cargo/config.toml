@@ -1,0 +1,17 @@
+# Cargo config for rbctl-dsl.
+#
+# NOTE: the canonical build is `make package/rbctl-dsl/compile` inside the
+# OpenWrt SDK — that path is driven by rust-package.mk and does NOT read this
+# file. This file exists only for ad-hoc host inspection (e.g. `cargo check` on
+# pure-Rust crates, formatting, clippy).
+#
+# Cross-compiling the -sys crates from the host requires the SDK target sysroot
+# and is therefore left to the SDK build. Do not set `build.target` here — it
+# would break host-side `cargo check` of pure-Rust crates.
+
+[env]
+# Points the -sys build.rs at the staged headers/libs when running cargo manually.
+# The OpenWrt build overrides this with its own STAGING_DIR.
+# Set this to your OpenWrt SDK target sysroot, e.g.:
+#   STAGING_DIR = "/path/to/openwrt/staging_dir/target-aarch64_cortex-a53_musl"
+STAGING_DIR = "/path/to/openwrt/staging_dir/target-aarch64_cortex-a53_musl"

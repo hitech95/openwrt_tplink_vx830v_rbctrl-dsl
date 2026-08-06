@@ -1,0 +1,22 @@
+[package]
+name = "rbctl_dsl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "rbctl-dsl — EcoNet xDSL board configuration daemon (OpenWrt)"
+publish = false
+
+[[bin]]
+name = "rbctl-dsl"
+path = "src/main.rs"
+
+[dependencies]
+rust-uci  = { workspace = true }
+libubox   = { workspace = true }
+ubus      = { workspace = true }
+af_packet = { path = "../af_packet" }
+tinyln-rs = { path = "../tinyln_rs" }
+libc = { workspace = true }
+rbctl_proto = { path = "../rbctl_proto" }
