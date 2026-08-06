@@ -1,22 +1,20 @@
 //! Daemon main loop — ties together board control, UCI config, hotplug
-//! events, and the ubus `dsl` object into a single event loop.
+//! events, ubus `dsl` object, and IPC control socket into a single loop.
 //!
 //! ## Architecture
 //!
 //! ```text
 //! rbctl-dsl daemon
-//! ├── init: load UCI → open board → line_config_up → link_add → VLAN create
-//! ├── ubus: register "dsl" object (optional — degrades gracefully)
+//! ├── init: load UCI (+CLI overrides) → open board → line_config_up
+//! │         → link_add → VLAN create → bind IPC socket → register ubus
 //! └── loop (1 s):
+//!     ├── ipc.accept_one() → handle status/reload/restart/stop
 //!     ├── board.get_line_obj() → update shared state
 //!     ├── detect state transition → emit hotplug event
 //!     ├── ubus.poll_one() → serve "metrics" / "statistics"
-//!     ├── check SIGTERM → clean shutdown
-//!     └── check SIGHUP → reload UCI config
+//!     ├── check SIGTERM / SIGHUP
+//!     └── thread::sleep(1s)
 //! ```
-//!
-//! No threads — everything runs in the main thread. The ubus transport is
-//! non-blocking, and the board poll is synchronous with a short timeout.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -27,14 +25,16 @@ use rbctl_proto::unpack::LinkStatus;
 
 use crate::board::{Board, BoardError};
 use crate::hotplug::{self, LineEvent};
+use crate::ipc::{IpcListener, StatusSnapshot};
 use crate::logger::Logger;
-use crate::uci_cfg::{AtmConfig, DslConfig, XferMode};
+use crate::uci_cfg::{AtmConfig, CliOverrides, DslConfig, XferMode};
 use crate::ubus_obj;
 
 // ── signal flags ─────────────────────────────────────────────────────────
 
 static SHOULD_EXIT: AtomicBool = AtomicBool::new(false);
 static SHOULD_RELOAD: AtomicBool = AtomicBool::new(false);
+static SHOULD_RESTART_LINE: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn handle_sigterm(_sig: libc::c_int) {
     SHOULD_EXIT.store(true, Ordering::SeqCst);
@@ -59,7 +59,6 @@ fn install_signal_handlers() {
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
-/// Map board [`LinkStatus`] → hotplug [`LineEvent`].
 fn link_status_to_event(status: LinkStatus) -> LineEvent {
     match status {
         LinkStatus::Up => LineEvent::Up,
@@ -69,9 +68,6 @@ fn link_status_to_event(status: LinkStatus) -> LineEvent {
     }
 }
 
-/// Derive the parent physical interface from a VLAN interface name.
-///
-/// `lan0.500` → `lan0`; `eth0` → `eth0` (no VLAN suffix).
 fn parent_iface(iface: &str) -> &str {
     match iface.rfind('.') {
         Some(i) => &iface[..i],
@@ -79,7 +75,6 @@ fn parent_iface(iface: &str) -> &str {
     }
 }
 
-/// Build [`AtmLinkParams`] from config (or defaults).
 fn atm_params(atm: Option<&AtmConfig>, vlan_id: u16) -> AtmLinkParams<'static> {
     let a = atm.cloned().unwrap_or(AtmConfig {
         vpi: 8,
@@ -106,20 +101,14 @@ fn atm_params(atm: Option<&AtmConfig>, vlan_id: u16) -> AtmLinkParams<'static> {
     }
 }
 
-/// Create a VLAN sub-interface via `ip link` (idempotent — ignores "exists").
 fn create_vlan_iface(parent: &str, vlan_id: u16) -> Result<(), String> {
     let name = format!("{parent}.{vlan_id}");
     let output = std::process::Command::new("ip")
-        .args([
-            "link", "add", "link", parent,
-            "name", &name, "type", "vlan",
-            "id", &vlan_id.to_string(),
-        ])
+        .args(["link", "add", "link", parent, "name", &name, "type", "vlan", "id", &vlan_id.to_string()])
         .output()
         .map_err(|e| e.to_string())?;
 
     if output.status.success() {
-        // Bring it up
         let _ = std::process::Command::new("ip")
             .args(["link", "set", "up", "dev", &name])
             .output();
@@ -139,7 +128,6 @@ fn delete_vlan_iface(parent: &str, vlan_id: u16) {
         .output();
 }
 
-/// Connect to ubusd and register the `dsl` object. Returns `None` on failure.
 fn connect_ubus(
     obj: ubus::server::UbusObject,
 ) -> Option<ubus::server::UbusConnection<crate::transport::UnixUbusTransport>> {
@@ -154,28 +142,58 @@ fn config_changed(old: &DslConfig, new: &DslConfig) -> bool {
         || old.xfer_mode != new.xfer_mode
 }
 
+/// Build a [`StatusSnapshot`] from the current shared state.
+fn build_snapshot(state: &ubus_obj::SharedState, cfg: &DslConfig) -> StatusSnapshot {
+    let st = state.lock().unwrap();
+    match &st.line_obj {
+        Some(line) => {
+            let (state_str, state_num, up) = crate::ubus_obj::map_link_status(line.link_status);
+            StatusSnapshot {
+                state: state_str.into(),
+                state_num,
+                up,
+                uptime_secs: st.uptime_secs,
+                modulation: format!("{:?}", line.modulation_code),
+                annex: format!("{}", crate::ubus_obj::annex_string(line.annex_code)),
+                xfer_mode: format!("{:?}", cfg.xfer_mode),
+                down_rate: line.metrics.down_curr_rate,
+                up_rate: line.metrics.up_curr_rate,
+                down_snr: line.metrics.down_snr_margin,
+                up_snr: line.metrics.up_snr_margin,
+            }
+        }
+        None => StatusSnapshot {
+            modulation: format!("{:?}", cfg.modulation),
+            annex: format!("{:?}", cfg.annex),
+            xfer_mode: format!("{:?}", cfg.xfer_mode),
+            ..Default::default()
+        },
+    }
+}
+
 // ── daemon entry point ───────────────────────────────────────────────────
 
 /// Run the daemon. Returns process exit code.
-///
-/// - `config_iface`: management VLAN interface (e.g. `lan0.500`)
-/// - `notify_script`: path to `-n` hotplug notify script (e.g. `/sbin/dsl_notify.sh`)
-/// - `transport_vlan`: board transport VLAN id (e.g. 2001)
-pub fn run(config_iface: &str, notify_script: Option<&str>, transport_vlan: u16) -> i32 {
+pub fn run(
+    config_iface: &str,
+    notify_script: Option<&str>,
+    transport_vlan: u16,
+    overrides: &CliOverrides,
+) -> i32 {
     let log = Logger::new("daemon");
     install_signal_handlers();
 
-    // 1. Load UCI config
-    let mut cfg = match DslConfig::load() {
+    // 1. Load config (UCI + CLI overrides)
+    let mut cfg = match DslConfig::load(overrides) {
         Ok(c) => {
             log.line(format!(
-                "UCI: mod={:?} annex={:?} profiles=0x{:x} xfer={:?}",
+                "config: mod={:?} annex={:?} profiles=0x{:x} xfer={:?}",
                 c.modulation, c.annex, c.profiles.bitmask(), c.xfer_mode
             ));
             c
         }
         Err(e) => {
-            log.line(format!("UCI load failed ({e}), using defaults"));
+            log.line(format!("config load failed ({e}), using defaults"));
             DslConfig::default()
         }
     };
@@ -202,7 +220,7 @@ pub fn run(config_iface: &str, notify_script: Option<&str>, transport_vlan: u16)
         log.fail("line_config_up", &e);
     }
 
-    // 4. Add data-plane link (op 5 ATM / op 15 PTM)
+    // 4. Add data-plane link
     let vlan = match cfg.xfer_mode {
         XferMode::Ptm => {
             log.line(format!("ptm_link_add: vlan={transport_vlan}"));
@@ -222,14 +240,26 @@ pub fn run(config_iface: &str, notify_script: Option<&str>, transport_vlan: u16)
     };
     log.line(format!("board assigned transport vlan: {vlan}"));
 
-    // 5. Create host-side transport VLAN interface
+    // 5. Create host-side transport VLAN
     let parent = parent_iface(config_iface);
     match create_vlan_iface(parent, vlan) {
         Ok(()) => log.line(format!("created {parent}.{vlan}")),
         Err(e) => log.line(format!("VLAN create {parent}.{vlan}: {e} (may already exist)")),
     }
 
-    // 6. Register ubus object (optional — degrades gracefully)
+    // 6. Bind IPC socket
+    let ipc = match IpcListener::bind(crate::ipc::SOCK_PATH) {
+        Ok(l) => {
+            log.line(format!("IPC socket at {}", crate::ipc::SOCK_PATH));
+            Some(l)
+        }
+        Err(e) => {
+            log.line(format!("IPC bind failed: {e} — control socket disabled"));
+            None
+        }
+    };
+
+    // 7. Register ubus object (optional)
     let state = ubus_obj::new_shared_state();
     {
         let mut st = state.lock().unwrap();
@@ -247,12 +277,12 @@ pub fn run(config_iface: &str, notify_script: Option<&str>, transport_vlan: u16)
         }
     };
 
-    // 7. Emit initial TC-layer status
+    // 8. Emit initial TC-layer status
     if let Some(script) = notify_script {
         hotplug::emit_tc_layer(script, cfg.xfer_mode);
     }
 
-    // 8. Main loop
+    // 9. Main loop
     let poll_interval = Duration::from_secs(1);
     let mut last_status: Option<LinkStatus> = None;
     let mut up_since: Option<Instant> = None;
@@ -260,16 +290,34 @@ pub fn run(config_iface: &str, notify_script: Option<&str>, transport_vlan: u16)
 
     log.line("entering poll loop");
     while !SHOULD_EXIT.load(Ordering::SeqCst) {
-        // Reload config on SIGHUP
+        // Handle IPC commands
+        if let Some(ipc) = &ipc {
+            let snap = build_snapshot(&state, &cfg);
+            match ipc.accept_one(&snap) {
+                Ok(Some(action)) => {
+                    if action.should_reload {
+                        SHOULD_RELOAD.store(true, Ordering::SeqCst);
+                    }
+                    if action.should_restart_line {
+                        SHOULD_RESTART_LINE.store(true, Ordering::SeqCst);
+                    }
+                    if action.should_stop {
+                        SHOULD_EXIT.store(true, Ordering::SeqCst);
+                    }
+                }
+                Ok(None) => {} // no client
+                Err(e) => log.line(format!("IPC error: {e}")),
+            }
+        }
+
+        // Reload config (SIGHUP or IPC reload)
         if SHOULD_RELOAD.swap(false, Ordering::SeqCst) {
-            log.line("SIGHUP — reloading UCI config");
-            if let Ok(new_cfg) = DslConfig::load() {
+            log.line("reload — re-reading UCI config");
+            if let Ok(new_cfg) = DslConfig::load(overrides) {
                 if config_changed(&cfg, &new_cfg) {
                     log.line("line params changed — reconfiguring");
                     let _ = board.line_config_down();
-                    let _ = board.line_config_up(
-                        new_cfg.modulation, new_cfg.annex, new_cfg.profiles,
-                    );
+                    let _ = board.line_config_up(new_cfg.modulation, new_cfg.annex, new_cfg.profiles);
                     cfg = new_cfg;
                     tc_emitted = false;
                 } else {
@@ -278,19 +326,26 @@ pub fn run(config_iface: &str, notify_script: Option<&str>, transport_vlan: u16)
             }
         }
 
+        // Restart line (IPC restart-line — bounce without config change)
+        if SHOULD_RESTART_LINE.swap(false, Ordering::SeqCst) {
+            log.line("restart-line — bouncing DSL line");
+            let _ = board.line_config_down();
+            std::thread::sleep(Duration::from_secs(1));
+            let _ = board.line_config_up(cfg.modulation, cfg.annex, cfg.profiles);
+            tc_emitted = false;
+        }
+
         // Poll board (op 2)
         match board.get_line_obj() {
             Ok(line) => {
                 let status = line.link_status;
 
-                // Track uptime
                 if status == LinkStatus::Up && up_since.is_none() {
                     up_since = Some(Instant::now());
                 } else if status != LinkStatus::Up {
                     up_since = None;
                 }
 
-                // Update shared state for ubus
                 {
                     let mut st = state.lock().unwrap();
                     st.line_obj = Some(line.clone());
@@ -298,7 +353,6 @@ pub fn run(config_iface: &str, notify_script: Option<&str>, transport_vlan: u16)
                     st.xfer_mode = Some(cfg.xfer_mode);
                 }
 
-                // Emit hotplug events on transitions
                 if Some(status) != last_status {
                     let event = link_status_to_event(status);
                     log.line(format!("line state: {status:?} → {event:?}"));
@@ -314,12 +368,8 @@ pub fn run(config_iface: &str, notify_script: Option<&str>, transport_vlan: u16)
                     last_status = Some(status);
                 }
             }
-            Err(BoardError::Timeout) => {
-                // Board didn't respond in time — keep polling
-            }
-            Err(e) => {
-                log.line(format!("poll error: {e}"));
-            }
+            Err(BoardError::Timeout) => {}
+            Err(e) => log.line(format!("poll error: {e}")),
         }
 
         // Poll ubus (non-blocking)
@@ -330,13 +380,14 @@ pub fn run(config_iface: &str, notify_script: Option<&str>, transport_vlan: u16)
         std::thread::sleep(poll_interval);
     }
 
-    // 9. Clean shutdown
+    // 10. Clean shutdown
     log.line("shutting down");
     if let Some(script) = notify_script {
         hotplug::emit_status(script, LineEvent::Down);
     }
     let _ = board.line_config_down();
     delete_vlan_iface(parent, vlan);
+    let _ = std::fs::remove_file(crate::ipc::SOCK_PATH);
 
     0
 }

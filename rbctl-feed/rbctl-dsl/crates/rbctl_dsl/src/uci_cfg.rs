@@ -148,51 +148,70 @@ pub fn parse_payload(s: &str) -> Result<AtmLinkType, ConfigError> {
     }
 }
 
+// ── CLI overrides ────────────────────────────────────────────────────────
+
+/// Optional CLI parameter overrides. Each field takes priority over UCI
+/// when present; UCI takes priority over built-in defaults.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct CliOverrides {
+    pub annex: Option<String>,
+    pub line_mode: Option<String>,
+    pub tone: Option<String>,
+    pub xfer_mode: Option<String>,
+    pub vpi: Option<String>,
+    pub vci: Option<String>,
+    pub encaps: Option<String>,
+    pub payload: Option<String>,
+}
+
 // ── UCI loader (target-only, links libuci) ───────────────────────────────
 
 impl DslConfig {
-    /// Load DSL config from the default UCI context (`/etc/config/network`).
-    pub fn load() -> Result<Self, ConfigError> {
+    /// Load DSL config from `/etc/config/network`, applying CLI overrides.
+    pub fn load(overrides: &CliOverrides) -> Result<Self, ConfigError> {
         let mut uci = rust_uci::Uci::new().map_err(|e| ConfigError(e.to_string()))?;
-        Self::load_from_uci(&mut uci)
+        Self::build(&mut uci, overrides)
     }
 
     /// Load from a specific UCI config dir (for testing).
-    pub fn load_from_dir(config_dir: &str) -> Result<Self, ConfigError> {
+    pub fn load_from_dir(config_dir: &str, overrides: &CliOverrides) -> Result<Self, ConfigError> {
         let mut uci = rust_uci::Uci::new().map_err(|e| ConfigError(e.to_string()))?;
         uci.set_config_dir(config_dir).map_err(|e| ConfigError(e.to_string()))?;
-        Self::load_from_uci(&mut uci)
+        Self::build(&mut uci, overrides)
     }
 
-    /// Load DSL config from an existing [`rust_uci::Uci`] context.
-    pub fn load_from_uci(uci: &mut rust_uci::Uci) -> Result<Self, ConfigError> {
-        let get = |uci: &mut rust_uci::Uci, key: &str| -> String {
+    /// Build config from UCI + CLI overrides.
+    ///
+    /// Priority: CLI override > UCI value > built-in default.
+    fn build(uci: &mut rust_uci::Uci, ov: &CliOverrides) -> Result<Self, ConfigError> {
+        let uci_get = |uci: &mut rust_uci::Uci, key: &str| -> String {
             uci.get_opt(key).unwrap_or(None).unwrap_or_default()
         };
+        let pick = |ov_val: &Option<String>, uci_val: String, default: &str| -> String {
+            ov_val.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| {
+                if uci_val.is_empty() { default.into() } else { uci_val }
+            })
+        };
 
-        let annex_str = get(uci, "network.dsl.annex");
-        let line_mode = get(uci, "network.dsl.line_mode");
-        let tone = get(uci, "network.dsl.tone");
-        let xfer_mode_str = get(uci, "network.dsl.xfer_mode");
+        let annex_str   = pick(&ov.annex,     uci_get(uci, "network.dsl.annex"),     "b");
+        let line_mode   = pick(&ov.line_mode, uci_get(uci, "network.dsl.line_mode"), "vdsl");
+        let tone        = pick(&ov.tone,      uci_get(uci, "network.dsl.tone"),      "av");
+        let xfer_str    = pick(&ov.xfer_mode, uci_get(uci, "network.dsl.xfer_mode"), "ptm");
 
-        let modulation = parse_modulation(&line_mode, &xfer_mode_str)?;
+        let modulation = parse_modulation(&line_mode, &xfer_str)?;
         let annex = parse_annex(&annex_str)?;
         let profiles = parse_tone(&tone)?;
-        let xfer_mode = parse_xfer_mode(&xfer_mode_str)?;
+        let xfer_mode = parse_xfer_mode(&xfer_str)?;
 
         let atm = if xfer_mode == XferMode::Atm {
-            let vpi: u8 = get(uci, "network.@atm-bridge[0].vpi")
-                .parse()
-                .unwrap_or(8);
-            let vci: u16 = get(uci, "network.@atm-bridge[0].vci")
-                .parse()
-                .unwrap_or(35);
-            let encaps = get(uci, "network.@atm-bridge[0].encaps");
-            let payload = get(uci, "network.@atm-bridge[0].payload");
+            let vpi_s  = pick(&ov.vpi,  uci_get(uci, "network.@atm-bridge[0].vpi"),  "8");
+            let vci_s  = pick(&ov.vci,  uci_get(uci, "network.@atm-bridge[0].vci"),  "35");
+            let encap  = pick(&ov.encaps, uci_get(uci, "network.@atm-bridge[0].encaps"), "llc");
+            let payload = pick(&ov.payload, uci_get(uci, "network.@atm-bridge[0].payload"), "bridged");
             Some(AtmConfig {
-                vpi,
-                vci,
-                encap: parse_encaps(&encaps)?,
+                vpi: vpi_s.parse().unwrap_or(8),
+                vci: vci_s.parse().unwrap_or(35),
+                encap: parse_encaps(&encap)?,
                 link_type: parse_payload(&payload)?,
                 qos: AtmQos::Ubr,
                 pcr: 0,
@@ -207,6 +226,8 @@ impl DslConfig {
             profiles,
             xfer_mode,
             atm,
+        })
+    }
         })
     }
 }

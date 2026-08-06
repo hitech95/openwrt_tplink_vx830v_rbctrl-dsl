@@ -117,7 +117,7 @@ fn build_metrics_reply(st: &DslState) -> Result<BlobMsgTable, UbusError> {
 }
 
 /// Map board [`LinkStatus`] → (LuCI state string, LSTATE_MAP enum, up bool).
-fn map_link_status(status: LinkStatus) -> (&'static str, i32, bool) {
+pub fn map_link_status(status: LinkStatus) -> (&'static str, i32, bool) {
     match status {
         LinkStatus::NoSignal => ("Silent", lstate::SILENT, false),
         LinkStatus::EstablishingLink => ("Handshake", lstate::HANDSHAKE, false),
@@ -135,7 +135,7 @@ fn mode_string(line: &LineObj) -> String {
     }
 }
 
-fn annex_string(code: u8) -> &'static str {
+pub fn annex_string(code: u8) -> &'static str {
     match code {
         0 => "A",
         1 => "B",
