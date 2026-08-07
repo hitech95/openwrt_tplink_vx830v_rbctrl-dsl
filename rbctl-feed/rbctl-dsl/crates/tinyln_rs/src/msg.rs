@@ -60,8 +60,13 @@ impl NlMsg {
         })
     }
 
-    /// Append a typed value (must be `#[repr(C)]` / POD).
-    pub fn append_struct<T>(&self, val: &T) -> io::Result<()> {
+    /// Append a typed value.
+    ///
+    /// `T` must be `Copy` (POD / `#[repr(C)]`) so that reinterpreting its bytes
+    /// as a raw byte slice is sound — types with drop glue or owning pointers
+    /// (e.g. `Vec`) are rejected at compile time. Padding bytes are copied as
+    /// stored (standard C-struct serialization).
+    pub fn append_struct<T: Copy>(&self, val: &T) -> io::Result<()> {
         let data = unsafe {
             std::slice::from_raw_parts(val as *const T as *const u8, std::mem::size_of::<T>())
         };
@@ -85,7 +90,10 @@ impl NlMsg {
     }
 
     /// Mutably borrow the `nlmsghdr` (for setting flags etc.).
-    pub fn header_mut(&self) -> &mut nlmsghdr {
+    ///
+    /// Takes `&mut self` so the borrow checker prevents aliasing `&mut` with
+    /// concurrent `&self` reads — deriving `&mut` from `&self` would be UB.
+    pub fn header_mut(&mut self) -> &mut nlmsghdr {
         unsafe { &mut *(*self.ptr).nm_nlh }
     }
 

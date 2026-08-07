@@ -65,7 +65,7 @@ impl RtnlLink {
     fn alloc_msg(&mut self, cmd: i32) -> NlMsg {
         let ptr = unsafe { tinyln_rs_sys::unl_rtnl_msg(&mut self.unl, cmd, false) };
         assert!(!ptr.is_null(), "unl_rtnl_msg returned NULL");
-        let msg = NlMsg::from_ptr(ptr);
+        let mut msg = NlMsg::from_ptr(ptr);
         // unl_rtnl_msg sets flags=0; set NLM_F_REQUEST for all operations.
         msg.header_mut().nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
         msg
@@ -84,16 +84,18 @@ impl RtnlLink {
         let name = format!("{parent}.{vid}");
         let parent_idx = ifindex(parent)?;
 
-        let msg = self.alloc_msg(RTM_NEWLINK as i32);
+        let mut msg = self.alloc_msg(RTM_NEWLINK as i32);
         msg.header_mut().nlmsg_flags |= NLM_F_CREATE | NLM_F_EXCL;
         msg.append_struct(&build_ifi(0, 0, 0))?;
 
         attr::put_string(&msg, IFLA_IFNAME as i32, &name);
         attr::put_u32(&msg, IFLA_LINK as i32, parent_idx as u32);
 
-        let li = attr::nest_start(&msg, IFLA_LINKINFO as i32);
+        let li = attr::nest_start(&msg, IFLA_LINKINFO as i32)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "nest_start IFLA_LINKINFO"))?;
         attr::put_string(&msg, IFLA_INFO_KIND as i32, "vlan");
-        let data = attr::nest_start(&msg, IFLA_INFO_DATA as i32);
+        let data = attr::nest_start(&msg, IFLA_INFO_DATA as i32)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "nest_start IFLA_INFO_DATA"))?;
         attr::put_u16(&msg, IFLA_VLAN_ID as i32, vid);
         attr::nest_end(&msg, data);
         attr::nest_end(&msg, li);
