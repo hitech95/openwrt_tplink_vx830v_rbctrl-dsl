@@ -235,6 +235,14 @@ pub fn run(
         return 1;
     }
 
+    // 1c. Warn if ATM-specific options given with PTM mode (or vice versa)
+    if cfg.xfer_mode == XferMode::Ptm && cfg.atm.is_some() {
+        log::warn!("ATM config present but xfer_mode=ptm — ATM params ignored");
+    }
+    if cfg.xfer_mode == XferMode::Atm && cfg.atm.is_none() {
+        log::warn!("xfer_mode=atm but no atm-bridge section found — using defaults (vpi=8 vci=35 llc bridged)");
+    }
+
     // Compute transport VLAN id from base index
     let transport_vlan = cfg.transport_vlan_base as u16 + 2000;
 

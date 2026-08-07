@@ -101,7 +101,7 @@ struct DaemonArgs {
     sra: Option<bool>,
 
     /// Override transport VLAN base index (0–7, VLAN id = base + 2000)
-    #[arg(long)]
+    #[arg(short = 't', long)]
     transport_vlan: Option<u8>,
 }
 
