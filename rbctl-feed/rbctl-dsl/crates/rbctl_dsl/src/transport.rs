@@ -104,8 +104,11 @@ impl Transport for UnixUbusTransport {
     }
 
     fn wait_recv(&mut self) {
-        // Yield the CPU between non-blocking recv() polls. The real event loop
-        // (Phase 3) drives this from uloop instead of sleeping.
+        // Yield the CPU between non-blocking recv() polls. This is a
+        // placeholder: there is no event loop wiring ubus into the daemon's
+        // single-threaded poll loop yet (see the "OPEN ARCHITECTURE POINT"
+        // comment in daemon.rs). Until that lands, we sleep briefly so the
+        // handshake loops don't spin.
         thread::sleep(Duration::from_millis(1));
     }
 }

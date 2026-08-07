@@ -349,6 +349,26 @@ pub fn run(
     }
 
     // 9. Main loop
+    //
+    // ┌─────────────────────────────────────────────────────────────────┐
+    // │ OPEN ARCHITECTURE POINT — single-threaded poll loop             │
+    // │                                                                 │
+    // │ This loop is fully sequential: IPC accept → board poll (op 2)   │
+    // │ → ubus poll → sleep(1 s). A blocking board poll can therefore   │
+    // │ stall IPC and ubus responsiveness: when the board is silent,    │
+    // │ `board.get_line_obj()` waits up to `timeout × (retries+1)`      │
+    // │ ≈ 2 s × 4 = 8 s per iteration before giving up. During that    │
+    // │ window `rbctl-dsl status/stop` (IPC) and `ubus call dsl ...`    │
+    // │ are not served. The ubus transport (`transport.rs::wait_recv`)  │
+    // │ has the same root cause — it sleeps 1 ms because nothing here   │
+    // │ drives a real event loop.                                       │
+    // │                                                                 │
+    // │ Resolving this is deferred: the daemon should move to a         │
+    // │ multi-thread model with a dedicated board I/O thread, a shared  │
+    // │ state queue, and a bounded per-request timeout that is short    │
+    // │ enough (relative to the IPC/ubus latency budget) that control   │
+    // │ paths stay responsive even when the board stops responding.     │
+    // └─────────────────────────────────────────────────────────────────┘
     let poll_interval = Duration::from_secs(1);
     let mut last_status: Option<LinkStatus> = None;
     let mut up_since: Option<Instant> = None;
