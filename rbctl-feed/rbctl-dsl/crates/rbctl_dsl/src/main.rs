@@ -45,7 +45,7 @@ enum Command {
 #[derive(clap::Args)]
 struct CommonArgs {
     /// Management VLAN interface
-    #[arg(short, long, default_value = "lan0.500")]
+    #[arg(short = 'i', long, default_value = "lan0.500")]
     config_iface: String,
 }
 
@@ -53,7 +53,7 @@ struct CommonArgs {
 #[derive(clap::Args)]
 struct DaemonArgs {
     /// Management VLAN interface
-    #[arg(short, long, default_value = "lan0.500")]
+    #[arg(short = 'i', long, default_value = "lan0.500")]
     config_iface: String,
 
     /// Hotplug notify script path
