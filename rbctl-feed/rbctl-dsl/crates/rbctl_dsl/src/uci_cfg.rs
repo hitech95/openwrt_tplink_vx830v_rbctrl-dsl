@@ -228,8 +228,6 @@ impl DslConfig {
             atm,
         })
     }
-        })
-    }
 }
 
 impl Default for DslConfig {

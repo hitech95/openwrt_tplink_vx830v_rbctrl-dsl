@@ -83,21 +83,15 @@ fn atm_params(atm: Option<&AtmConfig>, vlan_id: u16) -> AtmLinkParams<'static> {
         qos: AtmQos::Ubr,
         pcr: 0,
     });
-    AtmLinkParams {
-        vpi: a.vpi,
-        vci: a.vci,
-        encap: a.encap,
-        link_type: a.link_type,
-        qos: a.qos,
-        pcr: a.pcr,
-        scr: 0,
-        mbs: 0,
-        vlan_id,
-        tag_enable: 0,
-        tag_vid: 0xffff,
-        tag_pri: 0xff,
-        _phantom: std::marker::PhantomData,
-    }
+    let mut p = AtmLinkParams::default();
+    p.vpi = a.vpi;
+    p.vci = a.vci;
+    p.encap = a.encap;
+    p.link_type = a.link_type;
+    p.qos = a.qos;
+    p.pcr = a.pcr;
+    p.vlan_id = vlan_id;
+    p
 }
 
 fn create_vlan_iface(parent: &str, vlan_id: u16) -> Result<(), String> {
