@@ -72,10 +72,18 @@ endef
 define Package/rbctl-dsl/install
 	$(INSTALL_DIR) $(1)/usr/sbin
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/bin/rbctl-dsl $(1)/usr/sbin/
+	# init script
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/dsl_control $(1)/etc/init.d/dsl_control
+	# notify script (fork+exec'd by the daemon on every state transition)
 	$(INSTALL_DIR) $(1)/sbin
 	$(INSTALL_BIN) ./files/dsl_notify.sh $(1)/sbin/dsl_notify.sh
+	# LED hotplug handler — drives the led_dsl UCI LED on HANDSHAKE/TRAINING/UP/DOWN
+	$(INSTALL_DIR) $(1)/etc/hotplug.d/dsl
+	$(INSTALL_BIN) ./files/led_dsl.sh $(1)/etc/hotplug.d/dsl/led_dsl.sh
+	# first-boot UCI defaults — generates network.dsl + network.atm sections
+	$(INSTALL_DIR) $(1)/etc/uci-defaults
+	$(INSTALL_BIN) ./files/dsl_defaults $(1)/etc/uci-defaults/dsl_defaults
 endef
 
 $(eval $(call RustBinPackage,rbctl-dsl))

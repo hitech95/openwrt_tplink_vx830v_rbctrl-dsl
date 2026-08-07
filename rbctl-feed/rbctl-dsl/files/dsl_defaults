@@ -1,0 +1,49 @@
+#!/bin/sh
+#
+# dsl_defaults — first-boot UCI generation for the EcoNet xDSL board.
+#
+# Creates network.dsl and (for ATM) network.atm sections if they don't
+# already exist.  Runs once via /etc/uci-defaults/.
+#
+# The daemon (rbctl-dsl) reads these sections on startup and on SIGHUP
+# reload.  Operators can override any value via UCI afterwards.
+
+. /lib/functions.sh
+. /lib/functions/uci-defaults.sh
+
+# ── DSL section ──────────────────────────────────────────────────────
+# Only generate if the section doesn't exist yet.
+if ! uci -q get network.dsl >/dev/null 2>&1; then
+	uci -q batch <<-EOF
+		set network.dsl='dsl'
+		set network.dsl.annex='b'
+		set network.dsl.line_mode='vdsl'
+		set network.dsl.tone='av'
+		set network.dsl.xfer_mode='ptm'
+		set network.dsl.bitswap='1'
+		set network.dsl.sra='1'
+		set network.dsl.transport_vlan='0'
+		set network.dsl.config_iface='lan0.500'
+	EOF
+fi
+
+# ── ATM bridge section (only if xfer_mode=atm) ───────────────────────
+# Pre-generate it so it's ready if the operator switches to ATM.
+xfer_mode="$(uci -q get network.dsl.xfer_mode)"
+case "$xfer_mode" in
+	atm|"")
+		if ! uci -q get network.atm >/dev/null 2>&1; then
+			uci -q batch <<-EOF
+				set network.atm='atm-bridge'
+				set network.atm.vpi='8'
+				set network.atm.vci='35'
+				set network.atm.encaps='llc'
+				set network.atm.payload='bridged'
+			EOF
+		fi
+		;;
+esac
+
+uci -q commit network
+
+exit 0
