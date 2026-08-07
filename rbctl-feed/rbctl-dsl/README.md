@@ -21,22 +21,50 @@ The `.apk` declares `+libuci +libubox +libnl-tiny`. The ubus stack is pure Rust
 ## Usage
 
 ```
-rbctl-dsl [--config-iface <iface>] [--selftest] [--sniff]
+rbctl-dsl <command> [options]
 ```
 
-| Flag | Description |
-|------|-------------|
+The CLI is subcommand-based. Without a running daemon, `selftest` and `sniff`
+are the useful modes; `status` / `reload` / `restart-line` / `stop` talk to a
+running daemon over its IPC socket.
+
+| Command | Description |
+|---------|-------------|
+| `daemon` | Start the configuration daemon (foreground) |
+| `status` | Print live line state and metrics from the running daemon |
+| `reload` | Tell the running daemon to reload UCI config |
+| `restart-line` | Bounce the DSL line (down then up) on the running daemon |
+| `stop` | Shut down the running daemon |
+| `selftest` | Exercise socket + VLAN + board opcodes, then exit |
+| `sniff` | Passive listener for `0x88B5` / `0x88B6` frames |
+
+Common options for `daemon` / `selftest` / `sniff`:
+
+| Option | Description |
+|--------|-------------|
 | `-i, --config-iface <iface>` | Management VLAN interface (default: `lan0.500`) |
-| `--selftest` | Exercise socket + VLAN + board opcodes, capture frames, exit |
-| `--sniff` | Passive listener for `0x88B5`/`0x88B6` frames |
+
+`daemon` additionally accepts `--notify <path>`, `--syslog`, and UCI overrides
+(`--annex`, `--line-mode`, `--tone`, `--xfer-mode`, `--vpi`, `--vci`,
+`--encaps`, `--payload`, `--bitswap`, `--sra`, `-t/--transport-vlan`).
 
 ### Selftest
 
 Brings up the interface, creates/deletes a test VLAN, sends all board opcodes,
-and captures TX/RX frames to `/tmp/rbctl-capture/`:
+and logs the responses:
 
 ```sh
-rbctl-dsl --selftest --config-iface lan0.500
+rbctl-dsl selftest --config-iface lan0.500
+```
+
+### Sniff
+
+Live frame inspector: opens the interface with `ETH_P_ALL` and prints a
+hex+ascii dump of every `0x88B5` / `0x88B6` frame, tagged `IN`/`OUT` by
+direction. Run until interrupted with Ctrl+C:
+
+```sh
+rbctl-dsl sniff --config-iface lan0.500
 ```
 
 ## Workspace layout
