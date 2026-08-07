@@ -137,10 +137,9 @@ cross-check (every multi-byte field's swap offset matches the serializer output)
 **Bonus:** resolved the frame/payload boundary — `bPayload_type` (offset `0x18`)
 is payload byte 0, not a header field; `wPayload_len` = descriptor length.
 
-> Two DSL bytes (`[2]`,`[3]`, from TR-181 obj `+0x2c9`/`+0x2ca`) have TBD
-> semantics — they're passed through verbatim. Their meaning surfaces in P2
-> (same struct is read back in the opcode-2 reply) or from a capture. They do
-> not block implementation (default `0`).
+> Bytes `[2]`/`[3]` resolved: **`X_TP_BitswapEnable`** and **`X_TP_SRAEnable`**
+> (0/1). Confirmed via `oal_dsl_lineObjToMsg` + `rsl_dslLine_checkParamValid` +
+> web UI `dslcfg.htm`. TX-only — not echoed in opcode-2 response.
 
 ---
 
