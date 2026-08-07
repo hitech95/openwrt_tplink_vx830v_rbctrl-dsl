@@ -5,6 +5,7 @@ mod daemon;
 mod hotplug;
 mod ipc;
 mod log_init;
+mod pcap;
 mod selftest;
 mod transport;
 mod ubus_obj;
@@ -38,8 +39,8 @@ enum Command {
     Stop,
     /// Exercise socket + VLAN + board opcodes, then exit
     Selftest(CommonArgs),
-    /// Listen for 0x88B5 / 0x88B6 frames (passive, no send). Optionally dump
-    /// captured frames to a directory with `--dump <DIR>`.
+    /// Listen for 0x88B5 / 0x88B6 frames (passive, no send). Optionally write
+    /// captured frames to a pcap file with `--dump <FILE>`.
     Sniff(SniffArgs),
 }
 
@@ -57,9 +58,9 @@ struct SniffArgs {
     #[command(flatten)]
     common: CommonArgs,
 
-    /// Dump each captured 0x88B5 / 0x88B6 frame as a `.bin` file under `DIR`.
-    /// Files are named `<n>-<in|out>-<ethertype>.bin`, sorted by capture order.
-    #[arg(long, value_name = "DIR")]
+    /// Write captured 0x88B5 / 0x88B6 frames to `FILE` as a pcap capture
+    /// (`LINKTYPE_ETHERNET`, openable directly in Wireshark / tcpdump).
+    #[arg(long, value_name = "FILE")]
     dump: Option<String>,
 }
 

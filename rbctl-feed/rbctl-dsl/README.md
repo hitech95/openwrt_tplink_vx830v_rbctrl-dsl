@@ -67,11 +67,11 @@ direction. Run until interrupted with Ctrl+C:
 rbctl-dsl sniff --config-iface lan0.500
 ```
 
-Optionally dump each captured frame as a raw `.bin` file (created under the
-given directory, named `<n>-<in|out>-<ethertype>.bin`):
+Optionally write captured frames to a pcap file (`LINKTYPE_ETHERNET`,
+readable directly by Wireshark / tcpdump):
 
 ```sh
-rbctl-dsl sniff -i lan0.500 --dump /tmp/rbctl-capture
+rbctl-dsl sniff -i lan0.500 --dump /tmp/rbctl.pcap
 ```
 
 ## Workspace layout

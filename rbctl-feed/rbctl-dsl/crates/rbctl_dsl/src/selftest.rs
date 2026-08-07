@@ -210,11 +210,11 @@ impl Selftest {
 /// direction of traffic. Reuses [`af_packet::RawSocket`] so all of the
 /// `AF_PACKET` plumbing lives in one place.
 ///
-/// When `dump_dir` is `Some`, each captured management frame is also written as
-/// a raw `.bin` file under that directory (created if missing). This is the
-/// only frame-to-file path in the daemon — it lives here in the debug sniffer,
-/// never on the `Board` request hot path.
-pub fn sniff(config_iface: &str, dump_dir: Option<&str>) {
+/// When `dump_file` is `Some`, each captured management frame is also appended
+/// to that path as a pcap capture (`LINKTYPE_ETHERNET`, Wireshark-readable) —
+/// see [`crate::pcap`]. This is the only frame-to-file path in the daemon; it
+/// lives here in the debug sniffer, never on the `Board` request hot path.
+pub fn sniff(config_iface: &str, dump_file: Option<&str>) {
     let sock = match RawSocket::open_unfiltered(config_iface) {
         Ok(s) => s,
         Err(e) => {
@@ -226,22 +226,19 @@ pub fn sniff(config_iface: &str, dump_dir: Option<&str>) {
     // where recvfrom wouldn't otherwise be interrupted promptly.
     let _ = sock.set_timeout(Duration::from_secs(3));
 
-    // Resolve + create the dump directory up front so per-frame writes can't
-    // fail on a missing dir. If creation fails, continue without dumping.
-    let dump = match dump_dir {
-        Some(d) => {
-            let path = std::path::Path::new(d).to_path_buf();
-            match std::fs::create_dir_all(&path) {
-                Ok(()) => {
-                    log::info!("dumping captured frames to {d}");
-                    Some(path)
-                }
-                Err(e) => {
-                    log::warn!("could not create dump dir {d}: {e} — continuing without dump");
-                    None
-                }
+    // Open the pcap dump file (and write its global header) up front. On
+    // failure, continue sniffing without dumping.
+    let mut pcap = match dump_file {
+        Some(path) => match crate::pcap::create(path) {
+            Ok(f) => {
+                log::info!("dumping captured frames to pcap {path}");
+                Some(f)
             }
-        }
+            Err(e) => {
+                log::warn!("could not create pcap {path}: {e} — continuing without dump");
+                None
+            }
+        },
         None => None,
     };
 
@@ -293,12 +290,10 @@ pub fn sniff(config_iface: &str, dump_dir: Option<&str>) {
             println!("  {:04x}  {:<48}  {}", off, hex.join(" "), ascii);
         }
 
-        // Optional binary dump (sniffer-only, gated by --dump).
-        if let Some(dir) = &dump {
-            let dir_label = if pkt.pkt_type == 0 { "out" } else { "in" };
-            let fname = format!("{count:05}-{dir_label}-{ethertype:04x}.bin");
-            if let Err(e) = std::fs::write(dir.join(fname), pkt.data) {
-                log::warn!("dump write failed: {e}");
+        // Optional pcap dump (sniffer-only, gated by --dump).
+        if let Some(w) = pcap.as_mut() {
+            if let Err(e) = crate::pcap::write(w, std::time::SystemTime::now(), pkt.data) {
+                log::warn!("pcap write failed: {e}");
             }
         }
     }
