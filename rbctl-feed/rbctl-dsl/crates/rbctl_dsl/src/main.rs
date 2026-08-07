@@ -4,6 +4,7 @@ mod board;
 mod daemon;
 mod hotplug;
 mod ipc;
+mod log_init;
 mod selftest;
 mod transport;
 mod ubus_obj;
@@ -59,6 +60,10 @@ struct DaemonArgs {
     /// Hotplug notify script path
     #[arg(short, long)]
     notify: Option<String>,
+
+    /// Log to syslog instead of stdout (used by procd)
+    #[arg(long)]
+    syslog: bool,
 
     /// Override UCI annex (a, b, j, m)
     #[arg(long)]
@@ -125,7 +130,17 @@ impl DaemonArgs {
 
 fn main() {
     let cli = Cli::parse();
-    init_logging();
+
+    match &cli.command {
+        Command::Daemon(args) => {
+            if args.syslog {
+                log_init::init_syslog();
+            } else {
+                log_init::init_stdout();
+            }
+        }
+        _ => log_init::init_stdout(),
+    }
 
     match cli.command {
     Command::Daemon(args) => {
@@ -165,14 +180,3 @@ fn ipc_exit(cmd: ipc::IpcCmd) {
     }
 }
 
-fn init_logging() {
-    use std::io::Write;
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info")
-    )
-    .format(|buf, record| {
-        let target = record.target().rsplit("::").next().unwrap_or(record.target());
-        writeln!(buf, "[{} {}] {}", record.level(), target, record.args())
-    })
-    .init();
-}

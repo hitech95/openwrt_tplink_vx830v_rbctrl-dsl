@@ -38,7 +38,8 @@ start_service() {
 	procd_set_param command "$PROG" \
 		daemon \
 		-i "$config_iface" \
-		-n "$NOTIFY"
+		-n "$NOTIFY" \
+		--syslog
 	procd_set_param respawn
 	procd_set_param term_timeout 10
 	procd_set_param stdout 1
