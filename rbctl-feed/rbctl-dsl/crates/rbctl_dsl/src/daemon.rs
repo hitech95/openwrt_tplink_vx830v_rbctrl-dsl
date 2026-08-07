@@ -16,6 +16,7 @@
 //!     └── thread::sleep(1s)
 //! ```
 
+use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,6 +24,7 @@ use std::time::{Duration, Instant};
 use rbctl_proto::pack::{AtmEncap, AtmLinkParams, AtmLinkType, AtmQos};
 use rbctl_proto::unpack::LinkStatus;
 use rbctl_proto::validate;
+use tinyln_rs::rtnl::RtnlLink;
 
 use crate::board::{Board, BoardError};
 use crate::hotplug::{self, LineEvent};
@@ -97,37 +99,34 @@ fn atm_params(atm: Option<&AtmConfig>, vlan_id: u16) -> AtmLinkParams<'static> {
 
 fn create_vlan_iface(parent: &str, vlan_id: u16) -> Result<(), String> {
     let name = format!("{parent}.{vlan_id}");
-    let output = std::process::Command::new("ip")
-        .args(["link", "add", "link", parent, "name", &name, "type", "vlan", "id", &vlan_id.to_string()])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let mut rtnl = RtnlLink::new().map_err(|e| format!("rtnl: {e}"))?;
 
-    if output.status.success() {
-        let _ = std::process::Command::new("ip")
-            .args(["link", "set", "up", "dev", &name])
-            .output();
-        return Ok(());
+    // RTM_NEWLINK uses NLM_F_CREATE | NLM_F_EXCL, so EEXIST means the
+    // interface is already present (e.g. after a daemon restart) — benign.
+    match rtnl.add_vlan(parent, vlan_id) {
+        Ok(_) => {}
+        Err(e) if e.raw_os_error() == Some(libc::EEXIST) => {}
+        Err(e) => return Err(format!("add_vlan {name}: {e}")),
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("exists") || stderr.contains("File exists") {
-        Ok(())
-    } else {
-        Err(stderr.trim().to_string())
-    }
+
+    // Ensure it is up whether we just created it or it pre-existed.
+    rtnl.set_up(&name).map_err(|e| format!("set_up {name}: {e}"))
 }
 
 fn delete_vlan_iface(parent: &str, vlan_id: u16) {
-    let _ = std::process::Command::new("ip")
-        .args(["link", "del", &format!("{parent}.{vlan_id}")])
-        .output();
+    let name = format!("{parent}.{vlan_id}");
+    match RtnlLink::new().and_then(|mut r| r.del(&name)) {
+        Ok(()) => {}
+        // Interface already gone (normal during shutdown) — silently ignore.
+        Err(e) if matches!(e.raw_os_error(), Some(libc::ENODEV) | Some(libc::ENXIO)) => {}
+        Err(e) => log::warn!("delete {name}: {e}"),
+    }
 }
 
-/// Check whether a network interface exists.
+/// Check whether a network interface exists (via `if_nametoindex`).
 fn iface_exists(name: &str) -> bool {
-    std::process::Command::new("ip")
-        .args(["link", "show", name])
-        .output()
-        .map(|o| o.status.success())
+    CString::new(name)
+        .map(|c| unsafe { libc::if_nametoindex(c.as_ptr()) } != 0)
         .unwrap_or(false)
 }
 
