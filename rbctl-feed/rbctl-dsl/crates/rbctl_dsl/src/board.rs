@@ -83,7 +83,6 @@ pub struct Board<T: Transport = af_packet::RawSocket> {
     seq: SeqCounter,
     timeout: Duration,
     retries: u8,
-    capture_dir: Option<std::path::PathBuf>,
 }
 
 impl<T: Transport> Board<T> {
@@ -93,7 +92,6 @@ impl<T: Transport> Board<T> {
         Self {
             sock, mac, seq: SeqCounter::new(),
             timeout: DEFAULT_TIMEOUT, retries: DEFAULT_RETRIES,
-            capture_dir: None,
         }
     }
 
@@ -108,14 +106,6 @@ impl<T: Transport> Board<T> {
 
     pub fn local_mac(&self) -> [u8; 6] { self.mac }
 
-    /// Enable raw frame capture to a directory. Each TX/RX frame is written as
-    /// `<dir>/tx-<subtype>-seq<N>.bin` / `<dir>/rx-<subtype>-seq<N>.bin`.
-    pub fn enable_capture<P: AsRef<std::path::Path>>(&mut self, dir: P) {
-        let dir = dir.as_ref().to_path_buf();
-        let _ = std::fs::create_dir_all(&dir);
-        self.capture_dir = Some(dir);
-    }
-
     // ── core request/response ──────────────────────────────────────────
 
     fn request(&mut self, subtype: u8, payload: &[u8]) -> Result<Vec<u8>, BoardError> {
@@ -127,12 +117,6 @@ impl<T: Transport> Board<T> {
         let mut rx_buf = [0u8; RX_BUF_SIZE];
 
         for attempt in 0..=self.retries {
-            // Capture TX
-            if let Some(dir) = &self.capture_dir {
-                let fname = format!("tx-{:02x}-seq{}-try{}.bin", subtype, seq, attempt);
-                let _ = std::fs::write(dir.join(fname), &tx_buf[..tx_len]);
-            }
-
             self.sock.send(&tx_buf[..tx_len])?;
 
             // Drain the receive queue: the kernel echoes our own TX back to us
@@ -141,12 +125,6 @@ impl<T: Transport> Board<T> {
             loop {
                 match self.sock.recv_into(&mut rx_buf) {
                     Ok(n) => {
-                        // Capture RX
-                        if let Some(dir) = &self.capture_dir {
-                            let fname = format!("rx-{:02x}-seq{}-try{}.bin", subtype, seq, attempt);
-                            let _ = std::fs::write(dir.join(fname), &rx_buf[..n]);
-                        }
-
                         let f = match Frame::parse(&rx_buf[..n]) {
                             Some(f) => f,
                             None => continue, // malformed, try next frame

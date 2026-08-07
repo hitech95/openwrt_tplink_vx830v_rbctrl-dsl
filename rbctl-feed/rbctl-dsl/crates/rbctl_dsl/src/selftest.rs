@@ -1,5 +1,6 @@
 //! Selftest — exercises socket, VLAN lifecycle, board opcodes, and
-//! dependency probes. Captures all TX/RX frames to `/tmp/rbctl-capture/`.
+//! dependency probes. Frame inspection is provided by the `sniff` subcommand;
+//! selftest itself no longer writes captures to disk.
 
 use std::ffi::CString;
 use std::time::Duration;
@@ -136,7 +137,6 @@ impl Selftest {
         let mut board = Board::new(sock);
         board.set_timeout(Duration::from_secs(2));
         board.set_retries(3);
-        board.enable_capture("/tmp/rbctl-capture");
 
         let mut got_response = false;
         let mut lines = Vec::new();
@@ -180,13 +180,10 @@ impl Selftest {
 
         for l in &lines { log::info!("{l}"); }
 
-        write_hexdump("/tmp/rbctl-capture");
-
-        let count = std::fs::read_dir("/tmp/rbctl-capture").map(|d| d.count()).unwrap_or(0);
         if got_response {
-            Ok(format!("board is alive; {count} frames captured"))
+            Ok("board is alive".into())
         } else {
-            Ok(format!("no board response; {count} TX frames captured to /tmp/rbctl-capture/"))
+            Ok("no board response".into())
         }
     }
 
@@ -205,49 +202,24 @@ impl Selftest {
 
 // ── standalone sniff mode ────────────────────────────────────────────
 
+/// Listen for `0x88B5` / `0x88B6` frames on `config_iface` and print a
+/// hex+ascii dump of each one. Runs forever until interrupted (Ctrl+C).
+///
+/// Opens the socket with `ETH_P_ALL` and filters the two management ethertypes
+/// in userspace — this is a debug tool and we deliberately want to see every
+/// direction of traffic. Reuses [`af_packet::RawSocket`] so all of the
+/// `AF_PACKET` plumbing lives in one place.
 pub fn sniff(config_iface: &str) {
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-
-    let fd = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, (0x0003u16).to_be() as i32) };
-    if fd < 0 {
-        log::error!("socket failed: {}", std::io::Error::last_os_error());
-        return;
-    }
-    let _fd = unsafe { OwnedFd::from_raw_fd(fd) };
-
-    let cname = CString::new(config_iface).unwrap();
-    let ifindex = unsafe { libc::if_nametoindex(cname.as_ptr()) };
-    if ifindex == 0 {
-        log::error!("if_nametoindex({config_iface}) failed");
-        return;
-    }
-
-    let sa = libc::sockaddr_ll {
-        sll_family: libc::AF_PACKET as u16,
-        sll_protocol: (0x0003u16).to_be(),
-        sll_ifindex: ifindex as i32,
-        sll_hatype: 0, sll_pkttype: 0, sll_halen: 0, sll_addr: [0; 8],
+    let sock = match RawSocket::open_unfiltered(config_iface) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("open_unfiltered({config_iface}): {e}");
+            return;
+        }
     };
-    let ret = unsafe {
-        libc::bind(
-            _fd.as_raw_fd(),
-            &sa as *const _ as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
-        )
-    };
-    if ret < 0 {
-        log::error!("bind failed: {}", std::io::Error::last_os_error());
-        return;
-    }
-
-    let tv = libc::timeval { tv_sec: 3, tv_usec: 0 };
-    unsafe {
-        libc::setsockopt(
-            _fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_RCVTIMEO,
-            &tv as *const _ as *const libc::c_void,
-            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
-        );
-    };
+    // A short receive timeout keeps the loop responsive to SIGINT on kernels
+    // where recvfrom wouldn't otherwise be interrupted promptly.
+    let _ = sock.set_timeout(Duration::from_secs(3));
 
     log::info!("listening on {config_iface} for 0x88B5 / 0x88B6 frames (Ctrl+C to stop)");
 
@@ -255,45 +227,32 @@ pub fn sniff(config_iface: &str) {
     let mut count = 0u32;
 
     loop {
-        let mut sa: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
-        let mut sa_len = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
-        let n = unsafe {
-            libc::recvfrom(
-                _fd.as_raw_fd(),
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-                0,
-                &mut sa as *mut _ as *mut libc::sockaddr,
-                &mut sa_len,
-            )
-        };
-
-        if n < 0 {
-            let e = std::io::Error::last_os_error();
-            if e.kind() == std::io::ErrorKind::WouldBlock {
+        let pkt = match sock.recv(&mut buf) {
+            Ok(p) => p,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(e) => {
+                log::error!("recvfrom error: {e}");
                 continue;
             }
-            log::error!("recvfrom error: {e}");
-            continue;
-        }
+        };
 
-        let n = n as usize;
+        let n = pkt.data.len();
         if n < 14 { continue; }
 
-        let ethertype = u16::from_be_bytes([buf[12], buf[13]]);
+        let ethertype = u16::from_be_bytes([pkt.data[12], pkt.data[13]]);
         if ethertype != 0x88B5 && ethertype != 0x88B6 {
             continue;
         }
 
         count += 1;
-        let direction = match sa.sll_pkttype {
+        let direction = match pkt.pkt_type {
             0 => "OUT",
             1 => "IN ",
             _ => "???",
         };
 
-        let src_mac = &buf[6..12];
-        let dst_mac = &buf[0..6];
+        let src_mac = &pkt.data[6..12];
+        let dst_mac = &pkt.data[0..6];
 
         log::info!(
             "[{count}] {direction} {ethertype:#06x} {n} bytes, dst {:02x?} src {:02x?}",
@@ -301,12 +260,12 @@ pub fn sniff(config_iface: &str) {
         );
 
         let show = n.min(64);
-        for chunk in buf[..show].chunks(16) {
+        for chunk in pkt.data[..show].chunks(16) {
             let hex: Vec<String> = chunk.iter().map(|b| format!("{:02x}", b)).collect();
             let ascii: String = chunk.iter()
                 .map(|&b| if (32..=126).contains(&b) { b as char } else { '.' })
                 .collect();
-            let off = chunk.as_ptr() as usize - buf.as_ptr() as usize;
+            let off = chunk.as_ptr() as usize - pkt.data.as_ptr() as usize;
             println!("  {:04x}  {:<48}  {}", off, hex.join(" "), ascii);
         }
     }
@@ -318,35 +277,4 @@ fn ifindex(name: &str) -> Result<u32, String> {
     let c = CString::new(name).unwrap();
     let idx = unsafe { libc::if_nametoindex(c.as_ptr()) };
     if idx == 0 { Err(format!("if_nametoindex({name}) failed")) } else { Ok(idx) }
-}
-
-fn write_hexdump(dir: &str) {
-    let entries = match std::fs::read_dir(dir) { Ok(e) => e, Err(_) => return };
-    let mut paths: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|ext| ext == "bin"))
-        .collect();
-    paths.sort();
-
-    let mut out = String::from("# rbctl-dsl frame capture\n\n");
-    for path in &paths {
-        let name = path.file_name().unwrap().to_string_lossy();
-        let data = match std::fs::read(path) { Ok(d) => d, Err(_) => continue };
-        out.push_str(&format!("=== {} ({} bytes) ===\n", name, data.len()));
-        for chunk in data.chunks(16) {
-            let hex: Vec<String> = chunk.iter().map(|b| format!("{:02x}", b)).collect();
-            let ascii: String = chunk.iter()
-                .map(|&b| if (32..=126).contains(&b) { b as char } else { '.' })
-                .collect();
-            let off = chunk.as_ptr() as usize - data.as_ptr() as usize;
-            out.push_str(&format!("{:04x}  {:<48}  {}\n", off, hex.join(" "), ascii));
-        }
-        out.push('\n');
-    }
-
-    let _ = std::fs::write(format!("{dir}/hexdump.txt"), &out);
-    for line in out.lines().take(200) {
-        log::info!("{line}");
-    }
 }
