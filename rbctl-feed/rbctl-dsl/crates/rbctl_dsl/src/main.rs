@@ -38,8 +38,9 @@ enum Command {
     Stop,
     /// Exercise socket + VLAN + board opcodes, then exit
     Selftest(CommonArgs),
-    /// Listen for 0x88B5 frames (passive, no send)
-    Sniff(CommonArgs),
+    /// Listen for 0x88B5 / 0x88B6 frames (passive, no send). Optionally dump
+    /// captured frames to a directory with `--dump <DIR>`.
+    Sniff(SniffArgs),
 }
 
 /// Arguments shared by selftest and sniff modes.
@@ -48,6 +49,18 @@ struct CommonArgs {
     /// Management VLAN interface
     #[arg(short = 'i', long, default_value = "lan0.500")]
     config_iface: String,
+}
+
+/// Arguments for sniff mode.
+#[derive(clap::Args)]
+struct SniffArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+
+    /// Dump each captured 0x88B5 / 0x88B6 frame as a `.bin` file under `DIR`.
+    /// Files are named `<n>-<in|out>-<ethertype>.bin`, sorted by capture order.
+    #[arg(long, value_name = "DIR")]
+    dump: Option<String>,
 }
 
 /// Arguments for daemon mode.
@@ -162,7 +175,7 @@ fn main() {
             std::process::exit(code);
         }
         Command::Sniff(args) => {
-            selftest::sniff(&args.config_iface);
+            selftest::sniff(&args.common.config_iface, args.dump.as_deref());
         }
     }
 }

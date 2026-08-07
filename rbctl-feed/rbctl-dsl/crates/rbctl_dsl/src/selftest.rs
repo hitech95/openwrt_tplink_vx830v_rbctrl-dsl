@@ -209,7 +209,12 @@ impl Selftest {
 /// in userspace — this is a debug tool and we deliberately want to see every
 /// direction of traffic. Reuses [`af_packet::RawSocket`] so all of the
 /// `AF_PACKET` plumbing lives in one place.
-pub fn sniff(config_iface: &str) {
+///
+/// When `dump_dir` is `Some`, each captured management frame is also written as
+/// a raw `.bin` file under that directory (created if missing). This is the
+/// only frame-to-file path in the daemon — it lives here in the debug sniffer,
+/// never on the `Board` request hot path.
+pub fn sniff(config_iface: &str, dump_dir: Option<&str>) {
     let sock = match RawSocket::open_unfiltered(config_iface) {
         Ok(s) => s,
         Err(e) => {
@@ -220,6 +225,25 @@ pub fn sniff(config_iface: &str) {
     // A short receive timeout keeps the loop responsive to SIGINT on kernels
     // where recvfrom wouldn't otherwise be interrupted promptly.
     let _ = sock.set_timeout(Duration::from_secs(3));
+
+    // Resolve + create the dump directory up front so per-frame writes can't
+    // fail on a missing dir. If creation fails, continue without dumping.
+    let dump = match dump_dir {
+        Some(d) => {
+            let path = std::path::Path::new(d).to_path_buf();
+            match std::fs::create_dir_all(&path) {
+                Ok(()) => {
+                    log::info!("dumping captured frames to {d}");
+                    Some(path)
+                }
+                Err(e) => {
+                    log::warn!("could not create dump dir {d}: {e} — continuing without dump");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
 
     log::info!("listening on {config_iface} for 0x88B5 / 0x88B6 frames (Ctrl+C to stop)");
 
@@ -267,6 +291,15 @@ pub fn sniff(config_iface: &str) {
                 .collect();
             let off = chunk.as_ptr() as usize - pkt.data.as_ptr() as usize;
             println!("  {:04x}  {:<48}  {}", off, hex.join(" "), ascii);
+        }
+
+        // Optional binary dump (sniffer-only, gated by --dump).
+        if let Some(dir) = &dump {
+            let dir_label = if pkt.pkt_type == 0 { "out" } else { "in" };
+            let fname = format!("{count:05}-{dir_label}-{ethertype:04x}.bin");
+            if let Err(e) = std::fs::write(dir.join(fname), pkt.data) {
+                log::warn!("dump write failed: {e}");
+            }
         }
     }
 }
