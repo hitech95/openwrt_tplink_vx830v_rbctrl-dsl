@@ -52,7 +52,7 @@ def _profile_bitmask(profiles) -> int:
 # ---------------------------------------------------------------------------
 # Opcode 1 — dsl_config_up  (12 bytes)
 # ---------------------------------------------------------------------------
-def pack_dsl_line(modulation: str, annex: str, byte2: int = 0, byte3: int = 0,
+def pack_dsl_line(modulation: str, annex: str, bitswap: int = 0, sra: int = 0,
                   profiles=()) -> bytes:
     """Build the 12-byte DSL line config descriptor (opcode 1).
 
@@ -65,8 +65,8 @@ def pack_dsl_line(modulation: str, annex: str, byte2: int = 0, byte3: int = 0,
     return bytes([
         mod,            # [0] modulation code
         anx,            # [1] annex code
-        byte2 & 0xff,   # [2] line-config byte (src+0x2c9; semantics TBD)
-        byte3 & 0xff,   # [3] line-config byte (src+0x2ca; semantics TBD)
+        bitswap & 0xff, # [2] X_TP_BitswapEnable (0/1)
+        sra & 0xff,     # [3] X_TP_SRAEnable (0/1)
     ]) + struct.pack(">I", bitmask) + b"\x00\x00\x00\x00"  # [4..7] bitmask BE, [8..11] 0
 
 
@@ -84,18 +84,18 @@ def pack_atm_link(vpi: int, vci: int, encap: str, link_type: str,
     cat = ATM_QOS[qos]
     enc = ATM_ENCAP[encap]
     lt = ATM_LINK_TYPE[link_type]
-    return bytes([
+    return (bytes([
         cat & 0xff,         # [0]    QoS category (high 3 B overlap-cleared by VPI/VCI)
         vpi & 0xff,         # [1]    VPI
-    ]) + struct.pack(">H", vci) + \       # [2..3]  VCI
-        struct.pack(">I", pcr) + \        # [4..7]  peak cell rate
-        struct.pack(">I", scr if qos.startswith("VBR") else 0) + \  # [8..0xb] sustainable cell rate
-        struct.pack(">I", mbs if qos.startswith("VBR") else 0) + \  # [0xc..0xf] max burst size
-        bytes([enc, lt]) + \              # [0x10] encap, [0x11] link type
-        struct.pack(">H", vlan_id) + \    # [0x12..0x13] local vlan id
-        bytes([tag_enable & 0xff]) + \    # [0x14] tag enable
-        struct.pack(">H", tag_vid & 0xffff) + \  # [0x15..0x16] tag vid
-        bytes([tag_pri & 0xff])           # [0x17] tag priority
+    ]) + struct.pack(">H", vci) +               # [2..3]  VCI
+        struct.pack(">I", pcr) +                # [4..7]  peak cell rate
+        struct.pack(">I", scr if qos.startswith("VBR") else 0) +  # [8..0xb] sustainable cell rate
+        struct.pack(">I", mbs if qos.startswith("VBR") else 0) +  # [0xc..0xf] max burst size
+        bytes([enc, lt]) +                      # [0x10] encap, [0x11] link type
+        struct.pack(">H", vlan_id) +            # [0x12..0x13] local vlan id
+        bytes([tag_enable & 0xff]) +            # [0x14] tag enable
+        struct.pack(">H", tag_vid & 0xffff) +   # [0x15..0x16] tag vid
+        bytes([tag_pri & 0xff]))                # [0x17] tag priority
 
 
 # ---------------------------------------------------------------------------
@@ -104,11 +104,11 @@ def pack_atm_link(vpi: int, vci: int, encap: str, link_type: str,
 def pack_ptm_link(tag_enable: int, tag_vid: int, tag_pri: int,
                   vlan_id: int) -> bytes:
     """Build the 8-byte PTM/VDSL link descriptor (opcode 15)."""
-    return bytes([tag_enable & 0xff]) + \                 # [0] tag enable
-        struct.pack(">H", tag_vid & 0xffff) + \           # [1..2] tag vid
-        struct.pack(">H", tag_pri & 0xffff) + \           # [3..4] tag priority
-        b"\x00" + \                                        # [5] reserved
-        struct.pack(">H", vlan_id & 0xffff)               # [6..7] local vlan id
+    return (bytes([tag_enable & 0xff]) +              # [0] tag enable
+        struct.pack(">H", tag_vid & 0xffff) +          # [1..2] tag vid
+        struct.pack(">H", tag_pri & 0xffff) +          # [3..4] tag priority
+        b"\x00" +                                      # [5] reserved
+        struct.pack(">H", vlan_id & 0xffff))           # [6..7] local vlan id
 
 
 # ---------------------------------------------------------------------------

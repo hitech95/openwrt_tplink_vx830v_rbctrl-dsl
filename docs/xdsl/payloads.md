@@ -77,14 +77,25 @@ Serializer: `oal_dsl_lineObjToMsg` (`FUN_00323584`).
 |--------|------|-------|----------|
 | `0x00` | 1 | modulation | `MODULATION` code |
 | `0x01` | 1 | annex | `ANNEX` code |
-| `0x02` | 1 | line-config byte | copied from TR-181 obj `+0x2c9` (semantics TBD) |
-| `0x03` | 1 | line-config byte | copied from TR-181 obj `+0x2ca` (semantics TBD) |
+| `0x02` | 1 | bitswap enable | `X_TP_BitswapEnable`: 0=disabled, 1=enabled (TR-181 obj `+0x2c9`) |
+| `0x03` | 1 | SRA enable | `X_TP_SRAEnable`: 0=disabled, 1=enabled (TR-181 obj `+0x2ca`) |
 | `0x04` | 4 | VDSL2 profile bitmask | big-endian uint32 (OR of `VDSL2_PROFILE` bits) |
 | `0x08` | 4 | reserved | `0x00000000` |
 
 The bitmask is built by tokenizing the source object's `allowedProfile` string
 (`strtok_r` on `;`,`) and OR-ing each token's bit. Sent as a 4-byte BE value at
 `[4..7]` with `[8..11]` zero (`proto_postprocess` swaps only the low 4 bytes).
+
+> **Bytes [0x02]/[0x03] resolved** (previously TBD): they are `X_TP_BitswapEnable`
+> and `X_TP_SRAEnable` — confirmed via `oal_dsl_lineObjToMsg` decompilation +
+> `rsl_dslLine_checkParamValid` validation + web UI `dslcfg.htm`. Both are
+> **TX-only**: the opcode-2 response does not report them back.
+>
+> **Additional DSL features in the web UI** (`dslcfg.htm`) that are NOT in this
+> payload: G.INP (`X_TP_GINPEnable`), 35B compat (`X_TP_35bCompat`), UPBO
+> (`X_TP_UPBO`), ROC/SOS (`X_TP_ROCSOSEnable`). Bytes `[0x08-0x0B]` are zeroed
+> by the serializer — these features are either board-autonomous or travel a
+> path not yet traced.
 
 ---
 

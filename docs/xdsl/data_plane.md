@@ -124,3 +124,48 @@ Not visible from `remote_board` (it only does control). The board emits standard
 Ethernet/IP after decap; the host receives it on `lan0.<vlan>` as ordinary
 traffic. The VLAN tagging of decapsulated frames (board tag vs local VLAN id,
 ATM vs PTM) is documented in [../network.md](../network.md) §"Data plane".
+
+## Transport VLAN id selection rule
+
+The outer transport VLAN id is **not arbitrary** — it follows a strict rule:
+
+- **Range:** `2000`–`2007` (8 values, indices 0–7)
+- **Formula:** `vlanid = baseIndex + 2000`, hardcoded in `oal_atm_setVlanTag`
+  (`libcmm.so`)
+- **Enforced by** `oal_vlanIdFromIfName` (`libcmm.so`):
+  ```c
+  sscanf(ifName, "lan0.%u", &vid);
+  if (vid < 2000 || vid > 0x7d7) error;   // 0x7d7 = 2007
+  ```
+
+The `baseIndex` (0–7) is a per-connection value from the TR-181
+`Device.ATM.Link.{i}` data model `vlan` field, assigned by the management layer
+when a WAN connection is created. For PTM, the full VLAN id is extracted from
+the interface name (`lan0.2001` → `2001`).
+
+The +2000 offset avoids collision with all other VLANs in use:
+
+| VLAN range | Use | Source |
+|-----------|-----|--------|
+| 1–4 | LAN ports | switch chip (`vlan_setting.sh`) |
+| 10 | switch management | `vlan_setting.sh` |
+| 500 | management/control plane (`0x88B5`/`0x88B6`) | `config.bba`: `INCLUDE_REMOTE_CONTROL_VLAN` |
+| **2000–2007** | **transport (outer data VLAN)** | `oal_atm_setVlanTag` / `oal_ptm_setVlanTag` |
+| 835/836 | ISP service (inner VLAN) | passes through the board |
+
+> **Not user-configurable.** The web UI "VLAN ID" fields (`dsl.htm`) configure
+> the ISP tag (tagVID at payload offset `0x14`), not the transport VLAN. The
+> transport VLAN base index is internal to the management layer.
+
+### Dual interface creation
+
+Both `remote_board` and `libcmm` create the transport interface (redundantly):
+
+1. **`remote_board`** handler (`atm_link_add` / `ptm_link_add`) → reads VLAN id
+   from the board's response at payload offset `0x12` (ATM) / `0x06` (PTM) →
+   calls `iface_vlan_up(vlanid)` → `ifconfig lan0.<vlanid> up`
+2. **`libcmm`** (`oal_atm_setVlanTag` / `oal_ptm_setVlanTag`) → after
+   `oal_remote_Cfg` returns → calls `oal_addLocalVlanIntf(vlanid)` →
+   `vconfig add lan0 <vlanid>` + `setWanIntfFlag`
+
+The daemon replacement needs only one path (the `vconfig`/`ip link` creation).
