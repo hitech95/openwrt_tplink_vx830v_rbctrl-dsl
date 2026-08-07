@@ -118,7 +118,32 @@ Parsed by `oal_dsl_msgToChannelStatsTotObj` (`FUN_0032483c`). 7 uint32
 - ~~Confirm the 12 + 6 *inferred* metric names against a real reply~~ — offsets
   confirmed via hardware capture (all zeros with NoSignal; field names still
   inferred from TR-181 ordering).
-- The 4 trailing bytes in the op2 reply (payload_len=63, data=59) are
-  undocumented — likely a board-internal footer or alignment padding.
+- **Undocumented u32 at payload[0x3B]**: `proto_postprocess` byte-swaps a u32
+  at offset 0x3B (14th htonl in the op2 branch), but none of the four parsers
+  (`msgToLineObj`, `msgToChannelObj`, `msgToLineStatsObj`, `msgToChannelStatsTotObj`)
+  read it. It is a meaningful big-endian value on the wire but its purpose is
+  unknown. The op2 reply payload is 63 bytes: 59 documented + this 4-byte field.
 - Two config bytes (`[0x02]`,`[0x03]` in the opcode-1 TX) round-trip through the
   same struct; a capture will name them.
+
+---
+
+## Cross-reference confirmation
+
+All offsets below were cross-referenced against the named functions in
+`libcmm.so`:
+
+| Function | Reads (reply offset → field) | Confirmed |
+|----------|------------------------------|-----------|
+| `oal_dsl_msgToChannelObj` | u32 @ 0x08, 0x0C | ✓ |
+| `oal_dsl_msgToLineObj` | u32 @ 0x10..0x2C (8 fields) | ✓ |
+| `oal_dsl_msgToLineObj` | u8 @ 0x04 (link_status) | ✓ |
+| `oal_dsl_msgToLineObj` | u8 @ 0x05 (modulation) | ✓ |
+| `oal_dsl_msgToLineObj` | u8 @ 0x07 (annex) | ✓ |
+| `oal_dsl_msgToLineObj` | u16 @ 0x39 (VDSL2 profile) | ✓ |
+| `oal_dsl_msgToLineStatsObj` | u32 @ 0x30, 0x34 | ✓ |
+| `oal_dsl_msgToChannelStatsTotObj` | u32 @ 0x00..0x18 (7 fields) | ✓ |
+
+`proto_postprocess` confirms: **no opcode echo byte** — byte-swapping starts
+directly at payload[0x00]. Default case (op1/op3/op5/etc.) swaps only the
+status u32 at payload[0x00].
