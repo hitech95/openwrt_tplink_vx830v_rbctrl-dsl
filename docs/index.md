@@ -130,6 +130,7 @@ loop (`msg_serveForever`) with its own ack/retransmit.
 ### Reference (in `docs/`)
 | Document | Topic |
 |----------|-------|
+| [rbctl-dsl.md](rbctl-dsl.md) | **The Rust daemon (newcomer guide)** — workspace layout, crates & deps, startup & runtime lifecycle, request flow, with diagrams |
 | [safety-audit.md](safety-audit.md) | **Type/memory-safety audit (pre-P4)** — every `unsafe` site, fixes applied, SDK verification gate |
 | [map.md](map.md) | **Symbol map**: every function/global/type, original → renamed, with addresses |
 | [led_control.md](led_control.md) | **LED control & DSL polling** — `cos` daemon, `tp_gpio.ko`, blink patterns, 10s polling interval, handler table |
