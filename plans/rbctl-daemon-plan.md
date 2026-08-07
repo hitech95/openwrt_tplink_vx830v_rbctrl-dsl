@@ -25,7 +25,7 @@ the **build plan**.
 | Create/destroy the full `lan0` VLAN stack (outer + inner) | netifd integration — netifd is **not** used for xDSL |
 | Poll line state + emit hotplug events (§3) | Firmware update (opcode 8) |
 | Publish the ubus `dsl` object (§4) | Per-tone stats / SNR tuning / vectoring |
-| Read its UCI config + init.d reload | LEDs (handled by the reused `led_dsl.sh` on our events) |
+| Read its UCI config + init.d reload | LEDs — original firmware uses `cos` + `tp_gpio.ko` (see [led_control.md](../docs/led_control.md)); daemon emits hotplug events, a shipped `led_dsl.sh` drives the LED |
 
 > **The WAN-protocol boundary is deliberate.** The daemon brings the DSL line up
 > and surfaces the `lan0.<2xxx>.<isp>` interface + a `DSL_INTERFACE_STATUS=UP`
@@ -48,8 +48,10 @@ its vendored Rust crates is delivered as a **custom external feed** — **not**
 submitted to OpenWrt mainline.
 
 **Why external, not mainline:**
-- The C-binding crates (`ubus`, `libubox`, `rust-uci`) are not in the OpenWrt
-  package feed and must be vendored into the build — mainline doesn't ship them.
+- ~~The C-binding crates (`ubus`, `libubox`, `rust-uci`) are not in the OpenWrt~~
+  ~~package feed and must be vendored into the build — mainline doesn't ship them.~~
+  **Implementation note:** the ubus stack was replaced by `ubus-zero` (pure Rust,
+  no `libubus.so`). Only `libuci` and `libnl-tiny` remain as C dependencies.
 - The target is a specific vendor board (EcoNet over the proprietary `0x88B5`
   protocol); the wire format is not generally reusable upstream.
 - The data plane assumes a non-standard topology (external board on `lan0`,
@@ -58,13 +60,18 @@ submitted to OpenWrt mainline.
 
 **Feed layout:**
 ```
-rbctl-feed/                       (the external feed repo)
-└── rbctl-dsl/                    (the OpenWrt package)
-    ├── Makefile                  (Phase 4 — cargo build, DEPENDS, install)
-    ├── Cargo.toml                (workspace)
-    ├── crates/                   (rbctl_proto, rbctl_dsl, + vendored ubus/libubox/rust-uci)
-    └── files/                    (init script, board.d)
-```
+ rbctl-feed/                       (the external feed repo)
+ └── rbctl-dsl/                    (the OpenWrt package)
+     ├── Makefile                  (cargo build, DEPENDS:=+libuci +libnl-tiny)
+     ├── Cargo.toml                (workspace)
+     ├── crates/
+     │   ├── rbctl_proto/          protocol core (pure Rust)
+     │   ├── rbctl_dsl/            daemon binary
+     │   ├── af_packet/            AF_PACKET raw Ethernet (libc only)
+     │   ├── tinyln_rs/            safe wrapper for libnl-tiny
+     │   └── tinyln_rs_sys/        bindgen FFI for libnl-tiny
+     └── files/                    init script, notify, LED hotplug, uci-defaults
+ ```
 
 **Consuming it in a buildroot/SDK:**
 ```sh
@@ -78,14 +85,13 @@ added to a device profile via `DEVICE_PACKAGES`.
 
 **Plan implication:** Phase 4 (packaging) targets this external-feed layout, not
 an OpenWrt pull request. Mainlining is a separate, later effort and would
-require generalizing beyond the EcoNet board plus resolving the crate vendoring
-(upstream `ubus`/`libubox`/`rust-uci` Rust crates or hand-written FFI).
+require generalizing beyond the EcoNet board.
 
 ## Dependency graph — phases complete in order
 
 ```mermaid
 flowchart TD
-    P0["Phase 0 · Rust+C toolchain<br/>(ubus, libubox, rust-uci cross-compile)"]
+    P0["Phase 0 · Rust+C toolchain<br/>(libuci + libnl-tiny cross-compile)"]
     P1["Phase 1 · Protocol core<br/>(pure Rust: checksum/pack/unpack/frame/socket)"]
     P2["Phase 2 · Board control layer"]
     P3["Phase 3 · OpenWrt integration<br/>(UCI + hotplug + ubus + init.d)"]
@@ -107,39 +113,50 @@ flowchart TD
 
 ## Workspace layout
 
+> **Implementation note:** the original plan listed `ubus`, `libubox`,
+> `rust-uci` as vendored C-bound crates. The actual workspace uses `ubus-zero`
+> (pure Rust), a direct `libuci` FFI, and `tinyln_rs`/`tinyln_rs_sys` for
+> netlink. See the [crate README](../rbctl-feed/rbctl-dsl/README.md) for the
+> current interface.
+
 ```
 rbctl-dsl/                      (OpenWrt package root)
 ├── Cargo.toml                  (workspace)
 ├── crates/
-│   ├── rbctl_proto/            (Phase 1 — pure-Rust protocol lib, ZERO C deps)
-│   ├── rbctl_dsl/              (Phase 2/3 — the daemon binary)
-│   ├── ubus/        }          (Phase 0 — vendored, C-bound)
-│   ├── libubox/     }          (Phase 0 — vendored, C-bound)
-│   └── rust-uci/    }          (Phase 0 — vendored, C-bound)
+│   ├── rbctl_proto/            protocol core (pure Rust, no C deps)
+│   ├── rbctl_dsl/              daemon binary (board, uci_cfg, hotplug, main)
+│   ├── af_packet/              AF_PACKET raw Ethernet socket (libc only)
+│   ├── tinyln_rs_sys/          bindgen FFI for OpenWrt libnl-tiny
+│   └── tinyln_rs/              safe wrapper for libnl-tiny (VLAN, iface mgmt)
 ├── files/
-│   ├── rbctl_dsl.init          (Phase 3/4 → /etc/init.d/dsl_control)
-│   └── board.d/02_network      (Phase 4)
-└── Makefile                    (Phase 4 — OpenWrt package)
+│   ├── rbctl_dsl.init          /etc/init.d/dsl_control
+│   ├── dsl_notify.sh           /sbin/dsl_notify.sh
+│   ├── led_dsl.sh              /etc/hotplug.d/dsl/led_dsl.sh
+│   └── dsl_defaults            /etc/uci-defaults/dsl_defaults
+└── Makefile                    OpenWrt package (DEPENDS:=+libuci +libnl-tiny)
 ```
-
-The three C-binding crates are vendored into the workspace because OpenWrt's
-cargo build is **offline** (`cargo vendor`); they are not in the SDK.
 
 ---
 
 ## Phase 0 — Rust + C cross-compile toolchain (PREREQUISITE)
 
-**Why first, and why it can block everything:** every UCI/ubus feature in Phase
-3 links against OpenWrt's C libraries through these crates. If they fail to
-cross-compile, the integration strategy itself changes — so prove they build
-**before** writing any integration code.
+> **Implementation note:** the original plan called for vendoring three C-binding
+> crates (`ubus`, `libubox`, `rust-uci`). In practice, the ubus stack was replaced
+> by [`ubus-zero`](https://crates.io/crates/ubus-zero) (pure Rust, no `libubus.so`
+> needed), and UCI access uses a direct `libuci` FFI. The only C libraries
+> linked are `libuci` and `libnl-tiny` (via `tinyln_rs_sys` bindgen). This
+> eliminated the hardest cross-compile risk (bindgen for ubus/ubox headers).
+
+**Why first, and why it can block everything:** UCI and netlink features in Phase
+2/3 link against OpenWrt's C libraries. If they fail to cross-compile, the
+integration strategy itself changes — so prove they build **before** writing any
+integration code.
 
 **Target:** `aarch64-unknown-linux-musl` (MT7986 Cortex-A53, matches the device
 toolchain `…_aarch64_cortex-a53_gcc-8.4.0_musl`).
 
 **Tasks**
-1. In the OpenWrt SDK, build/stage the C libraries: **libubox**, **libubus**,
-   **libuci** (standard packages; `libubus`/`libuci` both depend on `libubox`).
+1. In the OpenWrt SDK, build/stage: **libuci**, **libnl-tiny**.
    Confirm `.so` + headers under
    `staging_dir/target-aarch64_cortex-a53_musl/usr/{lib,include}`.
 2. `rustup target add aarch64-unknown-linux-musl`.
@@ -149,16 +166,12 @@ toolchain `…_aarch64_cortex-a53_gcc-8.4.0_musl`).
    linker = "<sdk>/staging_dir/toolchain-…_aarch64_cortex-a53_gcc-8.4.0_musl/bin/aarch64-openwrt-linux-musl-gcc"
    rustflags = ["-L<staging>/usr/lib"]
    ```
-4. Vendor the three crates into `crates/`; set `BINDGEN_EXTRA_CLANG_ARGS` to the
-   staged `usr/include` so bindgen finds `<libubox/...>`, `<libubus/...>`,
-   `<libuci.h>`.
+4. Set `BINDGEN_EXTRA_CLANG_ARGS` to the staged `usr/include` so bindgen finds
+   `<libnl-tiny/...>` and `<uci.h>`.
 5. `cargo vendor` the whole workspace (offline build).
 
-**GATE (must pass before Phase 3):** a ~20-line binary that
-(a) opens a `Uci` context via `rust-uci`, (b) connects to ubus via the `ubus`
-crate, (c) runs one `uloop` iteration — **compiles, links, and runs on the
-target without crashing**. If bindgen or linking fails here, **stop** and either
-fix the crate or replace it with a hand-written FFI before proceeding.
+**GATE:** a ~20-line binary that (a) opens a `Uci` context, (b) sends a netlink
+RTM_GETLINK, — **compiles, links, and runs on the target without crashing**.
 
 ---
 
@@ -219,6 +232,12 @@ live opcodes, plus outer-transport VLAN management.
 3. **Line-state poller:** poll op 2 every ~1 s; produce a stream of `LineState`
    transitions (`NoSignal` / `Up` / `Initializing` / `EstablishingLink`).
 
+   > **RE note:** the original firmware polls every **10 s** via the `cos` daemon's
+   > `linkStatusCheckHandler` (see [led_control.md](../docs/led_control.md)). The
+   > daemon's 1 s interval is 10x more responsive — safe, since each poll is a
+   > single 59-byte exchange. The board **never pushes events**; all status
+   > detection is poll-driven.
+
 > **Design decision — daemon owns outer transport VLAN only.** The daemon creates
 > the outer transport VLAN (`lan0.<2xxx>`) via netlink. QinQ inner ISP VLAN stacking
 > (`lan0.<2xxx>.<isp>`) is handled by **netifd**. The config interface (e.g.
@@ -241,23 +260,28 @@ Four sub-components; each independently testable.
 
 ### Daemon runtime structure
 
-Single binary, one `uloop` (libubox) runloop, a small thread/task layout:
+> **Implementation note:** the original plan used `uloop` (libubox) as the event
+> loop and the `ubus` C crate for ubus connectivity. In practice, the daemon
+> uses `ubus-zero` (pure Rust) for ubus and its own poll loop — no libubox
+> dependency.
+
+Single binary, a poll-based runloop, a small thread/task layout:
 
 ```
 rbctl-dsl (main)
-├── uloop ──────────────────────────── the single event runloop (libubox)
+├── poll loop ──────────────────────── single-threaded event loop
 ├── board task (Phase 2)
 │   ├── line-state poller: op 2 every ~1 s ──► LineState events
 │   └── command path: op 1/3/5/6/15/16 on demand + on reload
 ├── hotplug emitter (3b) ───────────── fork+exec dsl_notify.sh on transitions
-├── ubus object `dsl` (3c) ─────────── uloop-managed, always queryable
+├── ubus object `dsl` (3c) ─────────── ubus-zero, always queryable
 └── config watcher (3a/3d) ─────────── SIGHUP / procd reload → re-read UCI → re-apply
 ```
 
 Workspace modules map 1:1 to the layout: `rbctl_proto` (Phase 1, pure Rust) and
 `rbctl_dsl` with submodules `board` / `uci_cfg` / `hotplug` / `ubus_obj` / `main`.
 
-### 3a. UCI config loader (`rust-uci`)
+### 3a. UCI config loader (`libuci` FFI)
 Read `/etc/config/network` (`dsl` + `atm-bridge` sections) and map to board
 config, **reusing existing options** ([openwrt.md](../docs/openwrt.md) §2.4):
 
@@ -376,12 +400,12 @@ On each `LineState` transition, fork+exec the `-n` notify script with:
   `EFM` (PTM) — note **`EFM`, not `PTM`** (historical quirk, §3.2).
 - On `SIGTERM`: synthesize a final `DOWN` before exit.
 
-### 3c. ubus `dsl` object (`ubus` + `libubox` crates)
+### 3c. ubus `dsl` object (`ubus-zero`)
 Publish object `dsl` with method `metrics` (and `statistics` returning **empty**,
 per §4.4 — no per-tone data on this board). Populate `metrics` from op 2/4 per
 the capability matrix: `state`/`mode`/`annex`/`profile`/rates/SNR/attenuation/
 errors(partial); emit `UNKNOWN`/absent for `power_state`/`olr`/`erb`/`atu_c`.
-Run the ubus+uloop loop in a dedicated thread; keep the object alive for the
+Run the ubus loop in a dedicated thread; keep the object alive for the
 daemon's lifetime.
 
 ### 3d. init.d / procd + reload
@@ -453,7 +477,7 @@ When shell access is regained:
 
 | Risk | Phase | Mitigation |
 |------|-------|------------|
-| A C-binding crate fails to cross-compile (bindgen + musl + aarch64) | 0 | Validate the 20-line binary **first**; if a crate won't build, swap it for a hand-written FFI before committing to the integration design. |
+| ~~C-binding crate fails to cross-compile~~ | ~~0~~ | **Resolved** — replaced ubus/libubox with `ubus-zero` (pure Rust); only `libuci` + `libnl-tiny` remain as C deps via bindgen. |
 | RX metric field *names* inferred wrong | 2 / 3c | Cosmetic only (LuCI mis-labels) until Phase 5 confirms; offsets/types are authoritative. |
 | Interface-readiness timing | 2 | The daemon must create the **full** VLAN stack (both levels) **before** emitting `DSL_INTERFACE_STATUS=UP`, so whatever binds to `lan0.<2xxx>.<isp>` finds it present; validate the ordering in Phase 4. |
 | Board-side QinQ push/pop unconfirmed (board firmware not in hand) | 2 | Architecture is firm host-side; a Phase 5 capture locks it. |
