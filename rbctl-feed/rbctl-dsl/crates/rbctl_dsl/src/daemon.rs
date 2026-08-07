@@ -124,8 +124,20 @@ fn delete_vlan_iface(parent: &str, vlan_id: u16) {
 fn connect_ubus(
     obj: ubus::server::UbusObject,
 ) -> Option<ubus::server::UbusConnection<crate::transport::UnixUbusTransport>> {
-    let transport = crate::transport::UnixUbusTransport::connect("/var/run/ubus.sock").ok()?;
-    ubus::server::UbusConnection::connect_and_register(transport, obj).ok()
+    let transport = match crate::transport::UnixUbusTransport::connect("/var/run/ubus.sock") {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("ubus: connect to /var/run/ubus.sock failed: {e}");
+            return None;
+        }
+    };
+    match ubus::server::UbusConnection::connect_and_register(transport, obj) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            log::warn!("ubus: HELLO/ADD_OBJECT failed: {e:?}");
+            None
+        }
+    }
 }
 
 fn config_changed(old: &DslConfig, new: &DslConfig) -> bool {
