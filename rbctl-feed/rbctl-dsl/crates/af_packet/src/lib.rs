@@ -19,6 +19,9 @@ const BPF_LD_H_ABS: u16 = 0x28; // BPF_LD | BPF_H | BPF_ABS
 const BPF_JEQ_K: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
 const BPF_RET_K: u16 = 0x06; // BPF_RET | BPF_K
 
+/// `ETH_P_ALL` — receive every protocol when opening an unfiltered socket.
+const ETH_P_ALL: u16 = 0x0003;
+
 // ── helpers ──────────────────────────────────────────────────────────────
 
 fn check(ret: libc::c_int) -> io::Result<()> {
@@ -84,20 +87,43 @@ pub struct RawSocket {
     ethertype: u16,
 }
 
-/// Packet received: frame bytes + sender MAC.
+/// Packet received: frame bytes + sender MAC + packet type.
 pub struct RxPacket<'a> {
     pub data: &'a [u8],
     pub src_mac: [u8; 6],
+    /// `sockaddr_ll.sll_pkttype` — wire direction and special types.
+    /// `0` = PACKET_OUTGOING (our own TX echoed back), `1` = PACKET_INCOMING,
+    /// `2` = PACKET_BROADCAST, `3` = PACKET_MULTICAST. Sniff tools use this to
+    /// label TX vs RX.
+    pub pkt_type: u8,
 }
 
 impl RawSocket {
-    /// Create and configure a raw socket on `iface` (e.g. `"lan0.500"`).
+    /// Create and configure a raw socket on `iface` (e.g. `"lan0.500"`),
+    /// filtered to a single `ethertype` by a classic-BPF kernel filter.
     ///
     /// Performs: `socket()` → `SO_BROADCAST` → read MAC → `SO_ATTACH_FILTER`
     /// → `bind(sockaddr_ll)`.
     pub fn open(iface: &str, ethertype: u16) -> io::Result<Self> {
+        Self::open_inner(iface, Some(ethertype))
+    }
+
+    /// Create a raw socket bound to `iface` that receives **every** frame
+    /// (`ETH_P_ALL`, no BPF filter). Intended for debug/sniff tools that
+    /// filter in userspace. `send()` still works and uses `ETH_P_ALL` as the
+    /// socket protocol, but a sniffer is receive-only in practice.
+    pub fn open_unfiltered(iface: &str) -> io::Result<Self> {
+        Self::open_inner(iface, None)
+    }
+
+    /// Shared constructor.
+    ///
+    /// `filter = Some(et)` → bind to `et` and attach a BPF matching it.
+    /// `filter = None`     → bind to `ETH_P_ALL`, no kernel filter.
+    fn open_inner(iface: &str, filter: Option<u16>) -> io::Result<Self> {
+        let proto = filter.unwrap_or(ETH_P_ALL);
         let fd =
-            unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, ethertype.to_be() as i32) };
+            unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, proto.to_be() as i32) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -125,26 +151,28 @@ impl RawSocket {
             return Err(io::Error::last_os_error());
         }
 
-        // SO_ATTACH_FILTER — classic BPF for ethertype matching
-        let mut filter = build_bpf(ethertype);
-        let fprog = libc::sock_fprog {
-            len: filter.len() as u16,
-            filter: filter.as_mut_ptr(),
-        };
-        unsafe {
-            check(libc::setsockopt(
-                fd.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_ATTACH_FILTER,
-                &fprog as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::sock_fprog>() as libc::socklen_t,
-            ))?;
+        // SO_ATTACH_FILTER — classic BPF for ethertype matching (filtered mode only)
+        if let Some(et) = filter {
+            let mut bpf = build_bpf(et);
+            let fprog = libc::sock_fprog {
+                len: bpf.len() as u16,
+                filter: bpf.as_mut_ptr(),
+            };
+            unsafe {
+                check(libc::setsockopt(
+                    fd.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_ATTACH_FILTER,
+                    &fprog as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::sock_fprog>() as libc::socklen_t,
+                ))?;
+            }
         }
 
         // bind(sockaddr_ll) — receive only from this interface
         let sa = libc::sockaddr_ll {
             sll_family: libc::AF_PACKET as u16,
-            sll_protocol: ethertype.to_be(),
+            sll_protocol: proto.to_be(),
             sll_ifindex: ifindex as i32,
             sll_hatype: 0,
             sll_pkttype: 0,
@@ -163,7 +191,7 @@ impl RawSocket {
             fd,
             ifindex: ifindex as i32,
             local_mac,
-            ethertype,
+            ethertype: proto,
         })
     }
 
@@ -236,6 +264,7 @@ impl RawSocket {
         Ok(RxPacket {
             data: &buf[..ret as usize],
             src_mac: sa.sll_addr[..6].try_into().unwrap(),
+            pkt_type: sa.sll_pkttype as u8,
         })
     }
 }
