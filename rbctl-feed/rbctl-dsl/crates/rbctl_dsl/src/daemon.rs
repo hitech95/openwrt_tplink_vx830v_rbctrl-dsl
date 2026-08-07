@@ -124,10 +124,12 @@ fn delete_vlan_iface(parent: &str, vlan_id: u16) {
 fn connect_ubus(
     obj: ubus::server::UbusObject,
 ) -> Option<ubus::server::UbusConnection<crate::transport::UnixUbusTransport>> {
-    let transport = match crate::transport::UnixUbusTransport::connect("/var/run/ubus.sock") {
+    let path = find_ubus_socket()?;
+    log::info!("ubus: connecting to {path}");
+    let transport = match crate::transport::UnixUbusTransport::connect(&path) {
         Ok(t) => t,
         Err(e) => {
-            log::warn!("ubus: connect to /var/run/ubus.sock failed: {e}");
+            log::warn!("ubus: connect to {path} failed: {e}");
             return None;
         }
     };
@@ -138,6 +140,21 @@ fn connect_ubus(
             None
         }
     }
+}
+
+/// Try common ubus socket paths (varies between OpenWrt versions/devices).
+fn find_ubus_socket() -> Option<String> {
+    for path in &[
+        "/var/run/ubus.sock",
+        "/var/run/ubus/ubus.sock",
+        "/tmp/run/ubus.sock",
+        "/tmp/run/ubus/ubus.sock",
+    ] {
+        if std::os::unix::net::UnixStream::connect(path).is_ok() {
+            return Some((*path).into());
+        }
+    }
+    None
 }
 
 fn config_changed(old: &DslConfig, new: &DslConfig) -> bool {
