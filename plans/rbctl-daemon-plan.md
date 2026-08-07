@@ -174,16 +174,24 @@ builds on the dev host).
 1. `checksum.rs` ← [`examples/checksum.py`](../examples/checksum.py) — CRC-16/ARC
    nibble table, `set_checksum` / `verify_checksum`.
 2. `pack.rs` ← [`examples/pack.py`](../examples/pack.py) — `pack_dsl_line` /
-   `pack_atm_link` / `pack_ptm_link` / `pack_link_del` + enum tables.
-3. `unpack.rs` ← [`examples/unpack.py`](../examples/unpack.py) —
+   `pack_atm_link` / `pack_ptm_link` / `pack_link_del` + enum tables. Note
+   `pack_dsl_line` takes `bitswap: bool` and `sra: bool` (opcode-1 bytes
+   `[0x02]`/`[0x03]` — resolved as `X_TP_BitswapEnable`/`X_TP_SRAEnable`).
+   The modulation/annex/profile tables here (sourced from
+   [modulation_annex.md](../docs/xdsl/modulation_annex.md)) feed `validate.rs`
+   below.
+3. `validate.rs` — `validate_line_config(modulation, annex, profile)` enforcing
+   the modulation × annex × profile compatibility rules in §3a.1. Pure enum
+   logic, no I/O; unit-testable on the host.
+4. `unpack.rs` ← [`examples/unpack.py`](../examples/unpack.py) —
    `unpack_line_obj` / `unpack_channel_stats`.
-4. `frame.rs` — `proto_frame_hdr` builder (24-byte header, big-endian), sequence
+5. `frame.rs` — `proto_frame_hdr` builder (24-byte header, big-endian), sequence
    counter, magic `0x11` = command (TX) / `0x10` = response (RX).
-5. `socket.rs` — `AF_PACKET`/`SOCK_RAW`, bind `lan0.<vlan>`, simple BPF
+6. `socket.rs` — `AF_PACKET`/`SOCK_RAW`, bind `lan0.<vlan>`, simple BPF
    (EtherType `0x88B5` + src-MAC match), send/recv with timeout + retransmit,
    MAC-learning handshake (broadcast → learn board MAC → unicast).
-6. Unit tests: the checksum vector `0x1ea0`, pack→unpack round-trips, frame
-   build+verify.
+7. Unit tests: the checksum vector `0x1ea0`, pack→unpack round-trips, frame
+   build+verify, plus the §3a.1 validation matrix.
 
 **GATE:** `cargo test -p rbctl_proto` green on the dev host. (Socket/framing
 tests may be feature-gated or use a netns loopback.)
@@ -197,13 +205,17 @@ live opcodes, plus outer-transport VLAN management.
 
 **Tasks**
 1. Implement the opcodes on top of `rbctl_proto`:
-   - `line_config_up(mod, annex, profile)` → op 1; `line_config_down()` → op 3
+   - `line_config_up(mod, annex, bitswap, sra, profile)` → op 1; `line_config_down()` → op 3
    - `get_line_obj()` → op 2 → `LineObj`; `get_channel_stats()` → op 4 → `ChannelStats`
    - `atm_link_add(...)` → op 5; `atm_link_del(vlan)` → op 6
    - `ptm_link_add(...)` → op 15; `ptm_link_del(vlan)` → op 16
-2. **Transport VLAN management (outer only):** create/destroy `lan0.<dslVlan+2000>`
+2. **Transport VLAN management (outer only):** create/destroy `lan0.<vlanid>`
    via netlink (`tinyln-rs` wrapping libnl-tiny — `RtnlLink::add_vlan` / `del` /
-   `set_up` / `set_down`). QinQ inner ISP VLAN is handled by **netifd**, not us.
+   `set_up` / `set_down`). The transport VLAN id follows the vendor rule:
+   **`vlanid = baseIndex + 2000`**, range **2000–2007** (enforced by
+   `oal_vlanIdFromIfName` in the original). The base index (0–7) is a
+   per-connection value from UCI (`transport_vlan` option, default `0` → VLAN
+   2000). QinQ inner ISP VLAN is handled by **netifd**, not us.
 3. **Line-state poller:** poll op 2 every ~1 s; produce a stream of `LineState`
    transitions (`NoSignal` / `Up` / `Initializing` / `EstablishingLink`).
 
@@ -254,7 +266,10 @@ config, **reusing existing options** ([openwrt.md](../docs/openwrt.md) §2.4):
 | `annex` | op 1 annex byte | `a`/`b`/`j`/`m` → board `ANNEX` enum |
 | `line_mode` | op 1 modulation | `adsl` → ADSL variants, `vdsl` → VDSL2 (6) |
 | `tone` | op 1 VDSL2 profile bitmask | `8a`…`35b` (board's band-plan selector) |
+| `bitswap` | op 1 byte `0x02` | `0`/`1` → `X_TP_BitswapEnable` (TX-only, not echoed in op 2) |
+| `sra` | op 1 byte `0x03` | `0`/`1` → `X_TP_SRAEnable` (TX-only, not echoed in op 2) |
 | `xfer_mode` | selects op 5 (atm) vs op 15 (ptm) | |
+| `transport_vlan` *(new — daemon option)* | transport VLAN base index (0–7) | `vlanid = transport_vlan + 2000` (range 2000–2007, enforced by vendor rule); default `0` → VLAN 2000 |
 | `encaps` (atm-bridge) | op 5 byte `0x10` | `llc` / `vcmux` |
 | `payload` (atm-bridge) | op 5 byte `0x11` linkType | `bridged`→EoA(0), `routed`→IPoA(7), `pppoa`→PPPoA(6) |
 | `vpi` / `vci` (atm-bridge) | op 5 bytes `0x01` / `0x02` | |
@@ -267,14 +282,17 @@ daemon-specific addition (`isp_vid`):
 
 ```
 config dsl 'dsl'
-    option annex      'b'        # → op 1 annex      (a|b|j|m|...)
-    option line_mode  'vdsl'     # → op 1 modulation (adsl|vdsl)
-    option tone       'av'       # → op 1 VDSL2 profile bitmask
-    option xfer_mode  'ptm'      # → op 15 (ptm) vs op 5 (atm)
-    list   isp_vid    '835'      # daemon option: inner ISP VLAN(s) to stack
-    # list isp_vid    '836'      #   (voip) — repeat as list for multi-service
-    # option firmware            # NOT used (excluded)
-    # option ds_snr_offset       # ignored (board can't set SNR)
+    option annex          'b'        # → op 1 annex      (a|b|j|m|...)
+    option line_mode      'vdsl'     # → op 1 modulation (adsl|vdsl)
+    option tone           'av'       # → op 1 VDSL2 profile bitmask
+    option bitswap        '1'        # → op 1 byte 0x02  (0|1)
+    option sra            '1'        # → op 1 byte 0x03  (0|1)
+    option xfer_mode      'ptm'      # → op 15 (ptm) vs op 5 (atm)
+    option transport_vlan '0'        # daemon option: base index → vlanid = 0+2000 = 2000
+    list   isp_vid        '835'      # daemon option: inner ISP VLAN(s) to stack
+    # list isp_vid        '836'      #   (voip) — repeat as list for multi-service
+    # option firmware                # NOT used (excluded)
+    # option ds_snr_offset           # ignored (board can't set SNR)
 
 config atm-bridge 'atm'          # ATM (xfer_mode=atm) only
     option vpi        '8'
@@ -283,8 +301,71 @@ config atm-bridge 'atm'          # ATM (xfer_mode=atm) only
     option payload    'bridged'  # → op 5 byte 0x11 (bridged→EoA=0, routed→IPoA=7, pppoa→PPPoA=6)
 ```
 
-Everything except `isp_vid` is the stock OpenWrt DSL schema
+Everything except `transport_vlan` and `isp_vid` is the stock OpenWrt DSL schema
 ([openwrt.md](../docs/openwrt.md) §2.4) — no other vendor extension is needed.
+
+#### 3a.1 Config validation guard — modulation / tone / annex consistency
+
+The resolved `(modulation, annex, profile)` triple must be consistent before
+`line_config_up()` is allowed to TX. The original firmware (`libcmm.so`) does
+**not** validate — `oal_dsl_lineObjToMsg` silently serializes whatever the
+management layer resolves; an invalid combination either trains wrong or fails
+opaquely. The daemon hardens this.
+
+**Rule source:** the `valid_annexes` field of `modulationTypes` and the
+profile-population guard inside `oal_dsl_lineObjToMsg`, tabulated in
+[modulation_annex.md](../docs/xdsl/modulation_annex.md). The guard lives in
+`rbctl_proto` (pure enum logic, no I/O) next to the modulation/annex/profile
+tables from Phase 1; the UCI loader (3a) calls it **after** translating
+`line_mode`/`annex`/`tone` to board codes and **before** handing the triple to
+the board layer.
+
+```rust
+// crates/rbctl_proto/src/validate.rs
+pub fn validate_line_config(modulation: u8, annex: u8, profile: u32) -> Result<(), LineConfigError> {
+    // 1. tone/profile is only meaningful for VDSL2 (6) / Multimode (7).
+    if profile != 0 && !matches!(modulation, 6 | 7) {
+        return Err(LineConfigError::ProfileRequiresVdsl2 { modulation, profile });
+    }
+    // 2. The configured annex's letters must all be in the modulation's valid_annexes set.
+    //    T1.413 (0) and G.lite (2) have valid_annexes = NULL → only Annex auto (8) passes.
+    if annex != ANNEX_AUTO {
+        let valid = valid_annexes(modulation)
+            .ok_or(LineConfigError::AnnexesNotDefined { modulation })?;
+        for letter in annex_letters(annex) {
+            if !valid.contains(letter) {
+                return Err(LineConfigError::AnnexNotInStandard { annex, modulation, letter });
+            }
+        }
+    }
+    Ok(())
+}
+```
+
+| # | Check | Reject when | Rationale |
+|---|-------|-------------|-----------|
+| 1 | profile ↔ modulation | `profile != 0 && modulation ∉ {6,7}` | ADSL serializers zero bytes `[4..7]` — a non-zero profile with an ADSL code is user error the board would silently drop. |
+| 2 | annex ↔ modulation | `annex ≠ auto && letters(annex) ⊄ valid_annexes(modulation)` | e.g. `Annex M` with `G.992.1` (valid=`ABC`) is non-standard; `T1.413`/`G.lite` (`valid_annexes=NULL`) reject every non-auto annex. |
+| 3 | xfer_mode ↔ modulation | `modulation==6 && xfer_mode!=PTM` (and the ATM mirror for codes 0–5) | selects op 5 vs op 15; mismatch sends the link to the wrong transport. |
+
+> **Lookup table** — `valid_annexes` per modulation code (from
+> [modulation_annex.md](../docs/xdsl/modulation_annex.md)):
+> `0,2 → none` · `1 → ABC` · `3 → ABCIJM` · `4,5,6,7 → ABCIJLM`.
+> Annex-letter sets per annex code: `0→A · 1→B · 2→I · 3→M · 4→AL · 5→ALM · 6→J · 7→BJ · 8→auto`.
+
+**Behavior on violation:** log at `ERROR` with the offending triple, **do not
+TX opcode 1**, and make the UCI reload / `line_config_up()` return non-zero so
+procd and any operator script can see the line never came up. Never silently
+clamp — a misconfigured annex is a config bug, not a board fault, and clamping
+would hide it behind a "wrong mode trained" symptom that takes a line capture
+to diagnose.
+
+**Unit tests (`rbctl_proto::validate`):** cover every axis of the compatibility
+matrix in [modulation_annex.md](../docs/xdsl/modulation_annex.md) — at minimum:
+profile + any ADSL code rejects; `Annex M` + `G.992.1` rejects; any annex +
+`T1.413`/`G.lite` rejects (only `auto` passes); `Annex A` + `G.992.3` passes;
+`profile=0x040` + `VDSL2` passes; all single-letter annexes pass for
+`VDSL2`/`Multimode`; `auto` passes for every modulation.
 
 ### 3b. Hotplug event emitter
 On each `LineState` transition, fork+exec the `-n` notify script with:
@@ -312,9 +393,11 @@ daemon's lifetime.
 interface if its VLAN id changed.
 
 **GATE:** daemon runs under procd — reads UCI, brings the line up, LEDs react,
-`ubus call dsl metrics` returns data, and
+`ubus call dsl metrics` returns data,
 `uci set network.dsl.annex=… && uci commit && /etc/init.d/dsl_control reload`
-reconfigures the live line.
+reconfigures the live line, and an intentionally invalid triple (e.g.
+`line_mode=adsl` with a VDSL2 `tone`) is **rejected** with a logged error and
+no opcode-1 TX (§3a.1).
 
 ---
 
@@ -356,3 +439,4 @@ When shell access is regained:
 | RX metric field *names* inferred wrong | 2 / 3c | Cosmetic only (LuCI mis-labels) until Phase 5 confirms; offsets/types are authoritative. |
 | Interface-readiness timing | 2 | The daemon must create the **full** VLAN stack (both levels) **before** emitting `DSL_INTERFACE_STATUS=UP`, so whatever binds to `lan0.<2xxx>.<isp>` finds it present; validate the ordering in Phase 4. |
 | Board-side QinQ push/pop unconfirmed (board firmware not in hand) | 2 | Architecture is firm host-side; a Phase 5 capture locks it. |
+| Invalid modulation/annex/tone combo trains wrong or fails opaquely | 1 / 3a | The original `libcmm.so` does not validate; `rbctl_proto::validate` (§3a.1) rejects inconsistent triples before TX, hardened beyond the firmware. Rules locked to [modulation_annex.md](../docs/xdsl/modulation_annex.md); unit-tested in Phase 1. |
