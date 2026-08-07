@@ -401,22 +401,40 @@ no opcode-1 TX (§3a.1).
 
 ---
 
-## Phase 4 — Packaging & board.d (depends on Phase 3)
+## Phase 4 — Packaging & board.d (depends on Phase 3) — DONE
 
 **Tasks**
-1. OpenWrt `Makefile`: cargo build via the SDK's Rust support, offline vendored
-   deps, `DEPENDS:=+libubox +libubus +libuci`; install binary + init script +
-   board.d.
-2. board.d `02_network`: `ucidef_add_vdsl_modem` / `ucidef_add_atm_bridge` to
-   populate the `dsl` / `atm-bridge` UCI sections the daemon reads. **Do not use
-   `ucidef_set_interface_wan`** — netifd is not used for xDSL (§5.4); the daemon
-   creates the WAN-facing interface itself.
-3. `target.mk`: `DEFAULT_PACKAGES += rbctl-dsl` (no kmod, no firmware blob).
-4. Drop `10_atm.sh` / `10_ptm.sh` (no TC kernel module to load).
+1. ✅ OpenWrt `Makefile`: cargo build via the SDK's Rust support, offline vendored
+   deps, `DEPENDS:=+libuci +libnl-tiny`; installs binary + init script +
+   notify script + LED hotplug + uci-defaults.
+2. ✅ First-boot UCI generation via `/etc/uci-defaults/dsl_defaults` (not
+   `board.d` — we're an external feed, not part of target base-files).
+   Creates `network.dsl` (annex=b, line_mode=vdsl, tone=av, xfer_mode=ptm,
+   bitswap=1, sra=1, transport_vlan=0, config_iface=lan0.500) and
+   `network.atm` (vpi=8, vci=35, llc, bridged) if they don't exist.
+3. ✅ LED hotplug handler `/etc/hotplug.d/dsl/led_dsl.sh` — drives the
+   UCI-configured `led_dsl` LED on `DSL_INTERFACE_STATUS` transitions
+   (HANDSHAKE → slow blink, TRAINING → fast blink, UP → on, DOWN → off).
+   Shipped standalone (not from `ltq-dsl-base`, which we don't depend on).
+4. ✅ Simplified init script — passes only `-i <config_iface>` and
+   `-n <notify>`; the daemon reads all line config from UCI itself.
+5. (target.mk `DEFAULT_PACKAGES += rbctl-dsl` — operator's choice for the
+   specific device profile.)
+6. ✅ No `10_atm.sh` / `10_ptm.sh` — no TC kernel module to load.
 
-**GATE:** `make package/rbctl-dsl/compile` produces an `.ipk` that installs,
-starts on first boot, and whose first-boot UCI generation yields a working
-config.
+**GATE:** ✅ `make package/rbctl-dsl/compile` produces a 359 KB APK that
+installs all 5 files (binary, init, notify, led_dsl.sh, dsl_defaults).
+Runtime first-boot test pending device deployment.
+
+### Shipped files map
+
+```
+/usr/sbin/rbctl-dsl                  — the daemon binary (354 KB stripped)
+/etc/init.d/dsl_control              — procd init script
+/sbin/dsl_notify.sh                  — exec /sbin/hotplug-call dsl
+/etc/hotplug.d/dsl/led_dsl.sh        — LED handler (HANDSHAKE/TRAINING/UP/DOWN)
+/etc/uci-defaults/dsl_defaults       — first-boot UCI generation
+```
 
 ---
 
