@@ -11,6 +11,21 @@
 . /lib/functions.sh
 . /lib/functions/uci-defaults.sh
 
+# ── Management VLAN device (lan0.500) ────────────────────────────────
+# The xDSL board is reached on a fixed management VLAN.  Declare it as
+# a UCI device so netifd creates and brings it up at boot, before the
+# daemon (START=97) needs it.
+if ! uci -q get network.@device[0] >/dev/null 2>&1 \
+   || ! uci -q show network | grep -q "lan0\.500"; then
+	uci -q batch <<-EOF
+		set network.dsl_mgmt='device'
+		set network.dsl_mgmt.name='lan0.500'
+		set network.dsl_mgmt.ifname='lan0'
+		set network.dsl_mgmt.type='8021q'
+		set network.dsl_mgmt.vid='500'
+	EOF
+fi
+
 # ── DSL section ──────────────────────────────────────────────────────
 # Only generate if the section doesn't exist yet.
 if ! uci -q get network.dsl >/dev/null 2>&1; then

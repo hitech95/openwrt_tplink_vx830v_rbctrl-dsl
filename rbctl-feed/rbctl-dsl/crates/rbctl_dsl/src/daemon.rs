@@ -122,6 +122,15 @@ fn delete_vlan_iface(parent: &str, vlan_id: u16) {
         .output();
 }
 
+/// Check whether a network interface exists.
+fn iface_exists(name: &str) -> bool {
+    std::process::Command::new("ip")
+        .args(["link", "show", name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 fn connect_ubus(
     obj: ubus::server::UbusObject,
 ) -> Option<ubus::server::UbusConnection<crate::transport::UnixUbusTransport>> {
@@ -246,7 +255,17 @@ pub fn run(
     // Compute transport VLAN id from base index
     let transport_vlan = cfg.transport_vlan_base as u16 + 2000;
 
-    // 2. Open board socket
+    // 2. Verify management interface exists
+    if !iface_exists(config_iface) {
+        log::error!(
+            "management interface {config_iface} does not exist — \
+             ensure it is declared in UCI (network device section) \
+             or created by the init script before starting the daemon"
+        );
+        return 1;
+    }
+
+    // 3. Open board socket
     let sock = match af_packet::RawSocket::open(config_iface, 0x88B5) {
         Ok(s) => s,
         Err(e) => {

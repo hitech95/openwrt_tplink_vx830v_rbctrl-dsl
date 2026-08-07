@@ -19,10 +19,20 @@ service_triggers() {
 }
 
 start_service() {
-	local config_iface
+	local config_iface parent vid
 
 	config_load network
 	config_get config_iface dsl config_iface "lan0.500"
+
+	# Ensure the management VLAN exists and is up.  netifd should have
+	# created it from the UCI device section, but belt-and-suspenders.
+	parent="${config_iface%.*}"
+	vid="${config_iface##*.}"
+	if [ "$parent" != "$config_iface" ] && \
+	   ! ip link show "$config_iface" >/dev/null 2>&1; then
+		ip link add link "$parent" name "$config_iface" type vlan id "$vid" 2>/dev/null
+	fi
+	ip link set "$config_iface" up 2>/dev/null
 
 	procd_open_instance
 	procd_set_param command "$PROG" \
