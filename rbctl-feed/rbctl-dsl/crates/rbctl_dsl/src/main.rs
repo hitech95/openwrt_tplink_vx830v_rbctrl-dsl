@@ -60,10 +60,6 @@ struct DaemonArgs {
     #[arg(short, long)]
     notify: Option<String>,
 
-    /// Board transport VLAN id
-    #[arg(short = 't', long, default_value_t = 2001)]
-    transport_vlan: u16,
-
     /// Override UCI annex (a, b, j, m)
     #[arg(long)]
     annex: Option<String>,
@@ -95,6 +91,18 @@ struct DaemonArgs {
     /// Override ATM payload type (bridged, routed, pppoa)
     #[arg(long)]
     payload: Option<String>,
+
+    /// Override bitswap enable (0 or 1)
+    #[arg(long)]
+    bitswap: Option<bool>,
+
+    /// Override SRA enable (0 or 1)
+    #[arg(long)]
+    sra: Option<bool>,
+
+    /// Override transport VLAN base index (0–7, VLAN id = base + 2000)
+    #[arg(long)]
+    transport_vlan: Option<u8>,
 }
 
 impl DaemonArgs {
@@ -108,6 +116,9 @@ impl DaemonArgs {
             vci: self.vci.clone(),
             encaps: self.encaps.clone(),
             payload: self.payload.clone(),
+            bitswap: self.bitswap,
+            sra: self.sra,
+            transport_vlan: self.transport_vlan,
         }
     }
 }
@@ -117,14 +128,14 @@ fn main() {
     init_logging();
 
     match cli.command {
-        Command::Daemon(args) => {
-            let code = daemon::run(
-                &args.config_iface,
-                args.notify.as_deref(),
-                args.transport_vlan,
-                &args.to_overrides(),
-            );
-            std::process::exit(code);
+    Command::Daemon(args) => {
+        let overrides = args.to_overrides();
+        let code = daemon::run(
+            &args.config_iface,
+            args.notify.as_deref(),
+            &overrides,
+        );
+        std::process::exit(code);
         }
         Command::Status => ipc_exit(ipc::IpcCmd::Status),
         Command::Reload => ipc_exit(ipc::IpcCmd::Reload),

@@ -93,13 +93,15 @@ impl AtmQos {
 
 /// Build the 12-byte DSL line config descriptor (opcode 1).
 ///
+/// `bitswap` controls byte `[0x02]` (`X_TP_BitswapEnable`).
+/// `sra` controls byte `[0x03]` (`X_TP_SRAEnable`).
 /// The VDSL2 profile bitmask is only meaningful for `Vdsl2` / `Multimode`;
 /// for ADSL modes it is sent as zero (matching `libcmm.so`).
 pub fn pack_dsl_line(
     modulation: Modulation,
     annex: Annex,
-    byte2: u8,
-    byte3: u8,
+    bitswap: bool,
+    sra: bool,
     profiles: Vdsl2Profiles,
 ) -> [u8; 12] {
     let bitmask = match modulation {
@@ -109,8 +111,8 @@ pub fn pack_dsl_line(
     let mut out = [0u8; 12];
     out[0] = modulation as u8;
     out[1] = annex as u8;
-    out[2] = byte2;
-    out[3] = byte3;
+    out[2] = bitswap as u8;
+    out[3] = sra as u8;
     out[4..8].copy_from_slice(&bitmask.to_be_bytes());
     // out[8..12] already zero (padding)
     out
@@ -205,11 +207,13 @@ mod tests {
     #[test]
     fn dsl_line_vdsl2_annex_b_17a_30a() {
         let dsl = pack_dsl_line(
-            Modulation::Vdsl2, Annex::B, 0, 0,
+            Modulation::Vdsl2, Annex::B, true, true,
             Vdsl2Profiles::SEVENTEEN_A | Vdsl2Profiles::THIRTY_A,
         );
         assert_eq!(dsl[0], 6);       // VDSL2
         assert_eq!(dsl[1], 1);       // Annex B
+        assert_eq!(dsl[2], 1);       // bitswap enabled
+        assert_eq!(dsl[3], 1);       // SRA enabled
         assert_eq!(u32::from_be_bytes(dsl[4..8].try_into().unwrap()), 0x040 | 0x080);
         assert_eq!(&dsl[8..12], &[0; 4]); // padding
     }
@@ -217,10 +221,12 @@ mod tests {
     #[test]
     fn dsl_line_adsl_bitmask_forced_zero() {
         let dsl = pack_dsl_line(
-            Modulation::Adsl2Plus, Annex::A, 0, 0,
+            Modulation::Adsl2Plus, Annex::A, false, false,
             Vdsl2Profiles::SEVENTEEN_A, // should be ignored
         );
         assert_eq!(u32::from_be_bytes(dsl[4..8].try_into().unwrap()), 0);
+        assert_eq!(dsl[2], 0);       // bitswap disabled
+        assert_eq!(dsl[3], 0);       // SRA disabled
     }
 
     #[test]

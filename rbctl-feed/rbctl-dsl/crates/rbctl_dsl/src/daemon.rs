@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use rbctl_proto::pack::{AtmEncap, AtmLinkParams, AtmLinkType, AtmQos};
 use rbctl_proto::unpack::LinkStatus;
+use rbctl_proto::validate;
 
 use crate::board::{Board, BoardError};
 use crate::hotplug::{self, LineEvent};
@@ -199,17 +200,18 @@ fn build_snapshot(state: &ubus_obj::SharedState, cfg: &DslConfig) -> StatusSnaps
 pub fn run(
     config_iface: &str,
     notify_script: Option<&str>,
-    transport_vlan: u16,
     overrides: &CliOverrides,
 ) -> i32 {
+    let _log_tag = "daemon";
     install_signal_handlers();
 
     // 1. Load config (UCI + CLI overrides)
     let mut cfg = match DslConfig::load(overrides) {
         Ok(c) => {
             log::info!(
-                "config: mod={:?} annex={:?} profiles=0x{:x} xfer={:?}",
-                c.modulation, c.annex, c.profiles.bitmask(), c.xfer_mode
+                "config: mod={:?} annex={:?} profiles=0x{:x} xfer={:?} bitswap={} sra={} vlan_base={}",
+                c.modulation, c.annex, c.profiles.bitmask(), c.xfer_mode,
+                c.bitswap, c.sra, c.transport_vlan_base
             );
             c
         }
@@ -218,6 +220,23 @@ pub fn run(
             DslConfig::default()
         }
     };
+
+    // 1b. Validate config before TX (§3a.1)
+    if let Err(e) = validate::validate_line_config(cfg.modulation, cfg.annex, cfg.profiles) {
+        log::error!("config validation failed: {e}");
+        return 1;
+    }
+    let transport_hint = match cfg.xfer_mode {
+        XferMode::Ptm => validate::TransportHint::Ptm,
+        XferMode::Atm => validate::TransportHint::Atm,
+    };
+    if let Err(e) = validate::validate_xfer_mode(cfg.modulation, transport_hint) {
+        log::error!("config validation failed: {e}");
+        return 1;
+    }
+
+    // Compute transport VLAN id from base index
+    let transport_vlan = cfg.transport_vlan_base as u16 + 2000;
 
     // 2. Open board socket
     let sock = match af_packet::RawSocket::open(config_iface, 0x88B5) {
@@ -234,10 +253,10 @@ pub fn run(
 
     // 3. Configure DSL line (op 1)
     log::info!(
-        "line_config_up: mod={:?} annex={:?} profiles=0x{:x}",
-        cfg.modulation, cfg.annex, cfg.profiles.bitmask()
+        "line_config_up: mod={:?} annex={:?} profiles=0x{:x} bitswap={} sra={}",
+        cfg.modulation, cfg.annex, cfg.profiles.bitmask(), cfg.bitswap, cfg.sra
     );
-    if let Err(e) = board.line_config_up(cfg.modulation, cfg.annex, cfg.profiles) {
+    if let Err(e) = board.line_config_up(cfg.modulation, cfg.annex, cfg.profiles, cfg.bitswap, cfg.sra) {
         log::error!("line_config_up: {e}");
     }
 
@@ -338,7 +357,10 @@ pub fn run(
                 if config_changed(&cfg, &new_cfg) {
                     log::info!("line params changed — reconfiguring");
                     let _ = board.line_config_down();
-                    let _ = board.line_config_up(new_cfg.modulation, new_cfg.annex, new_cfg.profiles);
+                    let _ = board.line_config_up(
+                        new_cfg.modulation, new_cfg.annex, new_cfg.profiles,
+                        new_cfg.bitswap, new_cfg.sra,
+                    );
                     cfg = new_cfg;
                     tc_emitted = false;
                 } else {
@@ -352,7 +374,9 @@ pub fn run(
             log::info!("restart-line — bouncing DSL line");
             let _ = board.line_config_down();
             std::thread::sleep(Duration::from_secs(1));
-            let _ = board.line_config_up(cfg.modulation, cfg.annex, cfg.profiles);
+            let _ = board.line_config_up(
+                cfg.modulation, cfg.annex, cfg.profiles, cfg.bitswap, cfg.sra,
+            );
             tc_emitted = false;
         }
 

@@ -163,7 +163,7 @@ impl Selftest {
             Err(e) => lines.push(format!("op4: ERROR {e}")),
         }
 
-        match board.line_config_up(Modulation::Vdsl2, Annex::B, Vdsl2Profiles::THIRTY_A) {
+        match board.line_config_up(Modulation::Vdsl2, Annex::B, Vdsl2Profiles::THIRTY_A, true, true) {
             Ok(()) => { got_response = true; lines.push("op1: ACK".into()); }
             Err(crate::board::BoardError::Timeout) => lines.push("op1: no response".into()),
             Err(e) => lines.push(format!("op1: ERROR {e}")),

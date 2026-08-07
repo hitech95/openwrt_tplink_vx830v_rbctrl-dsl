@@ -10,6 +10,7 @@
 //! | [`frame`] | 24-byte `proto_frame_hdr` builder + sequence counter | `docs/protocol.md` |
 //! | [`pack`] | TX payload encoders (opcodes 1 / 5 / 15 / 6 / 16) | `examples/pack.py` |
 //! | [`unpack`] | RX payload decoders (opcodes 2 / 4) | `examples/unpack.py` |
+//! | [`validate`] | Config validation guard (modulation × annex × profile) | — |
 //!
 //! ## Wire protocol constants
 //!
@@ -27,6 +28,7 @@ pub mod checksum;
 pub mod frame;
 pub mod pack;
 pub mod unpack;
+pub mod validate;
 
 pub use checksum::{set_checksum, verify_checksum};
 pub use frame::{Frame, SeqCounter, build_command_frame, ETHTYPE_BOARD, HEADER_LEN, MIN_FRAME};

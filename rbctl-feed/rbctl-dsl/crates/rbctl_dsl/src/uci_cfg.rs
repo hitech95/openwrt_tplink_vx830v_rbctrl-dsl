@@ -50,6 +50,12 @@ pub struct DslConfig {
     pub xfer_mode: XferMode,
     /// Present only when `xfer_mode == Atm`.
     pub atm: Option<AtmConfig>,
+    /// Bitswap enable (opcode 1 byte 0x02, `X_TP_BitswapEnable`).
+    pub bitswap: bool,
+    /// SRA enable (opcode 1 byte 0x03, `X_TP_SRAEnable`).
+    pub sra: bool,
+    /// Transport VLAN base index (0–7). Actual VLAN id = base + 2000.
+    pub transport_vlan_base: u8,
 }
 
 // ── parsing helpers (host-testable, no UCI dependency) ───────────────────
@@ -162,6 +168,9 @@ pub struct CliOverrides {
     pub vci: Option<String>,
     pub encaps: Option<String>,
     pub payload: Option<String>,
+    pub bitswap: Option<bool>,
+    pub sra: Option<bool>,
+    pub transport_vlan: Option<u8>,
 }
 
 // ── UCI loader (target-only, links libuci) ───────────────────────────────
@@ -220,18 +229,38 @@ impl DslConfig {
             None
         };
 
+        // Bitswap / SRA (opcode 1 bytes 0x02/0x03)
+        let bitswap = ov.bitswap
+            .unwrap_or_else(|| {
+                uci_get(uci, "network.dsl.bitswap").parse::<u32>().map(|v| v != 0).unwrap_or(true)
+            });
+        let sra = ov.sra
+            .unwrap_or_else(|| {
+                uci_get(uci, "network.dsl.sra").parse::<u32>().map(|v| v != 0).unwrap_or(true)
+            });
+
+        // Transport VLAN base index (0–7, default 0 → VLAN 2000)
+        let transport_vlan_base = ov.transport_vlan
+            .unwrap_or_else(|| {
+                uci_get(uci, "network.dsl.transport_vlan").parse().unwrap_or(0u8)
+            })
+            .min(7);
+
         Ok(Self {
             modulation,
             annex,
             profiles,
             xfer_mode,
             atm,
+            bitswap,
+            sra,
+            transport_vlan_base,
         })
     }
 }
 
 impl Default for DslConfig {
-    /// Sensible defaults: VDSL2 Annex B, all profiles, PTM.
+    /// Sensible defaults: VDSL2 Annex B, all profiles, PTM, bitswap+sra on.
     fn default() -> Self {
         Self {
             modulation: Modulation::Vdsl2,
@@ -239,6 +268,9 @@ impl Default for DslConfig {
             profiles: parse_tone("av").unwrap(),
             xfer_mode: XferMode::Ptm,
             atm: None,
+            bitswap: true,
+            sra: true,
+            transport_vlan_base: 0,
         }
     }
 }

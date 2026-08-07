@@ -172,8 +172,9 @@ impl<T: Transport> Board<T> {
     /// **Opcode 1** — DSL line config up.
     pub fn line_config_up(
         &mut self, modulation: Modulation, annex: Annex, profiles: Vdsl2Profiles,
+        bitswap: bool, sra: bool,
     ) -> Result<(), BoardError> {
-        let line = pack::pack_dsl_line(modulation, annex, 0, 0, profiles);
+        let line = pack::pack_dsl_line(modulation, annex, bitswap, sra, profiles);
         let mut pl = vec![0x01];
         pl.extend_from_slice(&line);
         let r = self.request(1, &pl)?;
@@ -440,7 +441,7 @@ mod tests {
     #[test]
     fn line_config_up_roundtrip() {
         let mut board = make_board();
-        assert!(board.line_config_up(Modulation::Vdsl2, Annex::B, Vdsl2Profiles::THIRTY_A).is_ok());
+        assert!(board.line_config_up(Modulation::Vdsl2, Annex::B, Vdsl2Profiles::THIRTY_A, true, true).is_ok());
     }
 
     #[test]
@@ -618,7 +619,7 @@ mod tests {
         let mut board = make_board();
         // Just status=0, no opcode echo
         board.sock.set_response(1, vec![0x00]);
-        assert!(board.line_config_up(Modulation::Vdsl2, Annex::B, Vdsl2Profiles::THIRTY_A).is_ok());
+        assert!(board.line_config_up(Modulation::Vdsl2, Annex::B, Vdsl2Profiles::THIRTY_A, true, true).is_ok());
     }
 
     #[test]
