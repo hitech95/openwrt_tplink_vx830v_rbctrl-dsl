@@ -191,21 +191,53 @@ impl DslConfig {
 
     /// Build config from UCI + CLI overrides.
     ///
-    /// Priority: CLI override > UCI value > built-in default.
+    /// Priority: CLI override > UCI value > smart default (derived from line_mode).
+    ///
+    /// Smart defaults cascade from `line_mode`:
+    /// - `vdsl` → xfer_mode=ptm, tone="av" (all VDSL2 profiles)
+    /// - `adsl` → xfer_mode=atm, tone="" (no VDSL2 profiles)
+    ///
+    /// If `line_mode` is unspecified but `xfer_mode` is, line_mode is inferred:
+    /// `xfer_mode=atm` → `adsl`, `xfer_mode=ptm` → `vdsl`.
     fn build(uci: &mut rust_uci::Uci, ov: &CliOverrides) -> Result<Self, ConfigError> {
         let uci_get = |uci: &mut rust_uci::Uci, key: &str| -> String {
             uci.get_opt(key).unwrap_or(None).unwrap_or_default()
         };
-        let pick = |ov_val: &Option<String>, uci_val: String, default: &str| -> String {
-            ov_val.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| {
-                if uci_val.is_empty() { default.into() } else { uci_val }
-            })
+        let nonempty = |s: &Option<String>| -> Option<String> {
+            s.clone().filter(|v| !v.is_empty())
         };
 
-        let annex_str   = pick(&ov.annex,     uci_get(uci, "network.dsl.annex"),     "b");
-        let line_mode   = pick(&ov.line_mode, uci_get(uci, "network.dsl.line_mode"), "vdsl");
-        let tone        = pick(&ov.tone,      uci_get(uci, "network.dsl.tone"),      "av");
-        let xfer_str    = pick(&ov.xfer_mode, uci_get(uci, "network.dsl.xfer_mode"), "ptm");
+        // ── Resolve line_mode (the primary selector) ──
+        let line_mode = nonempty(&ov.line_mode)
+            .or_else(|| { let v = uci_get(uci, "network.dsl.line_mode"); (!v.is_empty()).then_some(v) })
+            .or_else(|| {
+                // Infer from explicit xfer_mode override/UCI
+                let xfer = nonempty(&ov.xfer_mode)
+                    .or_else(|| { let v = uci_get(uci, "network.dsl.xfer_mode"); (!v.is_empty()).then_some(v) })?;
+                match xfer.as_str() {
+                    "atm" => Some("adsl".into()),
+                    "ptm" => Some("vdsl".into()),
+                    _ => None,
+                }
+            })
+            .unwrap_or_else(|| "vdsl".into());
+
+        // ── Smart defaults derived from line_mode ──
+        let (default_xfer, default_tone) = match line_mode.as_str() {
+            "adsl" => ("atm", ""),
+            _ => ("ptm", "av"),
+        };
+
+        // ── Resolve remaining fields (override > UCI > smart default) ──
+        let annex_str = nonempty(&ov.annex)
+            .or_else(|| { let v = uci_get(uci, "network.dsl.annex"); (!v.is_empty()).then_some(v) })
+            .unwrap_or_else(|| "b".into());
+        let xfer_str = nonempty(&ov.xfer_mode)
+            .or_else(|| { let v = uci_get(uci, "network.dsl.xfer_mode"); (!v.is_empty()).then_some(v) })
+            .unwrap_or_else(|| default_xfer.into());
+        let tone = nonempty(&ov.tone)
+            .or_else(|| { let v = uci_get(uci, "network.dsl.tone"); (!v.is_empty()).then_some(v) })
+            .unwrap_or_else(|| default_tone.into());
 
         let modulation = parse_modulation(&line_mode, &xfer_str)?;
         let annex = parse_annex(&annex_str)?;
@@ -219,10 +251,18 @@ impl DslConfig {
         }
 
         let atm = if xfer_mode == XferMode::Atm {
-            let vpi_s  = pick(&ov.vpi,  uci_get(uci, "network.@atm-bridge[0].vpi"),  "8");
-            let vci_s  = pick(&ov.vci,  uci_get(uci, "network.@atm-bridge[0].vci"),  "35");
-            let encap  = pick(&ov.encaps, uci_get(uci, "network.@atm-bridge[0].encaps"), "llc");
-            let payload = pick(&ov.payload, uci_get(uci, "network.@atm-bridge[0].payload"), "bridged");
+            let vpi_s = nonempty(&ov.vpi)
+                .or_else(|| { let v = uci_get(uci, "network.@atm-bridge[0].vpi"); (!v.is_empty()).then_some(v) })
+                .unwrap_or_else(|| "8".into());
+            let vci_s = nonempty(&ov.vci)
+                .or_else(|| { let v = uci_get(uci, "network.@atm-bridge[0].vci"); (!v.is_empty()).then_some(v) })
+                .unwrap_or_else(|| "35".into());
+            let encap = nonempty(&ov.encaps)
+                .or_else(|| { let v = uci_get(uci, "network.@atm-bridge[0].encaps"); (!v.is_empty()).then_some(v) })
+                .unwrap_or_else(|| "llc".into());
+            let payload = nonempty(&ov.payload)
+                .or_else(|| { let v = uci_get(uci, "network.@atm-bridge[0].payload"); (!v.is_empty()).then_some(v) })
+                .unwrap_or_else(|| "bridged".into());
             Some(AtmConfig {
                 vpi: vpi_s.parse().unwrap_or(8),
                 vci: vci_s.parse().unwrap_or(35),
