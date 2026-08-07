@@ -209,8 +209,14 @@ impl DslConfig {
 
         let modulation = parse_modulation(&line_mode, &xfer_str)?;
         let annex = parse_annex(&annex_str)?;
-        let profiles = parse_tone(&tone)?;
+        let mut profiles = parse_tone(&tone)?;
         let xfer_mode = parse_xfer_mode(&xfer_str)?;
+
+        // VDSL2 profiles are meaningless for ADSL modulations — zero them
+        // (matching pack_dsl_line and the original firmware behavior).
+        if !matches!(modulation, Modulation::Vdsl2 | Modulation::Multimode) {
+            profiles = Vdsl2Profiles::default();
+        }
 
         let atm = if xfer_mode == XferMode::Atm {
             let vpi_s  = pick(&ov.vpi,  uci_get(uci, "network.@atm-bridge[0].vpi"),  "8");
