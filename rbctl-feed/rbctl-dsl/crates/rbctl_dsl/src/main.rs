@@ -150,10 +150,10 @@ fn main() {
             if args.syslog {
                 log_init::init_syslog();
             } else {
-                log_init::init_stdout();
+                log_init::init_stderr();
             }
         }
-        _ => log_init::init_stdout(),
+        _ => log_init::init_stderr(),
     }
 
     match cli.command {

@@ -20,5 +20,5 @@ tinyln-rs = { path = "../tinyln_rs" }
 libc      = { workspace = true }
 rbctl_proto = { path = "../rbctl_proto" }
 log       = { workspace = true }
-env_logger = { workspace = true }
+nanologger = { workspace = true }
 clap      = { workspace = true }

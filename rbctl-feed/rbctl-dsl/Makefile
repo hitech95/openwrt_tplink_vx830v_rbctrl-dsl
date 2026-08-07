@@ -28,6 +28,14 @@ include $(INCLUDE_DIR)/package.mk
 # relative path used by in-tree feed packages (../../lang/rust/...).
 include $(TOPDIR)/feeds/packages/lang/rust/rust-package.mk
 
+# Force panic=abort: the Rust feed's rust-values.mk sets
+# CARGO_PROFILE_RELEASE_PANIC=unwind globally, which drags in ~120 KB of unwind
+# tables (.eh_frame / .eh_frame_hdr / .gcc_except_table). For a procd-supervised
+# daemon that is restarted on crash, abort-on-panic is both smaller and the
+# desired failure model (Cargo.toml already requests panic="abort"). Appending
+# the same env var later wins in the shell command line (VAR=a VAR=b cmd → b).
+CARGO_PKG_CONFIG_VARS+=CARGO_PROFILE_RELEASE_PANIC=abort
+
 # Steer the vendored -sys crates at the SDK target staging so they link the
 # staged libuci / libubox / libnl-tiny (UCI_DIR / LIBUBOX_DIR / LIBNL_TINY_DIR
 # are honoured by libuci-sys, libubox-sys, and tinylibnl_sys respectively).
