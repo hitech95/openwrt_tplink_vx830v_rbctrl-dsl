@@ -92,17 +92,20 @@ as `"annexType:%x"` (`0x003b1168`).
 
 ## Modulation types
 
-The DSL **modulation** standard. String table at `0x003b0e08`:
+The DSL **modulation** standard. String table at `0x003b0e08` — see
+[modulation_annex.md](modulation_annex.md) for the full, verified table
+(codes 0–7 with ITU-T designations and valid annexes). Summary:
 
 | Modulation | Standard |
 |------------|----------|
-| `ADSL_ANSI_T1.413` | ANSI T1.413 (ADSL1, North America) |
+| `ADSL_ANSI_T1.413` | T1.413 (ADSL1, North America) |
 | `ADSL_G.dmt` | G.992.1 (ADSL over POTS) |
 | `ADSL_G.lite` | G.992.2 (splitterless ADSL) |
-| `ADSL_G.dmt.bis` | G.992.5 (ADSL2+) |
-| `ADSL_2plus` | ADSL2+ |
-| `ADSL_Multimode` | auto-select among ADSL modes |
+| `ADSL_G.dmt.bis` | G.992.3 (ADSL2) |
+| `ADSL_2plus` | G.992.5 (ADSL2+) |
+| `ADSL_Multimode` | G.992.x (auto-select among ADSL modes) |
 | `VDSL2` | G.993.2 (VDSL2) |
+| `Multimode` | G.99x (auto-select ADSL + VDSL2) |
 
 ### ADSL vs VDSL detection
 

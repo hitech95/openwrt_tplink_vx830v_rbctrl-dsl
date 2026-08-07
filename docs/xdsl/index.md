@@ -75,6 +75,7 @@ flowchart LR
 |----------|-------|
 | [opcodes.md](opcodes.md) | Detailed per-opcode breakdown (payloads, reply semantics) |
 | [layers.md](layers.md) | ATM vs PTM link handling, annex & modulation types |
+| [modulation_annex.md](modulation_annex.md) | Modulation & annex map — valid codes, standards, combinations |
 | [payloads.md](payloads.md) | TX payload byte-level layouts + enum tables (P1) |
 | [responses.md](responses.md) | RX response struct layouts (P2) |
 | [data_plane.md](data_plane.md) | Where decapsulation happens (board, not host) |

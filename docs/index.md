@@ -122,6 +122,7 @@ loop (`msg_serveForever`) with its own ack/retransmit.
 | [xdsl/index.md](xdsl/index.md) | How `libcmm.so` drives ATM/PTM/annex via `remote_board` (cross-reference) |
 | [xdsl/opcodes.md](xdsl/opcodes.md) | Per-opcode breakdown (payloads, reply semantics) |
 | [xdsl/layers.md](xdsl/layers.md) | ATM vs PTM link handling, annex & modulation types |
+| [xdsl/modulation_annex.md](xdsl/modulation_annex.md) | **Modulation & annex map** — valid codes, standards, combinations |
 | [xdsl/data_plane.md](xdsl/data_plane.md) | Where decapsulation happens (board, not host) |
 | [xdsl/payloads.md](xdsl/payloads.md) | **TX payload layouts (P1, solved)** — per-opcode byte maps + enum tables |
 | [xdsl/responses.md](xdsl/responses.md) | **RX response layouts (P2, solved)** — opcode 2/4 reply parsing |
