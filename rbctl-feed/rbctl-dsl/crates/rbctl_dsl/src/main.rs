@@ -1,6 +1,7 @@
 //! rbctl-dsl — EcoNet xDSL board configuration daemon.
 
 mod board;
+mod board_worker;
 mod daemon;
 mod hotplug;
 mod ipc;

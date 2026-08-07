@@ -19,24 +19,34 @@
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rbctl_proto::pack::{AtmEncap, AtmLinkParams, AtmLinkType, AtmQos};
-use rbctl_proto::unpack::LinkStatus;
 use rbctl_proto::validate;
 use tinyln_rs::rtnl::RtnlLink;
 
-use crate::board::{Board, BoardError};
+use crate::board::Board;
+use crate::board_worker::BoardWorker;
 use crate::hotplug::{self, LineEvent};
 use crate::ipc::{IpcListener, StatusSnapshot};
 use crate::uci_cfg::{AtmConfig, CliOverrides, DslConfig, XferMode};
 use crate::ubus_obj;
 
 // ── signal flags ─────────────────────────────────────────────────────────
+//
+// Read by both the main control loop and the board worker thread; written by
+// the signal handlers and the IPC command handler. Plain `AtomicBool` is fine
+// because we only ever treat them as level triggers (swap-to-clear).
 
-static SHOULD_EXIT: AtomicBool = AtomicBool::new(false);
-static SHOULD_RELOAD: AtomicBool = AtomicBool::new(false);
-static SHOULD_RESTART_LINE: AtomicBool = AtomicBool::new(false);
+pub(crate) static SHOULD_EXIT: AtomicBool = AtomicBool::new(false);
+pub(crate) static SHOULD_RELOAD: AtomicBool = AtomicBool::new(false);
+pub(crate) static SHOULD_RESTART_LINE: AtomicBool = AtomicBool::new(false);
+
+/// How long the main thread waits for the board worker to finish its
+/// best-effort `line_config_down()` before abandoning it at shutdown. The
+/// worker drops its retry budget first, so a responsive board finishes well
+/// within this; a silent board is abandoned (process exit reaps the thread).
+const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
 
 extern "C" fn handle_sigterm(_sig: libc::c_int) {
     SHOULD_EXIT.store(true, Ordering::SeqCst);
@@ -60,15 +70,6 @@ fn install_signal_handlers() {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
-
-fn link_status_to_event(status: LinkStatus) -> LineEvent {
-    match status {
-        LinkStatus::Up => LineEvent::Up,
-        LinkStatus::Initializing => LineEvent::Training,
-        LinkStatus::EstablishingLink => LineEvent::Handshake,
-        LinkStatus::NoSignal | LinkStatus::Unknown(_) => LineEvent::Down,
-    }
-}
 
 fn parent_iface(iface: &str) -> &str {
     match iface.rfind('.') {
@@ -166,15 +167,10 @@ fn find_ubus_socket() -> Option<String> {
     None
 }
 
-fn config_changed(old: &DslConfig, new: &DslConfig) -> bool {
-    old.modulation != new.modulation
-        || old.annex != new.annex
-        || old.profiles.bitmask() != new.profiles.bitmask()
-        || old.xfer_mode != new.xfer_mode
-}
-
-/// Build a [`StatusSnapshot`] from the current shared state.
-fn build_snapshot(state: &ubus_obj::SharedState, cfg: &DslConfig) -> StatusSnapshot {
+/// Build a [`StatusSnapshot`] from the current shared state. Reads only the
+/// mutex (never the board, never `cfg`), so it is constant-time and safe to
+/// call from the IPC path while the board worker is mid-request.
+fn build_snapshot(state: &ubus_obj::SharedState) -> StatusSnapshot {
     let st = state.lock().unwrap();
     match &st.line_obj {
         Some(line) => {
@@ -186,7 +182,7 @@ fn build_snapshot(state: &ubus_obj::SharedState, cfg: &DslConfig) -> StatusSnaps
                 uptime_secs: st.uptime_secs,
                 modulation: format!("{:?}", line.modulation_code),
                 annex: format!("{}", crate::ubus_obj::annex_string(line.annex_code)),
-                xfer_mode: format!("{:?}", cfg.xfer_mode),
+                xfer_mode: format!("{:?}", st.xfer_mode.unwrap_or(XferMode::Ptm)),
                 down_rate: line.metrics.down_curr_rate,
                 up_rate: line.metrics.up_curr_rate,
                 down_snr: line.metrics.down_snr_margin,
@@ -194,9 +190,9 @@ fn build_snapshot(state: &ubus_obj::SharedState, cfg: &DslConfig) -> StatusSnaps
             }
         }
         None => StatusSnapshot {
-            modulation: format!("{:?}", cfg.modulation),
-            annex: format!("{:?}", cfg.annex),
-            xfer_mode: format!("{:?}", cfg.xfer_mode),
+            modulation: format!("{:?}", st.modulation),
+            annex: format!("{:?}", st.annex),
+            xfer_mode: format!("{:?}", st.xfer_mode.unwrap_or(XferMode::Ptm)),
             ..Default::default()
         },
     }
@@ -330,6 +326,8 @@ pub fn run(
     {
         let mut st = state.lock().unwrap();
         st.xfer_mode = Some(cfg.xfer_mode);
+        st.modulation = cfg.modulation;
+        st.annex = cfg.annex;
     }
     let ubus_obj = ubus_obj::build_dsl_object(Arc::clone(&state));
     let mut ubus_conn = match connect_ubus(ubus_obj) {
@@ -348,37 +346,32 @@ pub fn run(
         hotplug::emit_tc_layer(script, cfg.xfer_mode);
     }
 
-    // 9. Main loop
+    // 9. Spawn the board worker + run a slim control loop.
     //
-    // ┌─────────────────────────────────────────────────────────────────┐
-    // │ OPEN ARCHITECTURE POINT — single-threaded poll loop             │
-    // │                                                                 │
-    // │ This loop is fully sequential: IPC accept → board poll (op 2)   │
-    // │ → ubus poll → sleep(1 s). A blocking board poll can therefore   │
-    // │ stall IPC and ubus responsiveness: when the board is silent,    │
-    // │ `board.get_line_obj()` waits up to `timeout × (retries+1)`      │
-    // │ ≈ 2 s × 4 = 8 s per iteration before giving up. During that    │
-    // │ window `rbctl-dsl status/stop` (IPC) and `ubus call dsl ...`    │
-    // │ are not served. The ubus transport (`transport.rs::wait_recv`)  │
-    // │ has the same root cause — it sleeps 1 ms because nothing here   │
-    // │ drives a real event loop.                                       │
-    // │                                                                 │
-    // │ Resolving this is deferred: the daemon should move to a         │
-    // │ multi-thread model with a dedicated board I/O thread, a shared  │
-    // │ state queue, and a bounded per-request timeout that is short    │
-    // │ enough (relative to the IPC/ubus latency budget) that control   │
-    // │ paths stay responsive even when the board stops responding.     │
-    // └─────────────────────────────────────────────────────────────────┘
-    let poll_interval = Duration::from_secs(1);
-    let mut last_status: Option<LinkStatus> = None;
-    let mut up_since: Option<Instant> = None;
-    let mut tc_emitted = false;
+    // The board (which can block for seconds on a silent/unresponsive line)
+    // lives on its own thread (`BoardWorker`) so this loop — which serves IPC
+    // and ubus — stays responsive at all times. Commands (reload / restart /
+    // stop) flow through the `SHOULD_*` static atomics that both threads read.
+    // Design: plans/daemon-event-loop-plan.md.
+    let worker = BoardWorker::new(
+        board,
+        cfg,
+        overrides.clone(),
+        Arc::clone(&state),
+        notify_script.map(str::to_string),
+    );
+    let (worker_done_tx, worker_done_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        worker.run();
+        let _ = worker_done_tx.send(());
+    });
 
-    log::info!("entering poll loop");
+    log::info!("entering control loop");
+    let tick = Duration::from_millis(50);
     while !SHOULD_EXIT.load(Ordering::SeqCst) {
         // Handle IPC commands
         if let Some(ipc) = &ipc {
-            let snap = build_snapshot(&state, &cfg);
+            let snap = build_snapshot(&state);
             match ipc.accept_one(&snap) {
                 Ok(Some(action)) => {
                     if action.should_reload {
@@ -396,79 +389,12 @@ pub fn run(
             }
         }
 
-        // Reload config (SIGHUP or IPC reload)
-        if SHOULD_RELOAD.swap(false, Ordering::SeqCst) {
-            log::info!("reload — re-reading UCI config");
-            if let Ok(new_cfg) = DslConfig::load(overrides) {
-                if config_changed(&cfg, &new_cfg) {
-                    log::info!("line params changed — reconfiguring");
-                    let _ = board.line_config_down();
-                    let _ = board.line_config_up(
-                        new_cfg.modulation, new_cfg.annex, new_cfg.profiles,
-                        new_cfg.bitswap, new_cfg.sra,
-                    );
-                    cfg = new_cfg;
-                    tc_emitted = false;
-                } else {
-                    log::info!("no line-param changes");
-                }
-            }
-        }
-
-        // Restart line (IPC restart-line — bounce without config change)
-        if SHOULD_RESTART_LINE.swap(false, Ordering::SeqCst) {
-            log::info!("restart-line — bouncing DSL line");
-            let _ = board.line_config_down();
-            std::thread::sleep(Duration::from_secs(1));
-            let _ = board.line_config_up(
-                cfg.modulation, cfg.annex, cfg.profiles, cfg.bitswap, cfg.sra,
-            );
-            tc_emitted = false;
-        }
-
-        // Poll board (op 2)
-        match board.get_line_obj() {
-            Ok(line) => {
-                let status = line.link_status;
-
-                if status == LinkStatus::Up && up_since.is_none() {
-                    up_since = Some(Instant::now());
-                } else if status != LinkStatus::Up {
-                    up_since = None;
-                }
-
-                {
-                    let mut st = state.lock().unwrap();
-                    st.line_obj = Some(line.clone());
-                    st.uptime_secs = up_since.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-                    st.xfer_mode = Some(cfg.xfer_mode);
-                }
-
-                if Some(status) != last_status {
-                    let event = link_status_to_event(status);
-                    log::info!("line state: {status:?} → {event:?}");
-                    if let Some(script) = notify_script {
-                        hotplug::emit_status(script, event);
-                    }
-                    if status == LinkStatus::Up && !tc_emitted {
-                        if let Some(script) = notify_script {
-                            hotplug::emit_tc_layer(script, cfg.xfer_mode);
-                        }
-                        tc_emitted = true;
-                    }
-                    last_status = Some(status);
-                }
-            }
-            Err(BoardError::Timeout) => {}
-            Err(e) => log::error!("poll error: {e}"),
-        }
-
         // Poll ubus (non-blocking)
         if let Some(conn) = ubus_conn.as_mut() {
             let _ = conn.poll_one();
         }
 
-        std::thread::sleep(poll_interval);
+        std::thread::sleep(tick);
     }
 
     // 10. Clean shutdown
@@ -476,7 +402,14 @@ pub fn run(
     if let Some(script) = notify_script {
         hotplug::emit_status(script, LineEvent::Down);
     }
-    let _ = board.line_config_down();
+    // The worker performs `line_config_down()` on its way out; bound the wait
+    // so a silent board can't hold shutdown (it drops its retry budget first).
+    match worker_done_rx.recv_timeout(SHUTDOWN_DEADLINE) {
+        Ok(()) => log::info!("board worker exited cleanly"),
+        Err(_) => log::warn!(
+            "board worker didn't exit within {SHUTDOWN_DEADLINE:?}; abandoning (process exit reaps it)"
+        ),
+    }
     delete_vlan_iface(parent, vlan);
     let _ = std::fs::remove_file(crate::ipc::SOCK_PATH);
 
@@ -491,27 +424,5 @@ mod tests {
     fn parent_iface_vlan() {
         assert_eq!(parent_iface("lan0.500"), "lan0");
         assert_eq!(parent_iface("eth0"), "eth0");
-    }
-
-    #[test]
-    fn link_status_events() {
-        assert_eq!(link_status_to_event(LinkStatus::Up), LineEvent::Up);
-        assert_eq!(link_status_to_event(LinkStatus::NoSignal), LineEvent::Down);
-        assert_eq!(link_status_to_event(LinkStatus::Initializing), LineEvent::Training);
-        assert_eq!(link_status_to_event(LinkStatus::EstablishingLink), LineEvent::Handshake);
-    }
-
-    #[test]
-    fn config_change_detection() {
-        let a = DslConfig::default();
-        let b = DslConfig { annex: rbctl_proto::pack::Annex::A, ..DslConfig::default() };
-        assert!(config_changed(&a, &b));
-    }
-
-    #[test]
-    fn config_no_change() {
-        let a = DslConfig::default();
-        let b = DslConfig::default();
-        assert!(!config_changed(&a, &b));
     }
 }

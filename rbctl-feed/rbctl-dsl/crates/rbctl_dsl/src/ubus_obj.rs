@@ -10,6 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use rbctl_proto::pack::{Annex, Modulation};
 use rbctl_proto::unpack::{LineObj, LineMetrics, LinkStatus};
 use ubus::server::UbusObject;
 use ubus::blobmsg::{BlobBuilder, BlobMsgTable};
@@ -33,7 +34,7 @@ mod lstate {
 // ── shared state ─────────────────────────────────────────────────────────
 
 /// Live DSL metrics shared between the board poller and the ubus handler.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct DslState {
     /// Latest op 2 reply, or `None` if no successful poll yet.
     pub line_obj: Option<LineObj>,
@@ -41,6 +42,24 @@ pub struct DslState {
     pub uptime_secs: u64,
     /// The configured xfer mode (for `.mode` field).
     pub xfer_mode: Option<XferMode>,
+    /// Configured modulation / annex — mirrored from `DslConfig` so IPC/ubus
+    /// status readers never need to borrow the config (which lives on the
+    /// board worker thread). Refreshed on reload.
+    pub modulation: Modulation,
+    pub annex: Annex,
+}
+
+impl Default for DslState {
+    fn default() -> Self {
+        // Match DslConfig::default (VDSL2 Annex B).
+        Self {
+            line_obj: None,
+            uptime_secs: 0,
+            xfer_mode: None,
+            modulation: Modulation::Vdsl2,
+            annex: Annex::B,
+        }
+    }
 }
 
 pub type SharedState = Arc<Mutex<DslState>>;
@@ -252,6 +271,7 @@ mod tests {
             }),
             uptime_secs: 300,
             xfer_mode: Some(XferMode::Ptm),
+            ..Default::default()
         };
         let reply = build_metrics_reply(&st).unwrap();
         assert!(!reply.contents().is_empty());
