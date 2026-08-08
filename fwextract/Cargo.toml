@@ -1,0 +1,7 @@
+[package]
+name = "fwextract"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "GPL-2.0-only"
+description = "Extract the remote-board (xDSL) firmware from a TP-Link multi-image container"
