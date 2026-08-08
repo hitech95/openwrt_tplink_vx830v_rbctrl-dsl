@@ -224,24 +224,92 @@ someone feeds an already-decrypted firmware to the upgrade process.
 
 ## Extracted content (VX830v_1.0_WI_20250703.bin)
 
-| Component | Offset | Size | Notes |
-|-----------|--------|------|-------|
-| Host kernel | `tagLen` (0x330) | 0x01980000 (25.5 MB) | UBI image, 199 EC + 204 VID headers |
-| uImage (inside kernel UBI) | tagLen + 0x41000 | ~669 KB | ARM, entry 0x41E00000, name "seconduboot" |
-| Remote board | `tagLen + totalImageLen` (0x019803CA) | 5.9 MB | Header magic "2RDH", version 7.3.261.1_v016 |
+After AES decryption, the firmware data splits into three parts:
 
-### Remote board image header (`2RDH` format)
+| Component | File offset | Size | Notes |
+|-----------|-------------|------|-------|
+| Host kernel | 0x330 | 0x01980000 (25.5 MB) | UBI image: 199 EC + 204 VID headers |
+| uImage (inside host UBI) | 0x41030 | ~669 KB | ARM, entry `0x41E00000`, name "seconduboot" |
+| Gap (gzip tar manifest) | 0x01980330 | 154 bytes | gzip → 10 KB tar listing of `upgrade_exe/` |
+| Remote board (`2RDH`) | 0x019803CA | 6.2 MB | `tclinux.trx` container, see below |
+
+### Gap data
+
+The 154 bytes between the host kernel length and `totalImageLen` are a
+**gzip-compressed tar listing** of an `upgrade_exe/` directory (10,240 bytes
+decompressed). This is likely used by the host's upgrade script to verify
+or lay out files before flashing.
+
+### Remote board image — `2RDH` / `tclinux.trx` format
+
+Confirmed by [OpenWrt econet target
+`tclinux-trx.sh`](https://git.openwrt.org/?p=openwrt/openwrt.git;a=blob;f=target/linux/econet/image/tclinux-trx.sh;hb=HEAD)
+(merged September 2025). The `2RDH` magic is the standard EcoNet SDK
+firmware container, used across the EN75xx family (EN751221, EN7528, etc.).
 
 ```
-Offset 0x00: "2RDH"           magic (4 bytes)
-Offset 0x04: 0x00010000       version/flags
-Offset 0x08: image_size       (big-endian u32)
-Offset 0x0C: checksum         (u32)
-Offset 0x10: version_string   (null-terminated ASCII, e.g. "7.3.261.1_v016\n")
+Offset Size  Field               Value (this firmware)
+------ ----  ------------------  ---------------------------
+0x00   4     magic               "2RDH"
+0x04   BE32  header_length       256 (0x100)
+0x08   BE32  total_length        6,188,862 (header + content)
+0x0C   BE32  crc32_content       CRC-32/JAMCRC of content ✓
+0x10   32    version_string      "7.3.261.1_v016\n" (null-padded)
+0x30   32    customer_version    (newline, null-padded)
+0x50   BE32  kernel_length       1,788,874 (1.7 MB, LZMA compressed)
+0x54   BE32  rootfs_length       4,399,484 (4.2 MB)
+0x58   BE32  romfile_length      0
+0x5C   32    model_string        "3 6035 122 0\n"
+0x7C   BE32  load_address        0x80002000 (MIPS KSEG0)
+0x80   128   reserved            all zeros
+─── 0x100: content begins ───
+0x100        LZMA kernel          props=0x5D (lc=3,lp=0,pb=2), dict=8 MB
+             0xFF padding         (to rootfs alignment)
+             squashfs rootfs      (rootfs_length bytes)
 ```
 
-The body after the header has high entropy (~7.95), suggesting it is
-compressed (LZMA or similar) or further encrypted by the EcoNet board.
+> All multi-byte fields are **big-endian** (MIPS native). The CRC is
+> CRC-32/**JAMCRC** (one's complement of standard CRC-32), computed over
+> the content starting at offset 0x100.
+
+#### LZMA kernel
+
+The kernel at offset `0x100` is **LZMA-compressed** (standard alone
+format, props `0x5D`, 8 MB dictionary). Decompression yields 5,273,216
+bytes of valid **MIPS big-endian** code:
+
+| Evidence | Detail |
+|----------|--------|
+| Reset vector | branch to a high kernel address (MIPS `j` instruction) |
+| Function prologues | standard MIPS epilogue pattern (`addiu/lui/sw` on `$sp`/`$s0`) |
+| Linux version | `3.18.21` (gcc 4.6.3, Buildroot 2015.08.1) |
+| Subsystems found | JFFS2, ATM (`atm_dev_register`), 802.1Q VLAN, SPI NAND, NTFS |
+| Load address | `0x80002000` (MIPS KSEG0 unmapped cached segment) |
+
+This is the **EcoNet EN75xx Linux kernel** — the autonomous DSL SoC's
+operating system. It can be loaded into Ghidra as `MIPS:BE:32:default`
+for further analysis.
+
+#### Rootfs
+
+The squashfs rootfs follows the LZMA kernel (with `0xFF` padding to
+alignment). Size: 4,399,484 bytes (4.2 MB).
+
+### EcoNet platform context
+
+The OpenWrt econet target (merged September 2025) documents the broader
+EN75xx platform:
+
+- **Bootloader**: accessible via UART at 115200 baud, supports xmodem
+  flashing (`xmdm 0x80020000 <len>` → `flash 0x80000 0x80020000 <len>`)
+- **Default bootloader credentials**: documented for similar TP-Link
+  devices in the OpenWrt econet target
+- **Dual-image layout**: `tclinux` (OS_A) + `tclinux_alt` (OS_B),
+  selected by a boot flag in the `reserve`/`reservearea` partition
+- **Flash layout**: `bootloader` (256 KB) → `romfile` (256 KB) →
+  `tclinux` (kernel + rootfs) → `tclinux_alt` → other partitions
+- **Related devices**: SmartFiber XP8421-B (EN751221), TP-Link Archer
+  VR1200v v2 — same SoC family, same `2RDH` format
 
 ## fwextract `--decrypt` flag
 
