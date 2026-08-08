@@ -177,7 +177,7 @@ impl<T: Transport> Board<T> {
     pub fn get_line_obj(&mut self) -> Result<LineObj, BoardError> {
         let r = self.request(2, &[0x02])?;
         let data = strip_echo(&r, 0x02);
-        if data.len() < 59 {
+        if data.len() < 63 {
             return Err(BoardError::BadResponse("line obj reply too short"));
         }
         unpack::parse_line_obj(data).map_err(BoardError::BadResponse)
@@ -327,12 +327,12 @@ mod tests {
             match subtype {
                 1 | 3 => vec![subtype, 0x00], // status = 0
                 2 => {
-                    // payload_type + 59 bytes of line obj data
+                    // payload_type + 63 bytes of line obj data
                     let mut p = vec![0x02];
-                    p.resize(1 + 59, 0);
+                    p.resize(1 + 63, 0);
                     // Set link_status = Up (0x05) at offset 5 (payload[1+4])
                     p[5] = 0x05;
-                    // Set down_curr_rate at offset 0x08 (4 bytes BE)
+                    // Set down_rate at offset 0x08 (4 bytes BE)
                     p[1 + 0x08..1 + 0x0c].copy_from_slice(&40000u32.to_be_bytes());
                     p
                 }
@@ -433,7 +433,7 @@ mod tests {
         let mut board = make_board();
         let obj = board.get_line_obj().unwrap();
         assert_eq!(obj.link_status, LinkStatus::Up);
-        assert_eq!(obj.metrics.down_curr_rate, 40000);
+        assert_eq!(obj.metrics.down_rate, 40000);
     }
 
     #[test]
@@ -528,7 +528,7 @@ mod tests {
         let mut board = make_board();
         // Override response with NoSignal status
         let mut payload = vec![0x02];
-        payload.resize(1 + 59, 0);
+        payload.resize(1 + 63, 0);
         payload[5] = 0x00; // NoSignal
         board.sock.set_response(2, payload);
 
@@ -541,7 +541,7 @@ mod tests {
         let mut board = make_board();
         // Override with a response that has a corrupted payload
         let mut payload = vec![0x02];
-        payload.resize(1 + 59, 0);
+        payload.resize(1 + 63, 0);
         payload[5] = 0x05;
         board.sock.set_response(2, payload);
 

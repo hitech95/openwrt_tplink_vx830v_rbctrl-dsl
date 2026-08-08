@@ -11,7 +11,7 @@
 use std::sync::{Arc, Mutex};
 
 use rbctl_proto::pack::{Annex, Modulation};
-use rbctl_proto::unpack::{LineObj, LineMetrics, LinkStatus};
+use rbctl_proto::unpack::{DataPath, LineObj, LineMetrics, LinkStatus};
 use ubus::server::UbusObject;
 use ubus::blobmsg::{BlobBuilder, BlobMsgTable};
 use ubus::error::UbusError;
@@ -184,19 +184,18 @@ fn profile_string(profiles: rbctl_proto::pack::Vdsl2Profiles) -> String {
 fn add_direction(bb: &mut BlobBuilder, name: &str, m: &LineMetrics, upstream: bool) {
     bb.open_table(Some(name));
 
-    let (rate, max_rate, snr, attn, power, attndr) = if upstream {
-        (m.up_curr_rate, m.up_max_rate, m.up_snr_margin, m.up_attenuation, 0, m.up_rate)
+    let (rate, attndr, snr, attn, power) = if upstream {
+        (m.up_rate, m.up_attainable_rate, m.up_noise_margin, m.up_attenuation, m.up_output_power)
     } else {
-        (m.down_curr_rate, m.down_max_rate, m.down_snr_margin, m.down_attenuation, 0, m.down_rate)
+        (m.down_rate, m.down_attainable_rate, m.down_noise_margin, m.down_attenuation, m.down_output_power)
     };
 
     bb.put_i32(Some("data_rate"), rate as i32);
-    bb.put_i32(Some("max_data_rate"), max_rate as i32);
+    bb.put_i32(Some("attndr"), attndr as i32);
     bb.put_i32(Some("snr"), snr as i32);
     bb.put_i32(Some("latn"), attn as i32);
     bb.put_i32(Some("satn"), attn as i32);
     bb.put_i32(Some("actatp"), power as i32);
-    bb.put_i32(Some("attndr"), attndr as i32);
     bb.put_i32(Some("interleave_delay"), 0);
     bb.put_i32(Some("inp"), 0);
 
@@ -261,11 +260,14 @@ mod tests {
                 status: 0,
                 link_status: LinkStatus::Up,
                 modulation_code: 6,
+                data_path: DataPath::Ptm,
                 annex_code: 1,
                 vdsl2_profile_bitmask: 0x040,
+                is_atm: false,
+                uptime_secs: 300,
                 metrics: LineMetrics {
-                    down_curr_rate: 50000,
-                    up_curr_rate: 10000,
+                    down_rate: 50000,
+                    up_rate: 10000,
                     ..Default::default()
                 },
             }),

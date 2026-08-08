@@ -146,8 +146,8 @@ impl Selftest {
                 got_response = true;
                 lines.push(format!(
                     "op2: {:?}, down={} up={} kbps, SNR d={:.1} u={:.1} dB",
-                    o.link_status, o.metrics.down_curr_rate, o.metrics.up_curr_rate,
-                    o.metrics.down_snr_margin as f32 / 10.0, o.metrics.up_snr_margin as f32 / 10.0,
+                    o.link_status, o.metrics.down_rate, o.metrics.up_rate,
+                    o.metrics.down_noise_margin as f32 / 10.0, o.metrics.up_noise_margin as f32 / 10.0,
                 ));
             }
             Err(crate::board::BoardError::Timeout) => lines.push("op2: no response".into()),

@@ -183,10 +183,10 @@ fn build_snapshot(state: &ubus_obj::SharedState) -> StatusSnapshot {
                 modulation: format!("{:?}", line.modulation_code),
                 annex: format!("{}", crate::ubus_obj::annex_string(line.annex_code)),
                 xfer_mode: format!("{:?}", st.xfer_mode.unwrap_or(XferMode::Ptm)),
-                down_rate: line.metrics.down_curr_rate,
-                up_rate: line.metrics.up_curr_rate,
-                down_snr: line.metrics.down_snr_margin,
-                up_snr: line.metrics.up_snr_margin,
+                down_rate: line.metrics.down_rate,
+                up_rate: line.metrics.up_rate,
+                down_snr: line.metrics.down_noise_margin,
+                up_snr: line.metrics.up_noise_margin,
             }
         }
         None => StatusSnapshot {
