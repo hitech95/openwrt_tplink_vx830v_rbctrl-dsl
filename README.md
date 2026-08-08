@@ -8,10 +8,12 @@ protocol on mainline OpenWrt.
 
 | Phase | Status | Description |
 |-------|--------|-------------|
-| 0 — Toolchain gate | **PASSED** | UCI + uloop + ubus link/load on aarch64-musl (QEMU verified) |
-| 1 — Protocol core | **PASSED** | CRC-16/ARC, frame builder, pack/unpack for all opcodes (18/18 tests) |
+| 0 — Toolchain gate | **PASSED** | UCI + ubus-zero (pure Rust) + libnl-tiny link/load on aarch64-musl (QEMU verified) |
+| 1 — Protocol core | **PASSED** | CRC-16/ARC, frame builder, pack/unpack for all opcodes, config validation |
 | 2 — Board control | **PASSED** | AF_PACKET socket, netlink VLAN mgmt, Board struct with 8 opcodes (QEMU selftest 5/5) |
-| 3 — OpenWrt integration | Pending | UCI config loader, ubus object, procd init, hotplug emitter |
+| 3 — OpenWrt integration | **PASSED** | UCI config loader, ubus object, procd init, hotplug emitter, LED handler |
+| 4 — Packaging | **DONE** | APK builds, ships binary + init + notify + LED hotplug + uci-defaults |
+| 5 — P4 pcap validation | Deferred | Awaits device deployment |
 
 ## Repository layout
 
@@ -22,12 +24,13 @@ rbctl-feed/rbctl-dsl/          Cargo workspace (the OpenWrt package)
 │   ├── af_packet/             AF_PACKET raw Ethernet socket (libc-only)
 │   ├── tinyln_rs_sys/         bindgen FFI for OpenWrt libnl-tiny
 │   ├── tinyln_rs/             Safe Rust wrapper for libnl-tiny (9 modules)
-│   └── rbctl_dsl/             Daemon binary (board.rs, main.rs, transport.rs)
+│   └── rbctl_dsl/             Daemon binary (board, transport, uci_cfg, hotplug, main)
+├── files/                     Shipped config (init, notify, LED hotplug, uci-defaults)
 ├── Cargo.toml                 Workspace root
 └── Makefile                   OpenWrt package definition (rust-package.mk)
 docs/                          Reverse-engineering documentation
 examples/                      Reference implementations (Python: checksum, pack, unpack)
-plans/                         Implementation plan (phases, gates, architecture)
+plans/                         Implementation plans (RE + daemon build)
 ```
 
 ## Crates
@@ -124,7 +127,7 @@ The `--selftest` mode validates:
 1. AF_PACKET socket open + BPF filter + interface bind
 2. VLAN lifecycle via netlink (create → up → down → delete)
 3. Board opcode round-trip (expects timeout without hardware)
-4. UCI context and uloop initialization
+4. UCI context and ubus initialization
 
 All TX/RX frames are captured to `/tmp/rbctl-capture/` as `.bin` files with
 a human-readable `hexdump.txt`.
@@ -135,16 +138,22 @@ See [docs/test.md](docs/test.md) for the complete on-device testing guide,
 including binary deployment, library mismatch handling, frame capture
 retrieval, and RE validation workflow.
 
-## Protocol
+## Protocol & firmware analysis
 
 The daemon communicates with the EcoNet xDSL board using raw Ethernet frames
-with a proprietary ethertype (`0x88B5`). See:
+with a proprietary ethertype (`0x88B5`). Full reverse-engineering documentation:
 
-- [docs/protocol.md](docs/protocol.md) — frame layout, field offsets, BPF filter
-- [docs/network.md](docs/network.md) — socket setup, VLAN handling, QinQ model
+- [docs/protocol.md](docs/protocol.md) — frame layout, checksum, BPF filter
 - [docs/checksum.md](docs/checksum.md) — CRC-16/ARC algorithm and covered region
-- [docs/commands/dispatch.md](docs/commands/dispatch.md) — opcode dispatch table
-- [docs/xdsl/](docs/xdsl/) — data plane, payload formats, ATM vs PTM
+- [docs/architecture.md](docs/architecture.md) — system architecture (cmm bus, 0x88B5 bridge)
+- [docs/libcmm.md](docs/libcmm.md) — OAL layer (sole-bridge proof, TX/RX serializers)
+- [docs/network.md](docs/network.md) — socket setup, VLAN handling, QinQ data plane
+- [docs/led_control.md](docs/led_control.md) — LED control & DSL polling architecture (cos daemon, tp_gpio.ko)
+- [docs/commands/dispatch.md](docs/commands/dispatch.md) — opcode dispatch table (13 handlers)
+- [docs/xdsl/](docs/xdsl/) — TX payload formats, RX response layouts, ATM vs PTM, VLAN selection rule
+- [docs/map.md](docs/map.md) — complete symbol map (remote_board + libcmm.so)
+- [docs/openwrt.md](docs/openwrt.md) — OpenWrt integration contract & capability matrix
+- [examples/](examples/) — Python reference implementations (checksum, pack, unpack)
 
 ## License
 
