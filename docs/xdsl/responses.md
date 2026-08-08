@@ -38,46 +38,64 @@ the wire bytes directly.
 
 ---
 
-## Opcode 2 — `dsl_get_line_obj` reply (59 bytes)
+## Opcode 2 — `dsl_get_line_obj` reply (63 bytes)
 
-Parsed by `oal_dsl_msgToLineObj` (`FUN_00323d98`); the channel/stats parsers
-slice the same 59-byte reply differently.
+Parsed by `oal_dsl_msgToLineObj` (`FUN_00323d98`) on the host; filled by
+`dslCfgGet` (`FUN_004048c8`) on the board. The board-side code is now
+available (EcoNet MIPS `remote_board`, see [../server.md](../server.md))
+and provides **ground truth** for every field.
 
-### Confirmed fields
+### Confirmed layout (board-side ground truth)
 
-| Offset | Size | Field | Encoding / values |
-|--------|------|-------|-------------------|
-| `0x00` | 4 | status | uint32 BE — `0` = success, else error |
-| `0x04` | 1 | link status | `0`,`2`=NoSignal · `1`=Up · `3`=Initializing · `4`=EstablishingLink |
-| `0x05` | 1 | modulation | `0`=ADSL_ANSI_T1.413 · `1`=G.dmt · `2`=G.lite · `3`=G.dmt.bis · `4`=ADSL_2plus · `6`=VDSL2 |
-| `0x06` | 1 | reserved | (not read) |
-| `0x07` | 1 | annex | `ANNEX` code (0=A … 8=auto) |
-| `0x39` | 2 | VDSL2 profile bitmask | uint16 BE — bits per `VDSL2_PROFILE` (only read when modulation == 6) |
+| Offset | Size | Board writer | Field | Encoding |
+|--------|------|-------------|-------|----------|
+| `0x00` | 4 | `dslCfgGet` return | status | `0` = success |
+| `0x04` | 1 | `apiGetXdslStatus` | link status | `0`,`2`=NoSignal · `1`=Up · `3`=Init · `4`=Establishing |
+| `0x05` | 1 | `apiGetAdslType` | modulation | `0`=T1.413 · `1`=G.dmt · `2`=G.lite · `3`=G.dmt.bis · `4`=ADSL2+ · `6`=VDSL2 |
+| `0x06` | 1 | `apiGetAdslDataPath` | **data path** | **`0`=ATM · `1`=PTM** ← was "reserved" |
+| `0x07` | 1 | `apiGetAdslType` | annex | `0`=A · `1`=B · `2`=I · `3`=M |
+| `0x08` | 4 | `FUN_00402818` | downstream rate | uint32 BE, kbps |
+| `0x0c` | 4 | `FUN_00402818` | upstream rate | uint32 BE, kbps |
+| `0x10` | 4 | `FUN_00402bf8` | **output power** pair ¹ | uint32 BE |
+| `0x14` | 4 | `FUN_00402bf8` | **output power** pair ¹ | uint32 BE |
+| `0x18` | 4 | `FUN_00402988` | **noise margin** pair ¹ | uint32 BE, dB×10 (e.g. 63 = 6.3 dB) |
+| `0x1c` | 4 | `FUN_00402988` | **noise margin** pair ¹ | uint32 BE, dB×10 |
+| `0x20` | 4 | `FUN_00402ac0` | **attenuation** pair ¹ | uint32 BE, dB×10 |
+| `0x24` | 4 | `FUN_00402ac0` | **attenuation** pair ¹ | uint32 BE, dB×10 |
+| `0x28` | 4 | `FUN_00402cec` | **attainable rate** pair ¹ | uint32 BE, kbps |
+| `0x2c` | 4 | `FUN_00402cec` | **attainable rate** pair ¹ | uint32 BE, kbps |
+| `0x30` | 4 | `FUN_00402e24` | **CRC errors** pair ¹ | uint32 BE, count |
+| `0x34` | 4 | `FUN_00402e24` | **CRC errors** pair ¹ | uint32 BE, count |
+| `0x38` | 1 | `dslCfgGet` | **ATM connection flag** | `1`=ATM, `0`=PTM ← new field |
+| `0x39` | 2 | `FUN_00402284` | VDSL2 profile bitmask | uint16 BE, only when modulation=6 |
+| `0x3b` | 4 | `dslCfgGet` | **uptime seconds** | uint32 BE, only when link=1 ← was "unknown" |
 
-### The 12 metric uint32 fields (offsets `0x08`–`0x34`, each BE)
+> ¹ The board reads DS and US values from `/proc/tc3162/adsl_stats` and
+> writes them to consecutive offsets. The DS/US order within each pair
+> follows the order in the stats file. The noise margin, attenuation, and
+> output power values are in **dB × 10** (parsed via `sscanf("%d.%d")`
+> then multiplied by 10).
 
-The reply carries 12 big-endian uint32 values. Their **offsets and types are
-authoritative**; the human names below are *inferred* from TR-181 ordering
-(`Device.DSL.Line.` + `Channel.`) and the destination struct offsets:
+### Corrections from board-side ground truth
 
-| Offset | Size | Read by | Inferred name |
-|--------|------|---------|---------------|
-| `0x08` | 4 | channel obj | downstream curr rate |
-| `0x0c` | 4 | channel obj | upstream curr rate |
-| `0x10` | 4 | line obj | upstream curr rate |
-| `0x14` | 4 | line obj | downstream curr rate |
-| `0x18` | 4 | line obj | upstream max rate |
-| `0x1c` | 4 | line obj | downstream max rate |
-| `0x20` | 4 | line obj | upstream SNR margin |
-| `0x24` | 4 | line obj | downstream SNR margin |
-| `0x28` | 4 | line obj | upstream attenuation |
-| `0x2c` | 4 | line obj | downstream attenuation |
-| `0x30` | 4 | line stats | upstream errors (ES) |
-| `0x34` | 4 | line stats | downstream errors (SES) |
+The previous (host-side-only) analysis inferred field names from TR-181
+ordering and destination struct offsets. Several were **wrong**:
 
-> The three parsers divide the 12 fields: `msgToChannelObj` reads `[0x08,0x0c]`,
-> `msgToLineObj` reads `[0x10..0x2c]`, `msgToLineStatsObj` reads `[0x30,0x34]`.
-> Field `[0x56]` is reserved; the reply is 59 bytes total.
+| Offset | Previous (inferred) | Corrected (board ground truth) |
+|--------|---------------------|-------------------------------|
+| `0x06` | reserved | **data path** (0=ATM, 1=PTM) |
+| `0x10` | US curr rate | **output power** (pair) |
+| `0x14` | DS curr rate | **output power** (pair) |
+| `0x18` | US max rate | **noise margin** (pair, dB×10) |
+| `0x1c` | DS max rate | **noise margin** (pair, dB×10) |
+| `0x20` | US SNR margin | **attenuation** (pair, dB×10) |
+| `0x24` | DS SNR margin | **attenuation** (pair, dB×10) |
+| `0x28` | US attenuation | **attainable rate** (pair) |
+| `0x2c` | DS attenuation | **attainable rate** (pair) |
+| `0x30` | US errors (ES) | **CRC errors** (pair) |
+| `0x34` | DS errors (SES) | **CRC errors** (pair) |
+| `0x38` | (not read) | **ATM connection flag** |
+| `0x3b` | unknown u32 | **uptime seconds** |
 
 ---
 
@@ -115,16 +133,14 @@ Parsed by `oal_dsl_msgToChannelStatsTotObj` (`FUN_0032483c`). 7 uint32
 
 ## Open items (deferred to P4 / capture)
 
-- ~~Confirm the 12 + 6 *inferred* metric names against a real reply~~ — offsets
-  confirmed via hardware capture (all zeros with NoSignal; field names still
-  inferred from TR-181 ordering).
-- **Undocumented u32 at payload[0x3B]**: `proto_postprocess` byte-swaps a u32
-  at offset 0x3B (14th htonl in the op2 branch), but none of the four parsers
-  (`msgToLineObj`, `msgToChannelObj`, `msgToLineStatsObj`, `msgToChannelStatsTotObj`)
-  read it. It is a meaningful big-endian value on the wire but its purpose is
-  unknown. The op2 reply payload is 63 bytes: 59 documented + this 4-byte field.
-- Two config bytes (`[0x02]`,`[0x03]` in the opcode-1 TX) round-trip through the
-  same struct; a capture will name them.
+- ~~Confirm the 12 + 6 *inferred* metric names~~ — **RESOLVED** via board-side
+  ground truth (see corrections table above).
+- ~~Undocumented u32 at payload[0x3B]~~ — **RESOLVED**: uptime seconds, only
+  filled when link status == 1.
+- ~~Offset 0x06 "reserved"~~ — **RESOLVED**: data path flag (0=ATM, 1=PTM).
+- The DS/US ordering within each metric pair (offsets 0x10–0x34) follows the
+  order values appear in `/proc/tc3162/adsl_stats`; confirm exact DS/US
+  assignment per pair with a live capture.
 
 ---
 
