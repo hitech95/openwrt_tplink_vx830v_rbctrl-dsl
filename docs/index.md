@@ -136,6 +136,7 @@ loop (`msg_serveForever`) with its own ack/retransmit.
 | [safety-audit.md](safety-audit.md) | **Type/memory-safety audit (pre-P4)** — every `unsafe` site, fixes applied, SDK verification gate |
 | [map.md](map.md) | **Symbol map**: every function/global/type, original → renamed, with addresses |
 | [firmware_encryption.md](firmware_encryption.md) | **Firmware container format & encryption** — AES-128-CBC with key embedded in RSA-2048 PSS signature, decrypted in `rsl_sys_updateFirmware` |
+| [server.md](server.md) | **Board-side `remote_board`** (EcoNet EN7516 MIPS) — 0x88B5 server: dispatch table, handler analysis, client vs server opcode comparison (13 vs 12 entries) |
 | [led_control.md](led_control.md) | **LED control & DSL polling** — `cos` daemon, `tp_gpio.ko`, blink patterns, 10s polling interval, handler table |
 | [hunt.md](hunt.md) | **Search kit**: grep patterns & commands for finding missing binaries (rootfs, board firmware, EcoNet SDK) |
 | [tr-181.md](tr-181.md) | **TR-181 quick reference** — the Device:2 data model, why it shapes the code, and the `Device.DSL.` field mappings |
