@@ -67,8 +67,23 @@ def main():
         print(__doc__)
         sys.exit(0)
 
-    bin_path = args[0]
-    out_dir = Path(args[2]) if len(args) >= 4 and args[1] == "--output-dir" else Path(".")
+    bin_path = None
+    out_dir = Path(".")
+
+    i = 0
+    while i < len(args):
+        if args[i] == "--output-dir" and i + 1 < len(args):
+            out_dir = Path(args[i + 1])
+            i += 2
+        elif bin_path is None:
+            bin_path = args[i]
+            i += 1
+        else:
+            i += 1
+
+    if bin_path is None:
+        print(__doc__)
+        sys.exit(1)
 
     data = Path(bin_path).read_bytes()
     keys = find_pubkey_blobs(data)
@@ -78,6 +93,7 @@ def main():
         sys.exit(1)
 
     print(f"Found {len(keys)} RSA public key(s) in {bin_path}:\n")
+    out_dir.mkdir(parents=True, exist_ok=True)
     for offset, blob, info in keys:
         name = f"rsa{info['bitlen']}_pub.bin"
         out_path = out_dir / name
