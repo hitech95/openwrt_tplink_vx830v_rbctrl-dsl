@@ -155,6 +155,31 @@ with a proprietary ethertype (`0x88B5`). Full reverse-engineering documentation:
 - [docs/openwrt.md](docs/openwrt.md) — OpenWrt integration contract & capability matrix
 - [examples/](examples/) — Python reference implementations (checksum, pack, unpack)
 
+## Legal notice
+
+The reverse-engineering documentation in `docs/` and the reference scripts in
+`examples/` were produced solely to achieve **interoperability** between this
+daemon and the EcoNet xDSL board already lawfully owned and operated by the
+author. This activity is expressly permitted for interoperability purposes
+under, among others:
+
+- **EU**: Directive 2009/24/EC, Article 6 (decompilation for interoperability).
+- **USA**: 17 U.S.C. §1201(f) (reverse engineering for interoperability).
+- **UK**: Copyright, Designs and Patents Act 1988, s. 296B.
+
+The `rbctl-dsl` Rust implementation is an **independent reimplementation**
+produced by reverse-engineering the proprietary `remote_board` binary and
+`libcmm.so` library for interoperability purposes, as permitted by the
+statutes above. No source code, decompiled listing, or creative expression
+from those components is reproduced in the source tree; symbol names,
+addresses, and call-tree references that appear in the documentation are
+factual findings about the wire protocol and the binary's structure, retained
+as engineering breadcrumbs rather than derivative works.
+
+Product and company names mentioned in this project (e.g. TP-Link, EcoNet,
+Trendchip, OpenWrt) are trademarks of their respective owners; use here does
+not imply endorsement or affiliation.
+
 ## License
 
 GPL-2.0-only
