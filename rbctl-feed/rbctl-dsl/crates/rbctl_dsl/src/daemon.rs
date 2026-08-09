@@ -456,6 +456,16 @@ pub fn run(
     log::info!("entering control loop");
     let tick = Duration::from_millis(50);
     while !SHOULD_EXIT.load(Ordering::SeqCst) {
+        // Forward signal-driven flags to the worker command channel.
+        // Commands are naturally deferred if a firmware upgrade is in
+        // progress (mpsc FIFO buffers them until the worker is ready).
+        if SHOULD_RELOAD.swap(false, Ordering::SeqCst) {
+            let _ = cmd_tx.send(crate::board_worker::WorkerCmd::Reload);
+        }
+        if SHOULD_RESTART_LINE.swap(false, Ordering::SeqCst) {
+            let _ = cmd_tx.send(crate::board_worker::WorkerCmd::RestartLine);
+        }
+
         // Handle IPC commands
         if let Some(ipc) = &ipc {
             let snap = build_snapshot(&state);
@@ -470,10 +480,16 @@ pub fn run(
                     crate::ipc::IpcAction::Stop => {
                         SHOULD_EXIT.store(true, Ordering::SeqCst);
                     }
-                    crate::ipc::IpcAction::FirmwareUpgrade { path, mut stream } => {
-                        handle_firmware_ipc(
-                            &path, &mut stream, &cmd_tx, &state,
-                        );
+                    crate::ipc::IpcAction::FirmwareUpgrade { path, stream } => {
+                        // Spawn a dedicated thread so the main loop keeps
+                        // serving ubus and other IPC clients during the
+                        // (potentially multi-minute) upload.
+                        let cmd_tx = cmd_tx.clone();
+                        let state = Arc::clone(&state);
+                        std::thread::spawn(move || {
+                            let mut stream = stream;
+                            handle_firmware_ipc(&path, &mut stream, &cmd_tx, &state);
+                        });
                     }
                     crate::ipc::IpcAction::None => {}
                 },

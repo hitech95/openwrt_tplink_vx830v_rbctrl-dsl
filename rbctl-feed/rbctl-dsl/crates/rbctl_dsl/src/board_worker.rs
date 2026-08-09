@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use rbctl_proto::unpack::LinkStatus;
 
 use crate::board::{Board, BoardError, FwProgress, FwUpgradeResult};
-use crate::daemon::{SHOULD_EXIT, SHOULD_RELOAD, SHOULD_RESTART_LINE};
+use crate::daemon::SHOULD_EXIT;
 use crate::hotplug::{self, LineEvent};
 use crate::uci_cfg::{CliOverrides, DslConfig};
 use crate::ubus_obj::SharedState;
