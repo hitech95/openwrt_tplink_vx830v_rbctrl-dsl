@@ -25,6 +25,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod checksum;
+pub mod firmware;
 pub mod frame;
 pub mod pack;
 pub mod unpack;

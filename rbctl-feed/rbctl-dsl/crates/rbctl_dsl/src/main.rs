@@ -38,6 +38,11 @@ enum Command {
     RestartLine,
     /// Shut down the running daemon
     Stop,
+    /// Upload firmware to the remote board
+    FirmwareUpgrade {
+        /// Path to the raw 2RDH firmware image
+        path: String,
+    },
     /// Exercise socket + VLAN + board opcodes, then exit
     Selftest(CommonArgs),
     /// Listen for 0x88B5 / 0x88B6 frames (passive, no send). Optionally write
@@ -171,6 +176,42 @@ fn main() {
         Command::Reload => ipc_exit(ipc::IpcCmd::Reload),
         Command::RestartLine => ipc_exit(ipc::IpcCmd::Restart),
         Command::Stop => ipc_exit(ipc::IpcCmd::Stop),
+        Command::FirmwareUpgrade { path } => {
+            // Quick local header check before contacting the daemon
+            match std::fs::read(&path) {
+                Ok(data) => {
+                    if let Err(e) = rbctl_proto::firmware::validate_image(&data) {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    }
+                    let hdr = rbctl_proto::firmware::parse_header(&data).unwrap();
+                    let ver = rbctl_proto::firmware::version_str(&hdr);
+                    eprintln!("firmware: {ver} ({} bytes, {:.1} MB)", data.len(), data.len() as f64 / 1048576.0);
+                }
+                Err(e) => {
+                    eprintln!("error: cannot read '{path}': {e}");
+                    std::process::exit(1);
+                }
+            }
+
+            eprintln!("connecting to daemon...");
+            match ipc::send_firmware(&path, &mut |line| {
+                eprintln!("  {line}");
+            }) {
+                Ok(result) if result.starts_with("DONE") => {
+                    eprintln!("{result}");
+                    std::process::exit(0);
+                }
+                Ok(result) => {
+                    eprintln!("{result}");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("error: cannot connect to daemon: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Command::Selftest(args) => {
             let code = selftest::Selftest::run(&args.config_iface);
             log::info!("selftest exit code: {code}");

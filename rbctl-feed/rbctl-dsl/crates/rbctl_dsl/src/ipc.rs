@@ -77,6 +77,7 @@ pub struct StatusSnapshot {
     pub up_rate: u32,
     pub down_snr: u32,
     pub up_snr: u32,
+    pub fw_status: String,
 }
 
 impl StatusSnapshot {
@@ -84,10 +85,11 @@ impl StatusSnapshot {
     pub fn to_lines(&self) -> String {
         format!(
             "state: {}\nstate_num: {}\nup: {}\nuptime: {}\nmodulation: {}\nannex: {}\n\
-             xfer_mode: {}\ndown_rate: {}\nup_rate: {}\ndown_snr: {}\nup_snr: {}",
+             xfer_mode: {}\ndown_rate: {}\nup_rate: {}\ndown_snr: {}\nup_snr: {}\nfw_status: {}",
             self.state, self.state_num, self.up, self.uptime_secs,
             self.modulation, self.annex, self.xfer_mode,
             self.down_rate, self.up_rate, self.down_snr, self.up_snr,
+            self.fw_status,
         )
     }
 
@@ -108,6 +110,7 @@ impl StatusSnapshot {
                     "up_rate" => s.up_rate = v.trim().parse().unwrap_or(0),
                     "down_snr" => s.down_snr = v.trim().parse().unwrap_or(0),
                     "up_snr" => s.up_snr = v.trim().parse().unwrap_or(0),
+                    "fw_status" => s.fw_status = v.trim().to_string(),
                     _ => {}
                 }
             }
@@ -155,10 +158,22 @@ impl IpcListener {
 
 /// What the daemon should do after handling an IPC command.
 #[derive(Debug)]
-pub struct IpcAction {
-    pub should_reload: bool,
-    pub should_restart_line: bool,
-    pub should_stop: bool,
+pub enum IpcAction {
+    None,
+    Reload,
+    RestartLine,
+    Stop,
+    /// Firmware upgrade requested — the stream is kept open for progress.
+    FirmwareUpgrade {
+        path: String,
+        stream: UnixStream,
+    },
+}
+
+impl Default for IpcAction {
+    fn default() -> Self {
+        Self::None
+    }
 }
 
 fn handle_client(mut stream: UnixStream, snapshot: &StatusSnapshot) -> io::Result<IpcAction> {
@@ -167,33 +182,34 @@ fn handle_client(mut stream: UnixStream, snapshot: &StatusSnapshot) -> io::Resul
     reader.read_line(&mut line)?;
 
     let cmd = line.trim();
-    let mut action = IpcAction {
-        should_reload: false,
-        should_restart_line: false,
-        should_stop: false,
-    };
+
+    // FIRMWARE <path> — keep the stream open for progress streaming
+    if let Some(path) = cmd.strip_prefix("FIRMWARE ") {
+        return Ok(IpcAction::FirmwareUpgrade {
+            path: path.trim().to_string(),
+            stream,
+        });
+    }
 
     let response = match cmd {
-        "STATUS" => {
-            format!("OK\n{}\n.\n", snapshot.to_lines())
-        }
+        "STATUS" => format!("OK\n{}\n.\n", snapshot.to_lines()),
         "RELOAD" => {
-            action.should_reload = true;
-            "OK reloading\n".to_string()
+            let _ = stream.write_all(b"OK reloading\n");
+            return Ok(IpcAction::Reload);
         }
         "RESTART" => {
-            action.should_restart_line = true;
-            "OK restarting line\n".to_string()
+            let _ = stream.write_all(b"OK restarting line\n");
+            return Ok(IpcAction::RestartLine);
         }
         "STOP" => {
-            action.should_stop = true;
-            "OK stopping\n".to_string()
+            let _ = stream.write_all(b"OK stopping\n");
+            return Ok(IpcAction::Stop);
         }
         other => format!("ERR: unknown command '{other}'\n"),
     };
 
     stream.write_all(response.as_bytes())?;
-    Ok(action)
+    Ok(IpcAction::None)
 }
 
 // ── client side ──────────────────────────────────────────────────────────
@@ -213,6 +229,50 @@ pub fn send_command(path: &str, cmd: IpcCmd) -> io::Result<String> {
 /// Try to connect to a running daemon. Returns `Ok(())` if one exists.
 pub fn daemon_running() -> bool {
     UnixStream::connect(SOCK_PATH).is_ok()
+}
+
+/// Connect to a running daemon, send `FIRMWARE <path>`, and stream progress
+/// lines to the caller via `on_progress`. Returns the final reply text.
+///
+/// The connection stays open until the daemon sends `DONE` or `ERR`.
+pub fn send_firmware(
+    path: &str,
+    on_progress: &mut dyn FnMut(&str),
+) -> io::Result<String> {
+    let mut stream = UnixStream::connect(Path::new(SOCK_PATH))?;
+    // Long read timeout — firmware upload can take minutes
+    stream.set_read_timeout(Some(Duration::from_secs(600)))?;
+
+    stream.write_all(format!("FIRMWARE {path}\n").as_bytes())?;
+
+    let mut reader = BufReader::new(&stream);
+    let mut result = String::new();
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            break; // connection closed
+        }
+
+        let trimmed = line.trim();
+        if trimmed == "." {
+            break; // end of response
+        }
+        if trimmed.starts_with("ERR:") || trimmed.starts_with("DONE") {
+            result = trimmed.to_string();
+            break;
+        }
+        if trimmed.starts_with("OK") {
+            // Initial acknowledgment — keep reading
+            continue;
+        }
+        // Progress line
+        on_progress(trimmed);
+    }
+
+    Ok(result)
 }
 
 // ── tests ────────────────────────────────────────────────────────────────
@@ -244,6 +304,7 @@ mod tests {
             up_rate: 10000,
             down_snr: 150,
             up_snr: 120,
+            fw_status: "idle".into(),
         };
         let text = s.to_lines();
         let parsed = StatusSnapshot::from_lines(&text);
@@ -253,5 +314,6 @@ mod tests {
         assert_eq!(parsed.uptime_secs, 300);
         assert_eq!(parsed.down_rate, 50000);
         assert_eq!(parsed.up_snr, 120);
+        assert_eq!(parsed.fw_status, "idle");
     }
 }

@@ -9,6 +9,11 @@ use std::time::Duration;
 
 use rbctl_proto::{
     checksum::{set_checksum, verify_checksum},
+    firmware::{
+        self, CHUNK_SIZE, RETRIES_ANNOUNCE, RETRIES_COMPLETE, RETRIES_STREAM,
+        RETRIES_VERIFY, STAGE_ANNOUNCE, STAGE_COMPLETE, STAGE_STREAM, STAGE_VERIFY,
+        TIMEOUT_ANNOUNCE_MS, TIMEOUT_COMPLETE_MS, TIMEOUT_STREAM_MS, TIMEOUT_VERIFY_MS,
+    },
     frame::{build_command_frame, Frame, SeqCounter, HEADER_LEN, MIN_FRAME},
     pack::{self, AtmLinkParams, Modulation, Annex, Vdsl2Profiles},
     unpack::{self, ChannelStats, LineObj, LinkStatus},
@@ -249,6 +254,153 @@ impl<T: Transport> Board<T> {
     pub fn line_status(&mut self) -> Result<LinkStatus, BoardError> {
         Ok(self.get_line_obj()?.link_status)
     }
+
+    // ── opcode 8: firmware upgrade ─────────────────────────────────────
+
+    /// Upload a raw `2RDH` firmware image to the board via opcode 8.
+    ///
+    /// Implements the 4-stage protocol: announce → stream → verify → complete.
+    /// The `progress` callback is called at stage transitions and during
+    /// streaming (~every 10% of chunks).
+    ///
+    /// **Blocks** for the entire upload (can take minutes). The caller is
+    /// responsible for ensuring no other board operations run concurrently.
+    pub fn firmware_upgrade(
+        &mut self,
+        image: &[u8],
+        progress: &mut dyn FnMut(&FwProgress),
+    ) -> Result<FwUpgradeResult, BoardError> {
+        let saved_timeout = self.timeout;
+        let saved_retries = self.retries;
+
+        let content_start = 0x100usize; // skip 2RDH header
+        let content_len = image.len().saturating_sub(content_start);
+        let total_chunks = ((content_len + CHUNK_SIZE - 1) / CHUNK_SIZE) as u32;
+
+        // ── Stage 0: Announce ──────────────────────────────────────────
+        self.timeout = Duration::from_millis(TIMEOUT_ANNOUNCE_MS);
+        self.retries = RETRIES_ANNOUNCE;
+        log::info!("fw: announce size={}", image.len());
+        let pl = firmware::announce_payload(image.len() as u32);
+        let resp = self.request(8, &pl)?;
+        let data = strip_echo(&resp, 0x08);
+        // Response: [stage=0, status(u32 BE), ...]
+        if data.len() >= 5 {
+            let status = u32::from_be_bytes(data[1..5].try_into().unwrap());
+            if status != 0 {
+                self.timeout = saved_timeout;
+                self.retries = saved_retries;
+                return Err(BoardError::BadResponse("announce rejected by board"));
+            }
+        }
+        progress(&FwProgress::stage(STAGE_ANNOUNCE));
+
+        // ── Stage 1: Stream ────────────────────────────────────────────
+        self.timeout = Duration::from_millis(TIMEOUT_STREAM_MS);
+        self.retries = RETRIES_STREAM;
+        log::info!("fw: stream {} chunks", total_chunks);
+
+        let mut chunk_idx = 0u32;
+        let mut last_pct = 0u8;
+        while chunk_idx < total_chunks {
+            let offset = content_start + (chunk_idx as usize) * CHUNK_SIZE;
+            let end = (offset + CHUNK_SIZE).min(image.len());
+            let chunk = &image[offset..end];
+
+            // Payload: [stage=1, chunk_idx_be_u16, data...]
+            let mut payload = Vec::with_capacity(3 + chunk.len());
+            payload.push(STAGE_STREAM);
+            payload.extend_from_slice(&(chunk_idx as u16).to_be_bytes());
+            payload.extend_from_slice(chunk);
+
+            let resp = self.request(8, &payload)?;
+            let data = strip_echo(&resp, 0x08);
+
+            // ACK: [stage=1, last_good_index(u32 BE), ...]
+            if data.len() >= 5 {
+                let last_good = u32::from_be_bytes(data[1..5].try_into().unwrap());
+                if last_good > chunk_idx {
+                    chunk_idx = last_good;
+                }
+            }
+            chunk_idx += 1;
+
+            let pct = ((chunk_idx * 100) / total_chunks.max(1)) as u8;
+            if pct >= last_pct + 10 || chunk_idx == total_chunks {
+                last_pct = pct;
+                progress(&FwProgress::streaming(pct));
+            }
+        }
+
+        // ── Stage 2: Verify ────────────────────────────────────────────
+        self.timeout = Duration::from_millis(TIMEOUT_VERIFY_MS);
+        self.retries = RETRIES_VERIFY;
+        log::info!("fw: verify");
+        let pl = firmware::verify_payload();
+        let resp = self.request(8, &pl)?;
+        let data = strip_echo(&resp, 0x08);
+        if data.len() >= 5 {
+            let status = u32::from_be_bytes(data[1..5].try_into().unwrap());
+            if status != 0 {
+                self.timeout = saved_timeout;
+                self.retries = saved_retries;
+                return Err(BoardError::BadResponse("board firmware verification failed"));
+            }
+        }
+        progress(&FwProgress::stage(STAGE_VERIFY));
+
+        // ── Stage 3: Complete ──────────────────────────────────────────
+        self.timeout = Duration::from_millis(TIMEOUT_COMPLETE_MS);
+        self.retries = RETRIES_COMPLETE;
+        log::info!("fw: complete");
+        let pl = firmware::complete_payload();
+        let resp = self.request(8, &pl)?;
+        let data = strip_echo(&resp, 0x08);
+        // Response: [stage=3, version(u32 BE), status(u8), ...]
+        let mut version = 0u32;
+        let mut status = 0u8;
+        if data.len() >= 5 {
+            version = u32::from_be_bytes(data[1..5].try_into().unwrap());
+        }
+        if data.len() >= 6 {
+            status = data[5];
+        }
+        progress(&FwProgress::stage(STAGE_COMPLETE));
+
+        // Restore timeout/retries
+        self.timeout = saved_timeout;
+        self.retries = saved_retries;
+
+        log::info!("fw: done version=0x{:08X} status={}", version, status);
+        Ok(FwUpgradeResult { version, status })
+    }
+}
+
+// ── firmware types ───────────────────────────────────────────────────────
+
+/// Progress update from `firmware_upgrade`.
+#[derive(Debug, Clone)]
+pub struct FwProgress {
+    /// Current stage (0=announce, 1=stream, 2=verify, 3=complete).
+    pub stage: u8,
+    /// Percentage during streaming (0–100), 0 for other stages.
+    pub pct: u8,
+}
+
+impl FwProgress {
+    pub fn stage(stage: u8) -> Self {
+        Self { stage, pct: 0 }
+    }
+    pub fn streaming(pct: u8) -> Self {
+        Self { stage: STAGE_STREAM, pct }
+    }
+}
+
+/// Result of a successful firmware upgrade.
+#[derive(Debug, Clone)]
+pub struct FwUpgradeResult {
+    pub version: u32,
+    pub status: u8,
 }
 
 // ── response helpers ─────────────────────────────────────────────────────

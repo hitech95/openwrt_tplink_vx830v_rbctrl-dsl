@@ -14,7 +14,7 @@ resolver = "2"
 members = ["crates/rbctl_proto", "crates/af_packet", "crates/tinyln_rs_sys", "crates/tinyln_rs", "crates/rbctl_dsl"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
 license = "GPL-2.0-only"

@@ -47,17 +47,49 @@ pub struct DslState {
     /// board worker thread). Refreshed on reload.
     pub modulation: Modulation,
     pub annex: Annex,
+    /// Firmware upgrade status.
+    pub fw_status: FwStatus,
+}
+
+/// Firmware upgrade lifecycle status, queryable via IPC `status` and ubus.
+#[derive(Debug, Clone)]
+pub enum FwStatus {
+    Idle,
+    Upgrading,
+    UpgradingProgress { stage: u8, pct: u8 },
+    Done,
+    Failed(String),
+}
+
+impl Default for FwStatus {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
+impl FwStatus {
+    pub fn as_str(&self) -> String {
+        match self {
+            Self::Idle => "idle".into(),
+            Self::Upgrading => "upgrading".into(),
+            Self::UpgradingProgress { stage, pct } => {
+                format!("upgrading (stage={stage}, pct={pct}%)")
+            }
+            Self::Done => "done".into(),
+            Self::Failed(msg) => format!("failed: {msg}"),
+        }
+    }
 }
 
 impl Default for DslState {
     fn default() -> Self {
-        // Match DslConfig::default (VDSL2 Annex B).
         Self {
             line_obj: None,
             uptime_secs: 0,
             xfer_mode: None,
             modulation: Modulation::Vdsl2,
             annex: Annex::B,
+            fw_status: FwStatus::default(),
         }
     }
 }

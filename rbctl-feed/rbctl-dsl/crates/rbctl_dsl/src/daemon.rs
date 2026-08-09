@@ -172,7 +172,8 @@ fn find_ubus_socket() -> Option<String> {
 /// call from the IPC path while the board worker is mid-request.
 fn build_snapshot(state: &ubus_obj::SharedState) -> StatusSnapshot {
     let st = state.lock().unwrap();
-    match &st.line_obj {
+    let fw = st.fw_status.as_str();
+    let mut snap = match &st.line_obj {
         Some(line) => {
             let (state_str, state_num, up) = crate::ubus_obj::map_link_status(line.link_status);
             StatusSnapshot {
@@ -187,14 +188,104 @@ fn build_snapshot(state: &ubus_obj::SharedState) -> StatusSnapshot {
                 up_rate: line.metrics.up_rate,
                 down_snr: line.metrics.down_noise_margin,
                 up_snr: line.metrics.up_noise_margin,
+                fw_status: fw,
             }
         }
         None => StatusSnapshot {
             modulation: format!("{:?}", st.modulation),
             annex: format!("{:?}", st.annex),
             xfer_mode: format!("{:?}", st.xfer_mode.unwrap_or(XferMode::Ptm)),
+            fw_status: fw,
             ..Default::default()
         },
+    };
+    snap
+}
+
+/// Handle a `FIRMWARE <path>` IPC command: validate the image, send it to the
+/// worker, and stream progress back to the IPC client.  The IPC connection is
+/// held open for the duration of the upload — if the client disconnects, the
+/// worker continues and the result is stored in shared state.
+fn handle_firmware_ipc(
+    path: &str,
+    stream: &mut std::os::unix::net::UnixStream,
+    cmd_tx: &std::sync::mpsc::Sender<crate::board_worker::WorkerCmd>,
+    state: &ubus_obj::SharedState,
+) {
+    use std::io::Write;
+
+    // Check if an upgrade is already running
+    {
+        let st = state.lock().unwrap();
+        if !matches!(st.fw_status, ubus_obj::FwStatus::Idle | ubus_obj::FwStatus::Done | ubus_obj::FwStatus::Failed(_)) {
+            let _ = stream.write_all(b"ERR: upgrade already in progress\n.\n");
+            return;
+        }
+    }
+
+    // Read and validate the file
+    let image = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(e) => {
+            let _ = stream.write_all(format!("ERR: cannot read {path}: {e}\n.\n").as_bytes());
+            return;
+        }
+    };
+
+    if let Err(e) = rbctl_proto::firmware::validate_image(&image) {
+        let _ = stream.write_all(format!("ERR: {e}\n.\n").as_bytes());
+        return;
+    }
+
+    let hdr = rbctl_proto::firmware::parse_header(&image).ok();
+    let version = hdr.as_ref().map(|h| rbctl_proto::firmware::version_str(h).to_string());
+
+    // Send acknowledgment
+    let _ = stream.write_all(b"OK\n");
+    if let Some(ref v) = version {
+        let _ = stream.write_all(format!("IMAGE version={v} size={}\n", image.len()).as_bytes());
+    }
+    let _ = stream.flush();
+
+    // Send to worker
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel::<crate::board_worker::FwEvent>();
+    if cmd_tx
+        .send(crate::board_worker::WorkerCmd::FirmwareUpgrade {
+            image,
+            reply_tx,
+        })
+        .is_err()
+    {
+        let _ = stream.write_all(b"ERR: worker thread unavailable\n.\n");
+        return;
+    }
+
+    // Stream progress until done
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+    while let Ok(event) = reply_rx.recv() {
+        match event {
+            crate::board_worker::FwEvent::Progress(p) => {
+                let line = if p.pct > 0 {
+                    format!("PROGRESS stage={} pct={}\n", p.stage, p.pct)
+                } else {
+                    format!("PROGRESS stage={}\n", p.stage)
+                };
+                if stream.write_all(line.as_bytes()).is_err() {
+                    break; // client disconnected
+                }
+                let _ = stream.flush();
+            }
+            crate::board_worker::FwEvent::Done(Ok(result)) => {
+                let _ = stream.write_all(
+                    format!("DONE version=0x{:08X} status={}\n.\n", result.version, result.status).as_bytes(),
+                );
+                break;
+            }
+            crate::board_worker::FwEvent::Done(Err(msg)) => {
+                let _ = stream.write_all(format!("ERR: {msg}\n.\n").as_bytes());
+                break;
+            }
+        }
     }
 }
 
@@ -347,18 +438,14 @@ pub fn run(
     }
 
     // 9. Spawn the board worker + run a slim control loop.
-    //
-    // The board (which can block for seconds on a silent/unresponsive line)
-    // lives on its own thread (`BoardWorker`) so this loop — which serves IPC
-    // and ubus — stays responsive at all times. Commands (reload / restart /
-    // stop) flow through the `SHOULD_*` static atomics that both threads read.
-    // Design: plans/daemon-event-loop-plan.md.
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<crate::board_worker::WorkerCmd>();
     let worker = BoardWorker::new(
         board,
         cfg,
         overrides.clone(),
         Arc::clone(&state),
         notify_script.map(str::to_string),
+        cmd_rx,
     );
     let (worker_done_tx, worker_done_rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
@@ -373,17 +460,23 @@ pub fn run(
         if let Some(ipc) = &ipc {
             let snap = build_snapshot(&state);
             match ipc.accept_one(&snap) {
-                Ok(Some(action)) => {
-                    if action.should_reload {
-                        SHOULD_RELOAD.store(true, Ordering::SeqCst);
+                Ok(Some(action)) => match action {
+                    crate::ipc::IpcAction::Reload => {
+                        let _ = cmd_tx.send(crate::board_worker::WorkerCmd::Reload);
                     }
-                    if action.should_restart_line {
-                        SHOULD_RESTART_LINE.store(true, Ordering::SeqCst);
+                    crate::ipc::IpcAction::RestartLine => {
+                        let _ = cmd_tx.send(crate::board_worker::WorkerCmd::RestartLine);
                     }
-                    if action.should_stop {
+                    crate::ipc::IpcAction::Stop => {
                         SHOULD_EXIT.store(true, Ordering::SeqCst);
                     }
-                }
+                    crate::ipc::IpcAction::FirmwareUpgrade { path, mut stream } => {
+                        handle_firmware_ipc(
+                            &path, &mut stream, &cmd_tx, &state,
+                        );
+                    }
+                    crate::ipc::IpcAction::None => {}
+                },
                 Ok(None) => {} // no client
                 Err(e) => log::error!("IPC error: {e}"),
             }

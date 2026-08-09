@@ -1,25 +1,45 @@
 //! Board worker — owns the [`Board`] and runs the periodic line-status poll,
-//! reload, and restart-line logic on a dedicated thread so the main loop's IPC
-//! and ubus paths stay responsive regardless of board latency.
+//! reload, restart-line, and firmware-upgrade logic on a dedicated thread so
+//! the main loop's IPC and ubus paths stay responsive regardless of board
+//! latency.
 //!
-//! Commands (reload / restart-line / stop) are signalled via the same
-//! `SHOULD_*` static atomics the main loop and signal handlers use; the worker
-//! polls them on a short tick. See `plans/daemon-event-loop-plan.md`.
+//! Commands (reload / restart-line / firmware-upgrade / stop) flow through an
+//! mpsc channel (`WorkerCmd`); the worker polls it on a short tick. See
+//! `plans/daemon-event-loop-plan.md` and `plans/firmware-upgrade-plan.md`.
 
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use rbctl_proto::unpack::LinkStatus;
 
-use crate::board::{Board, BoardError};
+use crate::board::{Board, BoardError, FwProgress, FwUpgradeResult};
 use crate::daemon::{SHOULD_EXIT, SHOULD_RELOAD, SHOULD_RESTART_LINE};
 use crate::hotplug::{self, LineEvent};
 use crate::uci_cfg::{CliOverrides, DslConfig};
 use crate::ubus_obj::SharedState;
 
-/// Worker tick — bounds how long a reload/restart/stop command waits before
-/// being acted upon. Short enough to feel instant, long enough not to spin.
+/// Worker tick — bounds how long a command waits before being acted upon.
 const WORKER_TICK: Duration = Duration::from_millis(50);
+
+/// Commands sent from the main thread to the worker.
+pub enum WorkerCmd {
+    /// Reload UCI config (same as SIGHUP).
+    Reload,
+    /// Restart DSL line (bounce).
+    RestartLine,
+    /// Upload firmware to the board. `reply_tx` receives progress + result.
+    FirmwareUpgrade {
+        image: Vec<u8>,
+        reply_tx: mpsc::Sender<FwEvent>,
+    },
+}
+
+/// Events sent from the worker back to the firmware requester.
+pub enum FwEvent {
+    Progress(FwProgress),
+    Done(Result<FwUpgradeResult, String>),
+}
 
 pub struct BoardWorker {
     board: Board,
@@ -32,6 +52,7 @@ pub struct BoardWorker {
     last_status: Option<LinkStatus>,
     up_since: Option<Instant>,
     tc_emitted: bool,
+    cmd_rx: mpsc::Receiver<WorkerCmd>,
 }
 
 impl BoardWorker {
@@ -41,6 +62,7 @@ impl BoardWorker {
         overrides: CliOverrides,
         state: SharedState,
         notify_script: Option<String>,
+        cmd_rx: mpsc::Receiver<WorkerCmd>,
     ) -> Self {
         Self {
             board,
@@ -53,24 +75,33 @@ impl BoardWorker {
             last_status: None,
             up_since: None,
             tc_emitted: false,
+            cmd_rx,
         }
     }
 
     /// Run the worker loop until `SHOULD_EXIT`, then perform a best-effort
-    /// `line_config_down()`. The caller bounds the total wait via the done
-    /// channel; a silent board is abandoned (process exit reaps the thread).
+    /// `line_config_down()`.
     pub(crate) fn run(mut self) {
         log::info!("board worker started");
         while !SHOULD_EXIT.load(Ordering::SeqCst) {
-            self.handle_reload();
-            self.handle_restart();
+            // Check for commands from main thread (non-blocking via timeout)
+            match self.cmd_rx.recv_timeout(WORKER_TICK) {
+                Ok(WorkerCmd::Reload) => self.handle_reload(),
+                Ok(WorkerCmd::RestartLine) => self.handle_restart(),
+                Ok(WorkerCmd::FirmwareUpgrade { image, reply_tx }) => {
+                    self.handle_firmware_upgrade(image, reply_tx);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    log::warn!("worker command channel disconnected, exiting");
+                    break;
+                }
+            }
+
             self.maybe_poll_board();
-            std::thread::sleep(WORKER_TICK);
         }
 
-        // Best-effort line-down. Drop the retry budget first so a silent board
-        // can't hold shutdown for ~8 s; one attempt at the socket timeout is
-        // enough to tell a responsive board to stop cleanly.
+        // Best-effort line-down.
         self.board.set_retries(0);
         let _ = self.board.line_config_down();
         log::info!("board worker exiting");
@@ -86,9 +117,6 @@ impl BoardWorker {
     }
 
     fn handle_reload(&mut self) {
-        if !SHOULD_RELOAD.swap(false, Ordering::SeqCst) {
-            return;
-        }
         log::info!("reload — re-reading UCI config");
         if let Ok(new_cfg) = DslConfig::load(&self.overrides) {
             if config_changed(&self.cfg, &new_cfg) {
@@ -108,9 +136,6 @@ impl BoardWorker {
     }
 
     fn handle_restart(&mut self) {
-        if !SHOULD_RESTART_LINE.swap(false, Ordering::SeqCst) {
-            return;
-        }
         log::info!("restart-line — bouncing DSL line");
         let _ = self.board.line_config_down();
         std::thread::sleep(Duration::from_secs(1));
@@ -119,6 +144,45 @@ impl BoardWorker {
             self.cfg.bitswap, self.cfg.sra,
         );
         self.tc_emitted = false;
+    }
+
+    fn handle_firmware_upgrade(
+        &mut self,
+        image: Vec<u8>,
+        reply_tx: mpsc::Sender<FwEvent>,
+    ) {
+        // Set fw_status in shared state
+        {
+            let mut st = self.state.lock().unwrap();
+            st.fw_status = crate::ubus_obj::FwStatus::Upgrading;
+        }
+
+        log::info!("firmware upgrade: {} bytes", image.len());
+        let result = self.board.firmware_upgrade(&image, &mut |p| {
+            let _ = reply_tx.send(FwEvent::Progress(p.clone()));
+            // Update shared state for status queries
+            let mut st = self.state.lock().unwrap();
+            st.fw_status = crate::ubus_obj::FwStatus::UpgradingProgress {
+                stage: p.stage,
+                pct: p.pct,
+            };
+        });
+
+        let event = match &result {
+            Ok(r) => {
+                log::info!("firmware upgrade done: version=0x{:08X}", r.version);
+                let mut st = self.state.lock().unwrap();
+                st.fw_status = crate::ubus_obj::FwStatus::Done;
+                FwEvent::Done(Ok(r.clone()))
+            }
+            Err(e) => {
+                log::error!("firmware upgrade failed: {e}");
+                let mut st = self.state.lock().unwrap();
+                st.fw_status = crate::ubus_obj::FwStatus::Failed(e.to_string());
+                FwEvent::Done(Err(e.to_string()))
+            }
+        };
+        let _ = reply_tx.send(event);
     }
 
     fn maybe_poll_board(&mut self) {
