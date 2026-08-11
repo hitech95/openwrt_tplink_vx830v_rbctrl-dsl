@@ -10,7 +10,7 @@
 //! The `parse_*` functions are pure and host-testable. The `DslConfig::load`
 //! method wraps them with UCI access (requires libuci, target-only).
 
-use rbctl_proto::pack::{Annex, AtmEncap, AtmLinkType, AtmQos, Modulation, Vdsl2Profiles};
+use rbctl_proto::oem::pack::{Annex, AtmEncap, AtmLinkType, AtmQos, Modulation, Vdsl2Profiles};
 
 // ── error type ───────────────────────────────────────────────────────────
 

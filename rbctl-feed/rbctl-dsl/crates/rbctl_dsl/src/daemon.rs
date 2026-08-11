@@ -21,8 +21,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rbctl_proto::pack::{AtmEncap, AtmLinkParams, AtmLinkType, AtmQos};
-use rbctl_proto::validate;
+use rbctl_proto::oem::pack::{AtmEncap, AtmLinkParams, AtmLinkType, AtmQos};
+use rbctl_proto::oem::validate;
 use tinyln_rs::rtnl::RtnlLink;
 
 use crate::board::Board;
@@ -232,13 +232,13 @@ fn handle_firmware_ipc(
         }
     };
 
-    if let Err(e) = rbctl_proto::firmware::validate_image(&image) {
+    if let Err(e) = rbctl_proto::oem::firmware::validate_image(&image) {
         let _ = stream.write_all(format!("ERR: {e}\n.\n").as_bytes());
         return;
     }
 
-    let hdr = rbctl_proto::firmware::parse_header(&image).ok();
-    let version = hdr.as_ref().map(|h| rbctl_proto::firmware::version_str(h).to_string());
+    let hdr = rbctl_proto::oem::firmware::parse_header(&image).ok();
+    let version = hdr.as_ref().map(|h| rbctl_proto::oem::firmware::version_str(h).to_string());
 
     // Send acknowledgment
     let _ = stream.write_all(b"OK\n");

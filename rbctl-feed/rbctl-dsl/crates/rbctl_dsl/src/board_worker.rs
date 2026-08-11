@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use rbctl_proto::unpack::LinkStatus;
+use rbctl_proto::oem::unpack::LinkStatus;
 
 use crate::board::{Board, BoardError, FwProgress, FwUpgradeResult};
 use crate::daemon::SHOULD_EXIT;
@@ -253,7 +253,7 @@ fn config_changed(old: &DslConfig, new: &DslConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rbctl_proto::pack::Annex;
+    use rbctl_proto::oem::pack::Annex;
 
     #[test]
     fn link_status_events() {

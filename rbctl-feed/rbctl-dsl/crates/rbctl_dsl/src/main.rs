@@ -180,12 +180,12 @@ fn main() {
             // Quick local header check before contacting the daemon
             match std::fs::read(&path) {
                 Ok(data) => {
-                    if let Err(e) = rbctl_proto::firmware::validate_image(&data) {
+                    if let Err(e) = rbctl_proto::oem::firmware::validate_image(&data) {
                         eprintln!("error: {e}");
                         std::process::exit(1);
                     }
-                    let hdr = rbctl_proto::firmware::parse_header(&data).unwrap();
-                    let ver = rbctl_proto::firmware::version_str(&hdr);
+                    let hdr = rbctl_proto::oem::firmware::parse_header(&data).unwrap();
+                    let ver = rbctl_proto::oem::firmware::version_str(&hdr);
                     eprintln!("firmware: {ver} ({} bytes, {:.1} MB)", data.len(), data.len() as f64 / 1048576.0);
                 }
                 Err(e) => {

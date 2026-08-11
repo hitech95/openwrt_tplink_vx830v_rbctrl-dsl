@@ -10,8 +10,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use rbctl_proto::pack::{Annex, Modulation};
-use rbctl_proto::unpack::{DataPath, LineObj, LineMetrics, LinkStatus};
+use rbctl_proto::oem::pack::{Annex, Modulation};
+use rbctl_proto::oem::unpack::{DataPath, LineObj, LineMetrics, LinkStatus};
 use ubus::server::UbusObject;
 use ubus::blobmsg::{BlobBuilder, BlobMsgTable};
 use ubus::error::UbusError;
@@ -197,8 +197,8 @@ pub fn annex_string(code: u8) -> &'static str {
     }
 }
 
-fn profile_string(profiles: rbctl_proto::pack::Vdsl2Profiles) -> String {
-    use rbctl_proto::pack::Vdsl2Profiles as P;
+fn profile_string(profiles: rbctl_proto::oem::pack::Vdsl2Profiles) -> String {
+    use rbctl_proto::oem::pack::Vdsl2Profiles as P;
     let mut parts: Vec<&str> = Vec::new();
     if profiles.0 & P::EIGHT_A.0 != 0 { parts.push("8a"); }
     if profiles.0 & P::EIGHT_B.0 != 0 { parts.push("8b"); }
@@ -239,7 +239,7 @@ fn add_direction(bb: &mut BlobBuilder, name: &str, m: &LineMetrics, upstream: bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rbctl_proto::unpack::LinkStatus;
+    use rbctl_proto::oem::unpack::LinkStatus;
 
     #[test]
     fn map_status_up() {
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn profile_string_multi() {
-        use rbctl_proto::pack::Vdsl2Profiles as P;
+        use rbctl_proto::oem::pack::Vdsl2Profiles as P;
         let s = profile_string(P::EIGHT_A | P::SEVENTEEN_A | P::THIRTY_A);
         assert_eq!(s, "8a 17a 30a");
     }

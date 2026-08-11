@@ -6,7 +6,7 @@ use std::ffi::CString;
 use std::time::Duration;
 
 use af_packet::RawSocket;
-use rbctl_proto::pack::*;
+use rbctl_proto::oem::pack::*;
 use tinyln_rs::rtnl::RtnlLink;
 
 use crate::board::Board;

@@ -9,15 +9,19 @@ use std::time::Duration;
 
 use rbctl_proto::{
     checksum::{set_checksum, verify_checksum},
-    firmware::{
-        self, CHUNK_SIZE, RETRIES_ANNOUNCE, RETRIES_COMPLETE, RETRIES_STREAM,
-        RETRIES_VERIFY, STAGE_ANNOUNCE, STAGE_COMPLETE, STAGE_STREAM, STAGE_VERIFY,
-        TIMEOUT_ANNOUNCE_MS, TIMEOUT_COMPLETE_MS, TIMEOUT_STREAM_MS, TIMEOUT_VERIFY_MS,
+    frame::{Frame, SeqCounter, HEADER_LEN, MIN_FRAME},
+    oem::{
+        build_command_frame,
+        firmware::{
+            self, CHUNK_SIZE, RETRIES_ANNOUNCE, RETRIES_COMPLETE, RETRIES_STREAM,
+            RETRIES_VERIFY, STAGE_ANNOUNCE, STAGE_COMPLETE, STAGE_STREAM, STAGE_VERIFY,
+            TIMEOUT_ANNOUNCE_MS, TIMEOUT_COMPLETE_MS, TIMEOUT_STREAM_MS, TIMEOUT_VERIFY_MS,
+        },
+        pack::{self, AtmLinkParams, Modulation, Annex, Vdsl2Profiles},
+        unpack::{self, ChannelStats, LineObj, LinkStatus},
+        MAGIC_OEM_COMMAND as MAGIC_COMMAND,
+        MAGIC_OEM_RESPONSE as MAGIC_RESPONSE,
     },
-    frame::{build_command_frame, Frame, SeqCounter, HEADER_LEN, MIN_FRAME},
-    pack::{self, AtmLinkParams, Modulation, Annex, Vdsl2Profiles},
-    unpack::{self, ChannelStats, LineObj, LinkStatus},
-    MAGIC_COMMAND, MAGIC_RESPONSE,
 };
 
 /// Default per-request timeout (matches the original binary's 2000 ms).
