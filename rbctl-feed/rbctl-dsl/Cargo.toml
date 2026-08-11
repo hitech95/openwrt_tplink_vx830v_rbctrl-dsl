@@ -33,6 +33,7 @@ log = { version = "0.4", features = ["std"] }
 nanologger = { version = "0.1", features = ["log"] }
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
 ubus = { package = "ubus-zero", git = "https://github.com/pawelchcki/ubus-zero", rev = "68b55de7" }
+prost = { version = "0.13", features = ["derive"] }
 # Workspace-internal crates.
 rbctl_proto = { path = "crates/rbctl_proto" }
 af_packet = { path = "crates/af_packet" }

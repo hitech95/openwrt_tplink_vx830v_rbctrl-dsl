@@ -5,8 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "rbctl — 0x88B5 board protocol core (OEM binary)"
+description = "rbctl — 0x88B5 board protocol core (OEM binary + protobuf)"
 publish = false
+
+[features]
+# The `protobuf` feature adds the self-describing protobuf message types
+# (magic 0x50) alongside the legacy OEM binary opcodes (magic 0x11/0x10).
+# When disabled, the crate is no_std and contains only the OEM core.
+default = []
+protobuf = ["dep:prost", "dep:prost-build", "dep:protox"]
 
 [lib]
 name = "rbctl_proto"
@@ -15,5 +22,11 @@ path = "src/lib.rs"
 [dependencies]
 # CRC-16/ARC: poly 0x8005, init 0, refin=refout=true, xorout 0.
 crc = "3"
+# Protobuf message types (only when `protobuf` feature is enabled).
+prost = { version = "0.13", features = ["derive"], optional = true }
+
+[build-dependencies]
+prost-build = { version = "0.13", optional = true }
+protox = { version = "0.7", optional = true }
 
 [dev-dependencies]

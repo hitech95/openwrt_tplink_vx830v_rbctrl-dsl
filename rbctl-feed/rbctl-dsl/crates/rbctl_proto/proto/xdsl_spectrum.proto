@@ -1,0 +1,45 @@
+// xDSL spectrum data + loop diagnostics — NEW, no OEM equivalent.
+//
+// Per-tone graphs (SNR, bits, gain, Hlog, QLN) via tcci_cmd show commands.
+// Unlocks 40+ fields locked inside the DSL driver that the OEM never surfaces.
+
+syntax = "proto3";
+
+package rbctl;
+
+// ── Spectrum ───────────────────────────────────────────────────────────
+
+message GetSpectrumRequest {
+  bool snr_per_tone  = 1;
+  bool bits_per_tone = 2;
+  bool hlog          = 3;
+  bool qln           = 4;
+}
+
+message SpectrumResponse {
+  ToneData snr  = 1;
+  ToneData bits = 2;
+  ToneData gain = 3;
+  ToneData hlog = 4;
+  ToneData qln  = 5;
+}
+
+message ToneData {
+  uint32             start_tone   = 1;
+  uint32             tone_count   = 2;
+  uint32             tone_spacing = 3;
+  repeated sint32    values       = 4 [packed = true];
+}
+
+// ── Diagnostics ────────────────────────────────────────────────────────
+
+message GetDiagnosticsRequest {
+  bool run_hlog = 1;
+  bool run_qln  = 2;
+}
+
+message DiagnosticsResponse {
+  ToneData hlog        = 1;
+  ToneData qln         = 2;
+  bool     in_progress = 3;
+}

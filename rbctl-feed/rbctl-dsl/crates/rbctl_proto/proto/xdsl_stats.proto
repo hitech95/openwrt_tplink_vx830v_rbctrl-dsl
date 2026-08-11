@@ -1,0 +1,69 @@
+// xDSL line/channel statistics — replaces OEM opcode 4 (28-byte packed struct).
+//
+// Extended with near-end + far-end + retransmission (G.INP DTU) counters.
+
+syntax = "proto3";
+
+package rbctl;
+
+// ── Line stats (extended opcode 4) ─────────────────────────────────────
+
+message GetLineStatsRequest {
+  bool include_far_end       = 1;
+  bool include_retransmission = 2;
+}
+
+message LineStatsResponse {
+  NearFarStats       near_end            = 1;
+  NearFarStats       far_end             = 2;
+  RetransmissionStats retransmission     = 3;
+  uint32             total_act_seconds   = 10;
+  uint32             current_act_seconds = 11;
+}
+
+message NearFarStats {
+  uint32 crc_fast         = 1;
+  uint32 crc_interleaved  = 2;
+  uint32 fec_fast         = 3;
+  uint32 fec_interleaved  = 4;
+  uint32 hes_fast         = 5;
+  uint32 hes_interleaved  = 6;
+  uint32 es               = 7;
+  uint32 ses              = 8;
+  uint32 uas              = 9;
+  uint32 los              = 10;
+  uint32 lof              = 11;
+  uint32 fast_rate        = 12;
+  uint32 interleaved_rate = 13;
+  uint32 path0_crc        = 14;
+  uint32 path0_fec        = 15;
+  uint32 path1_crc        = 16;
+  uint32 path1_fec        = 17;
+}
+
+message RetransmissionStats {
+  uint32 tx_dtu_count      = 1;
+  uint32 rx_dtu_count      = 2;
+  uint32 correct_dtu       = 3;
+  uint32 errored_dtu       = 4;
+  uint32 error_free_bits   = 5;
+  uint32 min_throughput    = 6;
+  uint32 actual_throughput = 7;
+  uint32 rein_value        = 8;
+  uint32 shine_value       = 9;
+  uint32 act_delay_rtx_us  = 10;
+}
+
+// ── Channel stats (opcode 4 fallback) ──────────────────────────────────
+
+message GetChannelStatsRequest {}
+
+message ChannelStatsResponse {
+  uint32 status            = 1;
+  uint32 receive_blocks    = 2;
+  uint32 receive_errors    = 3;
+  uint32 receive_discards  = 4;
+  uint32 transmit_blocks   = 5;
+  uint32 transmit_errors   = 6;
+  uint32 transmit_discards = 7;
+}

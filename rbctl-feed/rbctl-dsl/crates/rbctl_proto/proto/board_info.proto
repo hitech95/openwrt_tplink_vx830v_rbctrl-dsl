@@ -1,0 +1,69 @@
+// Board info — NEW environmental / hardware telemetry.
+//
+// Temperatures, flash partitions (dual-image A/B), boot info, memory, load
+// average, chipset firmware version, internal switch port status, OAM ping.
+
+syntax = "proto3";
+
+package rbctl;
+
+message GetBoardInfoRequest {}
+
+message BoardInfoResponse {
+  // ── Temperatures ──
+  int32           cpu_temp_celsius      = 1;
+  int32           dsl_chip_temp_celsius = 2;
+
+  // ── Flash / dual-image ──
+  string          active_partition      = 10;
+  bool            dual_image_supported  = 11;
+  FlashPartition  tclinux               = 12;
+  FlashPartition  tclinux_alt           = 13;
+
+  // ── Boot info ──
+  uint32          boot_index            = 20;
+  uint32          boot_flag             = 21;
+
+  // ── Memory ──
+  uint32          mem_total_kb          = 30;
+  uint32          mem_free_kb           = 31;
+
+  // ── Load average ──
+  float           load_1min             = 40;
+  float           load_5min             = 41;
+  float           load_15min            = 42;
+
+  // ── DSL chipset firmware ──
+  string          dsl_chipset_fw        = 50;
+  string          dsl_chipset_hw        = 51;
+  uint32          cnxt_version          = 52;
+
+  // ── Port status (internal switch) ──
+  repeated PortStatus ports             = 60;
+
+  // ── OAM ping result (ATM only) ──
+  OamPingResult   oam_ping              = 70;
+}
+
+message FlashPartition {
+  string name         = 1;
+  uint32 offset       = 2;
+  uint32 size         = 3;
+  bool   is_active    = 4;
+  bool   is_committed = 5;
+  bool   is_valid     = 6;
+}
+
+message PortStatus {
+  uint32 index       = 1;
+  bool   link_up     = 2;
+  uint32 speed_mbps  = 3;
+  bool   power_gated = 4;
+}
+
+message OamPingResult {
+  bool   enabled  = 1;
+  bool   success  = 2;
+  uint32 rtt_ms   = 3;
+  string endpoint = 4;
+}

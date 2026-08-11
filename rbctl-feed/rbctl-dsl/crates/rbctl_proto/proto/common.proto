@@ -1,0 +1,40 @@
+// Shared enums used across multiple protocol sections.
+//
+// These are the DSL line attributes referenced by both the status/config
+// sections and the async events section.
+
+syntax = "proto3";
+
+package rbctl;
+
+enum LinkState {
+  LINK_STATE_UNSPECIFIED = 0;
+  NO_SIGNAL              = 1;
+  HANDSHAKE              = 2;
+  TRAINING               = 3;
+  SHOWTIME               = 4; // = Up
+}
+
+enum ModulationType {
+  MODULATION_UNSPECIFIED = 0;
+  ADSL_T1413             = 1;
+  ADSL_GDMT              = 2;
+  ADSL_GLITE             = 3;
+  ADSL2                  = 4;
+  ADSL2PLUS              = 5;
+  VDSL2                  = 6;
+}
+
+enum DataPath {
+  DATA_PATH_UNSPECIFIED = 0;
+  ATM                   = 1;
+  PTM                   = 2;
+}
+
+enum AnnexType {
+  ANNEX_UNSPECIFIED = 0;
+  A                 = 1;
+  B                 = 2;
+  I                 = 3;
+  M                 = 4;
+}

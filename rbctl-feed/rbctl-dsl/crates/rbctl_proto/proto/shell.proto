@@ -1,0 +1,42 @@
+// Remote shell — NEW tty tunnel, no OEM equivalent.
+//
+// The board runs Linux but has no SSH/telnet path from the host. This
+// provides a multiplexed remote shell over the L2 protobuf protocol.
+// Implemented via posix_openpt + fork + execve("/bin/sh") on the board.
+
+syntax = "proto3";
+
+package rbctl;
+
+message ShellRequest {
+  oneof action {
+    ShellOpen   open   = 1;
+    ShellData   data   = 2;
+    ShellResize resize = 3;
+    ShellClose  close  = 4;
+  }
+}
+
+message ShellOpen {
+  uint32 rows = 1;
+  uint32 cols = 2;
+  string term = 3;  // e.g. "xterm" (default: "vt100")
+}
+
+message ShellData {
+  bytes stdin = 1;   // host → board
+}
+
+message ShellResize {
+  uint32 rows = 1;
+  uint32 cols = 2;
+}
+
+message ShellClose {}
+
+message ShellResponse {
+  uint32 session_id = 1;
+  bytes  stdout     = 2;  // board → host
+  bool   exited      = 3;
+  int32  exit_code   = 4;
+}

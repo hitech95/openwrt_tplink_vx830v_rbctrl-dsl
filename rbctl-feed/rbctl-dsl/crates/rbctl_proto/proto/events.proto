@@ -1,0 +1,21 @@
+// Async events — board → host push (NEW, no OEM equivalent).
+//
+// The OEM board is strictly request/response; the host must poll for DSL
+// state changes. These event types let the agent push transitions instantly.
+
+syntax = "proto3";
+
+package rbctl;
+
+import "common.proto";
+
+message LinkStatusEvent {
+  LinkState old_state = 1;
+  LinkState new_state = 2;
+  uint64    timestamp = 3;
+}
+
+message FirmwareProgress {
+  uint32 stage = 1;
+  uint32 pct   = 2;
+}

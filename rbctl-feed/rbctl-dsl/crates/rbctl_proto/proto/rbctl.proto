@@ -1,0 +1,92 @@
+// rbctl protobuf schema — board management over L2.
+//
+// This is the **envelope** file: it defines the top-level Request / Response /
+// Event wrapper messages whose oneof payloads reference types from the
+// section-specific proto files. Each section lives in its own file:
+//
+//   common.proto         — shared enums (LinkState, ModulationType, …)
+//   hello.proto          — discovery / capabilities
+//   xdsl_status.proto    — line status (opcode 2 replacement)
+//   xdsl_stats.proto     — line/channel error counters (opcode 4)
+//   xdsl_config.proto    — line config + ATM/PTM links (opcodes 1/5/6/15/16)
+//   xdsl_spectrum.proto  — per-tone data + diagnostics (NEW)
+//   firmware.proto       — firmware upgrade (opcode 8)
+//   shell.proto          — remote shell / tty tunnel (NEW)
+//   board_info.proto     — environmental / hardware info (NEW)
+//   events.proto         — async push events (NEW)
+//
+// All files share `package rbctl;` so prost generates them into a single
+// `rbctl.rs` module. Splitting is purely organisational.
+//
+// Source: plans/protobuf.md
+
+syntax = "proto3";
+
+package rbctl;
+
+import "common.proto";
+import "hello.proto";
+import "xdsl_status.proto";
+import "xdsl_stats.proto";
+import "xdsl_config.proto";
+import "xdsl_spectrum.proto";
+import "firmware.proto";
+import "shell.proto";
+import "board_info.proto";
+import "events.proto";
+
+// ─── Envelope: every frame carries one of these ───────────────────────
+
+enum MessageType {
+  MESSAGE_TYPE_UNSPECIFIED = 0;
+  REQUEST                  = 1;
+  RESPONSE                 = 2;
+  EVENT                    = 3; // async push from board to host
+}
+
+// ─── Request (host → board) ───────────────────────────────────────────
+
+message Request {
+  uint32 id = 1;                       // correlation ID (host-assigned)
+  oneof payload {
+    HelloRequest           hello          = 10;
+    GetLineStatusRequest   line_status    = 11;
+    GetLineStatsRequest    line_stats     = 12;
+    GetChannelStatsRequest channel_stats  = 13;
+    ConfigRequest          config         = 14;
+    FirmwareRequest        firmware       = 15;
+    ShellRequest           shell          = 16;
+    GetSpectrumRequest     spectrum       = 17;
+    GetDiagnosticsRequest  diagnostics    = 18;
+    GetBoardInfoRequest    board_info     = 19;
+  }
+}
+
+// ─── Response (board → host) ──────────────────────────────────────────
+
+message Response {
+  uint32 id = 1;                       // matches Request.id
+  bool   ok = 2;                       // true on success
+  string error = 3;                    // human-readable error if !ok
+  oneof payload {
+    HelloResponse          hello          = 10;
+    LineStatusResponse     line_status    = 11;
+    LineStatsResponse      line_stats     = 12;
+    ChannelStatsResponse   channel_stats  = 13;
+    ConfigResponse         config         = 14;
+    FirmwareResponse       firmware       = 15;
+    ShellResponse          shell          = 16;
+    SpectrumResponse       spectrum       = 17;
+    DiagnosticsResponse    diagnostics    = 18;
+    BoardInfoResponse      board_info     = 19;
+  }
+}
+
+// ─── Event (async, board → host) ──────────────────────────────────────
+
+message Event {
+  oneof payload {
+    LinkStatusEvent  link_status = 1;
+    FirmwareProgress fw_progress = 2;
+  }
+}

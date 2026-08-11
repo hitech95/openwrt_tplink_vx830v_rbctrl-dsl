@@ -1,0 +1,29 @@
+// Hello / Discovery — capabilities negotiation.
+//
+// The host calls HelloRequest first; the response lists supported capabilities
+// so the host can gracefully degrade on older agent builds.
+
+syntax = "proto3";
+
+package rbctl;
+
+message HelloRequest {}
+
+message HelloResponse {
+  string         agent_version    = 1;
+  string         board_hw_version = 2;
+  string         dsl_fw_version   = 3;
+  string         kernel_version   = 4;
+  uint32         uptime_secs      = 5;
+  MacAddress     board_mac        = 6;
+  string         active_partition = 7;
+  RepeatedString capabilities     = 8;
+}
+
+message MacAddress {
+  bytes mac = 1; // 6 bytes
+}
+
+message RepeatedString {
+  repeated string values = 1;
+}

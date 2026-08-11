@@ -1,0 +1,37 @@
+// Firmware upgrade — replaces OEM opcode 8 (4-stage handshake).
+//
+// 4-stage state machine: announce → stream chunks → verify → complete+reboot.
+// Preserves the 2RDH bootloader contract and dual-image A/B scheme.
+
+syntax = "proto3";
+
+package rbctl;
+
+message FirmwareRequest {
+  oneof stage {
+    FirmwareAnnounce announce = 1;
+    FirmwareChunk    chunk    = 2;
+    FirmwareVerify   verify   = 3;
+    FirmwareComplete complete = 4;
+  }
+}
+
+message FirmwareAnnounce {
+  uint32 image_size = 1;
+}
+
+message FirmwareChunk {
+  uint32 chunk_index = 1;
+  bytes  data        = 2; // up to 1024 bytes
+}
+
+message FirmwareVerify {}
+message FirmwareComplete {}
+
+message FirmwareResponse {
+  uint32 stage           = 1;
+  bool   ok              = 2;
+  uint32 last_good_chunk = 3;
+  uint32 version         = 4;
+  string error           = 5;
+}
