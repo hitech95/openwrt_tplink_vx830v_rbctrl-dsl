@@ -4,7 +4,7 @@
 //!
 //! Rules sourced from [modulation_annex.md](../../docs/xdsl/modulation_annex.md).
 
-use crate::pack::{Annex, Modulation, Vdsl2Profiles};
+use super::pack::{Annex, Modulation, Vdsl2Profiles};
 
 // ── error type ───────────────────────────────────────────────────────────
 

@@ -4,7 +4,7 @@
 //! against the board-side `remote_board` (EcoNet EN7516 MIPS) ground truth
 //! — see `docs/xdsl/responses.md` and `docs/server.md`.
 
-use crate::pack::{Annex, Modulation, Vdsl2Profiles};
+use super::pack::{Annex, Modulation, Vdsl2Profiles};
 
 // ─── Link status ────────────────────────────────────────────────────────
 

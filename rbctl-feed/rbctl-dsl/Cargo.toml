@@ -11,7 +11,13 @@
 # Phase 1 will add `crates/rbctl_proto` (pure-Rust 0x88B5 protocol core).
 [workspace]
 resolver = "2"
-members = ["crates/rbctl_proto", "crates/af_packet", "crates/tinyln_rs_sys", "crates/tinyln_rs", "crates/rbctl_dsl"]
+members = [
+    "crates/rbctl_proto",
+    "crates/af_packet",
+    "crates/tinyln_rs_sys",
+    "crates/tinyln_rs",
+    "crates/rbctl_dsl",
+]
 
 [workspace.package]
 version = "0.2.0"
@@ -21,19 +27,15 @@ license = "GPL-2.0-only"
 authors = ["rbctl-dsl contributors"]
 
 [workspace.dependencies]
-# Pinned, shared versions across workspace members.
-#
-# rust-uci is pinned to the namib-project git HEAD rather than crates.io: the
-# registry still carries libuci-sys 1.0.5 (bindgen 0.58.1, which panics on
-# uci.h's anonymous union under clang ≥ 15). The repo has libuci-sys 1.1.0
-# (bindgen 0.72) which fixes it. The git dep pulls both rust-uci 0.1.6 and
-# libuci-sys 1.1.0 via the workspace path dep — no [patch.crates-io] needed.
 rust-uci = { git = "https://github.com/namib-project/rust-uci", rev = "3e7b6153" }
 libc = "0.2"
 log = { version = "0.4", features = ["std"] }
 nanologger = { version = "0.1", features = ["log"] }
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
 ubus = { package = "ubus-zero", git = "https://github.com/pawelchcki/ubus-zero", rev = "68b55de7" }
+# Workspace-internal crates.
+rbctl_proto = { path = "crates/rbctl_proto" }
+af_packet = { path = "crates/af_packet" }
 
 [profile.release]
 opt-level = "z"

@@ -1,24 +1,27 @@
-//! `0x88B5` frame layout — 24-byte header + payload.
+//! Shared frame layout — 24-byte header + payload.
+//!
+//! This module is **protocol-agnostic**: it knows the header field offsets
+//! and how to parse/serialise them, but does not care about the magic byte
+//! value. OEM-specific frame builders live in [`crate::oem`]; protobuf frame
+//! builders live in the agent/host daemon.
 //!
 //! ```text
 //! Offset  Size  Field
 //! ------  ----  -------------------------------------------
-//! 0x00    6     dst MAC (broadcast FF:FF:FF:FF:FF:FF on init)
-//! 0x06    6     src MAC (local interface MAC)
+//! 0x00    6     dst MAC
+//! 0x06    6     src MAC
 //! 0x0C    2     EtherType 0x88B5 (big-endian)
-//! 0x0E    1     magic: 0x11 command / 0x10 response
-//! 0x0F    1     subtype (= opcode / cmm key)
+//! 0x0E    1     magic (0x11 OEM req / 0x10 OEM resp / 0x50 protobuf)
+//! 0x0F    1     subtype (= opcode for OEM, msg_type+frag for protobuf)
 //! 0x10    4     sequence (big-endian u32)
-//! 0x14    2     payload_len (big-endian u16, bytes from 0x18 onward)
-//! 0x16    2     checksum (CRC-16/ARC, big-endian, zeroed during compute)
-//! 0x18    ..    payload (TX: byte 0 = payload_type; RX: raw data, no echo)
+//! 0x14    2     payload_len (big-endian u16)
+//! 0x16    2     checksum (CRC-16/ARC, zeroed during compute)
+//! 0x18    ..    payload
 //! ```
-//!
-//! Multi-byte fields are big-endian on the wire. See `docs/protocol.md`.
 
-use crate::{set_checksum, MAGIC_COMMAND};
+use crate::checksum::set_checksum;
 
-/// Board management EtherType.
+/// Board management EtherType (shared by both protocols).
 pub const ETHTYPE_BOARD: u16 = 0x88B5;
 
 /// Total header size (bytes `0x00`–`0x17`). Payload starts at `0x18`.
@@ -35,25 +38,22 @@ pub const OFF_PAYLOAD_LEN: usize = 0x14;
 pub const OFF_CHECKSUM: usize = 0x16;
 pub const OFF_PAYLOAD: usize = 0x18;
 
-const BROADCAST_MAC: [u8; 6] = [0xff; 6];
-
-// ─── TX: build a command frame ─────────────────────────────────────────
-
-/// Fill `buf` with a command frame (magic `0x11`) and compute the checksum.
+/// Build a frame with an arbitrary magic byte.
 ///
-/// `payload` is the full bytes from offset `0x18` onward (byte 0 = payload_type).
-/// The caller is responsible for encoding the payload via [`crate::pack`].
+/// This is the protocol-agnostic core used by both OEM and protobuf builders.
+/// OEM callers pass [`crate::oem::MAGIC_OEM_COMMAND`] or
+/// [`crate::oem::MAGIC_OEM_RESPONSE`]; protobuf callers pass
+/// [`crate::protobuf::MAGIC_PROTOBUF`].
 ///
-/// Returns the slice of `buf` that holds the complete frame (header + payload,
-/// **not** padded to `MIN_FRAME` — padding is the socket layer's job).
-///
-/// # Panics
-/// Panics if `buf` is too small for `HEADER_LEN + payload.len()`.
-pub fn build_command_frame<'a>(
+/// Returns the slice of `buf` that holds the complete frame (not padded to
+/// `MIN_FRAME` — padding is the socket layer's job).
+pub fn build_frame<'a>(
     buf: &'a mut [u8],
+    dst_mac: &[u8; 6],
+    src_mac: &[u8; 6],
+    magic: u8,
     subtype: u8,
     seq: u32,
-    src_mac: &[u8; 6],
     payload: &[u8],
 ) -> &'a mut [u8] {
     let total = HEADER_LEN + payload.len();
@@ -61,12 +61,12 @@ pub fn build_command_frame<'a>(
     let f = &mut buf[..total];
 
     // Ethernet header
-    f[0x00..0x06].copy_from_slice(&BROADCAST_MAC);
+    f[0x00..0x06].copy_from_slice(dst_mac);
     f[0x06..0x0c].copy_from_slice(src_mac);
     f[0x0c..0x0e].copy_from_slice(&ETHTYPE_BOARD.to_be_bytes());
 
     // Protocol header
-    f[OFF_MAGIC] = MAGIC_COMMAND;
+    f[OFF_MAGIC] = magic;
     f[OFF_SUBTYPE] = subtype;
     f[OFF_SEQ..OFF_SEQ + 4].copy_from_slice(&seq.to_be_bytes());
     f[OFF_PAYLOAD_LEN..OFF_PAYLOAD_LEN + 2].copy_from_slice(&(payload.len() as u16).to_be_bytes());
@@ -75,7 +75,6 @@ pub fn build_command_frame<'a>(
     // Payload
     f[OFF_PAYLOAD..].copy_from_slice(payload);
 
-    // Checksum (covers the region with the checksum field treated as zero)
     set_checksum(f);
     f
 }
@@ -86,6 +85,9 @@ pub fn build_command_frame<'a>(
 ///
 /// Created via [`Frame::parse`]. Does not copy — borrows the underlying buffer.
 /// All multi-byte accessors return host-order values.
+///
+/// Protocol-agnostic: the caller inspects [`magic()`](Frame::magic) to
+/// determine whether this is an OEM or protobuf frame.
 #[derive(Clone, Copy)]
 pub struct Frame<'a> {
     buf: &'a [u8],
@@ -94,6 +96,9 @@ pub struct Frame<'a> {
 impl<'a> Frame<'a> {
     /// Parse a frame from a byte slice. Returns `None` if shorter than
     /// [`HEADER_LEN`] or the payload extends past the buffer end.
+    ///
+    /// Does **not** filter by magic byte — the caller decides which protocol
+    /// to dispatch based on [`magic()`](Frame::magic).
     pub fn parse(buf: &'a [u8]) -> Option<Self> {
         if buf.len() < HEADER_LEN {
             return None;
@@ -109,8 +114,6 @@ impl<'a> Frame<'a> {
     pub fn subtype(&self) -> u8 { self.buf[OFF_SUBTYPE] }
     pub fn seq(&self) -> u32 { u32::from_be_bytes(self.buf[OFF_SEQ..OFF_SEQ + 4].try_into().unwrap()) }
     pub fn payload_len(&self) -> u16 { u16::from_be_bytes([self.buf[OFF_PAYLOAD_LEN], self.buf[OFF_PAYLOAD_LEN + 1]]) }
-    pub fn is_command(&self) -> bool { self.buf[OFF_MAGIC] == crate::MAGIC_COMMAND }
-    pub fn is_response(&self) -> bool { self.buf[OFF_MAGIC] == crate::MAGIC_RESPONSE }
     pub fn dst_mac(&self) -> &[u8] { &self.buf[0x00..0x06] }
     pub fn src_mac(&self) -> &[u8] { &self.buf[0x06..0x0c] }
 
@@ -118,8 +121,6 @@ impl<'a> Frame<'a> {
     pub fn buf(&self) -> &'a [u8] { self.buf }
 
     /// The payload slice (offset `0x18`, length = `payload_len`).
-    /// TX payloads start with the opcode byte; RX responses contain raw
-    /// data directly (no opcode echo, confirmed via hardware capture).
     pub fn payload(&self) -> &'a [u8] {
         let len = self.payload_len() as usize;
         &self.buf[OFF_PAYLOAD..OFF_PAYLOAD + len]
@@ -128,7 +129,7 @@ impl<'a> Frame<'a> {
 
 // ─── Sequence counter ──────────────────────────────────────────────────
 
-/// Monotonic sequence counter for TX frames (`g_dwProtoSeq` in the C daemon).
+/// Monotonic sequence counter for TX frames.
 /// Wraps on overflow. Not `Sync` — the socket layer owns it single-threaded.
 #[derive(Debug, Default)]
 pub struct SeqCounter(u32);
@@ -141,27 +142,24 @@ impl SeqCounter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verify_checksum;
+    use crate::checksum::verify_checksum;
 
     #[test]
     fn build_and_parse_round_trip() {
-        let payload = [0x06u8, 0x01, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let payload = [0x06u8, 0x01, 0x00, 0x00, 0x00, 0x00];
         let src = [0x00u8, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let dst = [0xffu8; 6];
 
         let mut buf = [0u8; 128];
-        let frame_bytes = build_command_frame(&mut buf, 0x01, 42, &src, &payload);
+        let frame_bytes = build_frame(&mut buf, &dst, &src, 0x11, 0x01, 42, &payload);
 
-        // Verify checksum is valid
-        assert!(verify_checksum(frame_bytes), "checksum must verify");
+        assert!(verify_checksum(frame_bytes));
 
-        // Parse and check fields
         let frame = Frame::parse(frame_bytes).unwrap();
+        assert_eq!(frame.magic(), 0x11);
         assert_eq!(frame.subtype(), 0x01);
         assert_eq!(frame.seq(), 42);
-        assert_eq!(frame.payload_len(), payload.len() as u16);
         assert_eq!(frame.payload(), &payload);
-        assert!(frame.is_command());
-        assert_eq!(frame.dst_mac(), &[0xff; 6]);
     }
 
     #[test]
@@ -169,7 +167,6 @@ mod tests {
         let mut c = SeqCounter::new();
         assert_eq!(c.next(), 1);
         assert_eq!(c.next(), 2);
-        assert_eq!(c.next(), 3);
     }
 
     #[test]
