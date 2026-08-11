@@ -201,8 +201,8 @@ impl RawSocket {
 
     pub fn set_timeout(&self, timeout: Duration) -> io::Result<()> {
         let tv = libc::timeval {
-            tv_sec: timeout.as_secs() as libc::time_t,
-            tv_usec: timeout.subsec_micros() as i64,
+            tv_sec: timeout.as_secs() as _,
+            tv_usec: timeout.subsec_micros() as _,
         };
         unsafe {
             check(libc::setsockopt(
