@@ -163,14 +163,14 @@ fn main() {
     }
 
     match cli.command {
-    Command::Daemon(args) => {
-        let overrides = args.to_overrides();
-        let code = daemon::run(
-            &args.config_iface,
-            args.notify.as_deref(),
-            &overrides,
-        );
-        std::process::exit(code);
+        Command::Daemon(args) => {
+            let overrides = args.to_overrides();
+            let code = daemon::run(
+                &args.config_iface,
+                args.notify.as_deref(),
+                &overrides,
+            );
+            std::process::exit(code);
         }
         Command::Status => ipc_exit(ipc::IpcCmd::Status),
         Command::Reload => ipc_exit(ipc::IpcCmd::Reload),
