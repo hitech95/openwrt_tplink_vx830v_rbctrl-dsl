@@ -18,8 +18,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
+use rbctl_proto::oem::pack::AtmEncap;
 use rbctl_proto::oem::validate;
 
 use crate::board::Board;
@@ -107,7 +107,7 @@ fn build_snapshot(state: &ubus_obj::SharedState, config_iface: &str) -> StatusSn
         .map_or(false, |t| t.elapsed() < constants::POLL_STALE_TIMEOUT);
     let link = mgmt_link::MgmtLinkStatus::probe(config_iface);
 
-    let mut snap = match &st.line_obj {
+    let snap = match &st.line_obj {
         Some(line) => {
             let (state_str, state_num, up) = mapping::map_link_status(line.link_status);
             StatusSnapshot {

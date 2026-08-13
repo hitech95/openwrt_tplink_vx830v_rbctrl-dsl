@@ -19,7 +19,7 @@ use crate::daemon::SHOULD_EXIT;
 use crate::hotplug::{self, LineEvent};
 use crate::uci_cfg::{CliOverrides, DslConfig};
 use crate::ubus_obj::SharedState;
-use crate::utils::{mapping, xdsl};
+use crate::utils::xdsl;
 
 /// Worker tick — bounds how long a command waits before being acted upon.
 const WORKER_TICK: Duration = constants::POLL_TICK;

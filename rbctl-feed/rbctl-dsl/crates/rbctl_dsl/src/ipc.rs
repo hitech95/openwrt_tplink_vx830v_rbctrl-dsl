@@ -24,9 +24,6 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::time::Duration;
-
-use crate::uci_cfg::XferMode;
 
 pub const SOCK_PATH: &str = crate::constants::IPC_SOCK_PATH;
 
@@ -221,7 +218,7 @@ fn handle_client(mut stream: UnixStream, snapshot: &StatusSnapshot) -> io::Resul
                 let _ = stream.write_all(b"OK restarting line\n");
                 return Ok(IpcAction::RestartLine);
             } else {
-                let _ = stream.write_all(b"ERR: board unreachable — cannot restart line\n");
+                let _ = stream.write_all(b"ERR: board unreachable - cannot restart line\n");
                 return Ok(IpcAction::None);
             }
         }

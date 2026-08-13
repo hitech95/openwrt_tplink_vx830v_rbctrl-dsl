@@ -138,7 +138,7 @@ impl<T: Transport> Board<T> {
                             Some(f) => f,
                             None => continue, // malformed, try next frame
                         };
-                        if !f.is_response() || f.subtype() != subtype || f.seq() != seq {
+                        if f.magic() != MAGIC_RESPONSE || f.subtype() != subtype || f.seq() != seq {
                             continue; // our own TX echo or mismatched, try next
                         }
                         if !verify_checksum(f.buf()) {

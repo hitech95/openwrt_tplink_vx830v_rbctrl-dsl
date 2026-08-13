@@ -11,7 +11,7 @@
 use std::sync::{Arc, Mutex};
 
 use rbctl_proto::oem::pack::{Annex, Modulation};
-use rbctl_proto::oem::unpack::{DataPath, LineObj, LineMetrics, LinkStatus};
+use rbctl_proto::oem::unpack::{LineObj, LineMetrics};
 use ubus::server::UbusObject;
 use ubus::blobmsg::{BlobBuilder, BlobMsgTable};
 use ubus::error::UbusError;
