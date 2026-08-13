@@ -32,7 +32,18 @@ start_service() {
 	   ! ip link show "$config_iface" >/dev/null 2>&1; then
 		ip link add link "$parent" name "$config_iface" type vlan id "$vid" 2>/dev/null
 	fi
+	# Bring up the parent first — without carrier on lan0, all 0x88B5
+	# frames on lan0.500 are dropped by the kernel.
+	ip link set "$parent" up 2>/dev/null
 	ip link set "$config_iface" up 2>/dev/null
+
+	# Wait up to 5s for carrier so the daemon doesn't race the PHY.
+	i=0
+	while [ $i -lt 50 ] && \
+	      [ "$(cat /sys/class/net/$config_iface/carrier 2>/dev/null)" != "1" ]; do
+		sleep 0.1
+		i=$((i + 1))
+	done
 
 	procd_open_instance
 	procd_set_param command "$PROG" \

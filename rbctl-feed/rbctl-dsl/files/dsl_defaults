@@ -15,6 +15,12 @@
 # The xDSL board is reached on a fixed management VLAN.  Declare it as
 # a UCI device so netifd creates and brings it up at boot, before the
 # daemon (START=97) needs it.
+#
+# NOTE: the parent interface (e.g. 'lan0') must also exist and be
+# brought up — dsl_control does this at startup, but the device itself
+# should be declared in UCI / board.d so netifd manages it persistently.
+# Without carrier on the parent, all 0x88B5 frames on the VLAN are
+# silently dropped by the kernel.
 if ! uci -q get network.@device[0] >/dev/null 2>&1 \
    || ! uci -q show network | grep -q "lan0\.500"; then
 	uci -q batch <<-EOF

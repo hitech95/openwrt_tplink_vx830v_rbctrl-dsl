@@ -16,7 +16,6 @@
 //!     └── thread::sleep(1s)
 //! ```
 
-use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +28,7 @@ use crate::board::Board;
 use crate::board_worker::BoardWorker;
 use crate::hotplug::{self, LineEvent};
 use crate::ipc::{IpcListener, StatusSnapshot};
+use crate::mgmt_link;
 use crate::uci_cfg::{AtmConfig, CliOverrides, DslConfig, XferMode};
 use crate::ubus_obj;
 
@@ -70,13 +70,6 @@ fn install_signal_handlers() {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
-
-fn parent_iface(iface: &str) -> &str {
-    match iface.rfind('.') {
-        Some(i) => &iface[..i],
-        None => iface,
-    }
-}
 
 fn atm_params(atm: Option<&AtmConfig>, vlan_id: u16) -> AtmLinkParams<'static> {
     let a = atm.cloned().unwrap_or(AtmConfig {
@@ -122,13 +115,6 @@ fn delete_vlan_iface(parent: &str, vlan_id: u16) {
         Err(e) if matches!(e.raw_os_error(), Some(libc::ENODEV) | Some(libc::ENXIO)) => {}
         Err(e) => log::warn!("delete {name}: {e}"),
     }
-}
-
-/// Check whether a network interface exists (via `if_nametoindex`).
-fn iface_exists(name: &str) -> bool {
-    CString::new(name)
-        .map(|c| unsafe { libc::if_nametoindex(c.as_ptr()) } != 0)
-        .unwrap_or(false)
 }
 
 fn connect_ubus(
@@ -341,14 +327,22 @@ pub fn run(
     // Compute transport VLAN id from base index
     let transport_vlan = cfg.transport_vlan_base as u16 + 2000;
 
-    // 2. Verify management interface exists
-    if !iface_exists(config_iface) {
+    // 2. Verify management interface — read-only carrier check via
+    //    MgmtLinkStatus. The daemon never alters management interfaces;
+    //    if they're down, dsl_control / netifd is responsible.
+    let link = mgmt_link::MgmtLinkStatus::probe(config_iface);
+    if !link.exists {
+        log::error!("management interface {}", link.diagnostic());
         log::error!(
-            "management interface {config_iface} does not exist — \
-             ensure it is declared in UCI (network device section) \
-             or created by the init script before starting the daemon"
+            "  create it via UCI device section or board.d before starting the daemon"
         );
         return 1;
+    }
+    if !link.is_ready() {
+        log::warn!("management interface not ready: {}", link.diagnostic());
+        log::warn!("  the daemon will continue — the worker will report board-unreachable");
+    } else {
+        log::info!("management interface {config_iface} ready (carrier ok)");
     }
 
     // 3. Open board socket
@@ -394,7 +388,7 @@ pub fn run(
     log::info!("board assigned transport vlan: {vlan}");
 
     // 5. Create host-side transport VLAN
-    let parent = parent_iface(config_iface);
+    let parent = mgmt_link::parent_of(config_iface).unwrap_or(config_iface);
     match create_vlan_iface(parent, vlan) {
         Ok(()) => log::info!("created {parent}.{vlan}"),
         Err(e) => log::warn!("VLAN create {parent}.{vlan}: {e} (may already exist)"),
@@ -531,7 +525,7 @@ mod tests {
 
     #[test]
     fn parent_iface_vlan() {
-        assert_eq!(parent_iface("lan0.500"), "lan0");
-        assert_eq!(parent_iface("eth0"), "eth0");
+        assert_eq!(mgmt_link::parent_of("lan0.500"), Some("lan0"));
+        assert_eq!(mgmt_link::parent_of("eth0"), None);
     }
 }
