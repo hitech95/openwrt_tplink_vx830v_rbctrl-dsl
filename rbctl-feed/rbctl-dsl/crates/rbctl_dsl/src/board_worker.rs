@@ -204,6 +204,8 @@ impl BoardWorker {
 
                 {
                     let mut st = self.state.lock().unwrap();
+                    st.last_poll_ok = Some(Instant::now());
+                    st.board_ever_seen = true;
                     st.line_obj = Some(line.clone());
                     st.uptime_secs = self.up_since.map(|t| t.elapsed().as_secs()).unwrap_or(0);
                     st.xfer_mode = Some(self.cfg.xfer_mode);
@@ -226,7 +228,15 @@ impl BoardWorker {
                     self.last_status = Some(status);
                 }
             }
-            Err(BoardError::Timeout) => {}
+            Err(BoardError::Timeout) => {
+                let mut st = self.state.lock().unwrap();
+                let stale = st
+                    .last_poll_ok
+                    .map_or(true, |t| t.elapsed() > Duration::from_secs(30));
+                if stale {
+                    st.line_obj = None;
+                }
+            }
             Err(e) => log::error!("poll error: {e}"),
         }
     }

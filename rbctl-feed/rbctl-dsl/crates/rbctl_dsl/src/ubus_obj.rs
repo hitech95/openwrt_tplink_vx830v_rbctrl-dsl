@@ -36,7 +36,7 @@ mod lstate {
 /// Live DSL metrics shared between the board poller and the ubus handler.
 #[derive(Clone)]
 pub struct DslState {
-    /// Latest op 2 reply, or `None` if no successful poll yet.
+    /// Latest op 2 reply, or `None` if no successful poll yet (or stale).
     pub line_obj: Option<LineObj>,
     /// Seconds since the line first reached `Up` (0 if not up).
     pub uptime_secs: u64,
@@ -49,6 +49,10 @@ pub struct DslState {
     pub annex: Annex,
     /// Firmware upgrade status.
     pub fw_status: FwStatus,
+    /// Instant of the last successful op2 poll, or None if never.
+    pub last_poll_ok: Option<std::time::Instant>,
+    /// True if op2 has succeeded at least once since startup.
+    pub board_ever_seen: bool,
 }
 
 /// Firmware upgrade lifecycle status, queryable via IPC `status` and ubus.
@@ -90,6 +94,8 @@ impl Default for DslState {
             modulation: Modulation::Vdsl2,
             annex: Annex::B,
             fw_status: FwStatus::default(),
+            last_poll_ok: None,
+            board_ever_seen: false,
         }
     }
 }

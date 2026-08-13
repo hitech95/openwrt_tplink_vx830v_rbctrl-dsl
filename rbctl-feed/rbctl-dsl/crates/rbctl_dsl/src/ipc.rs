@@ -78,6 +78,9 @@ pub struct StatusSnapshot {
     pub down_snr: u32,
     pub up_snr: u32,
     pub fw_status: String,
+    pub board_reachable: bool,
+    pub mgmt_iface: String,
+    pub mgmt_carrier: bool,
 }
 
 impl StatusSnapshot {
@@ -192,14 +195,35 @@ fn handle_client(mut stream: UnixStream, snapshot: &StatusSnapshot) -> io::Resul
     }
 
     let response = match cmd {
-        "STATUS" => format!("OK\n{}\n.\n", snapshot.to_lines()),
+        "STATUS" => {
+            if snapshot.board_reachable {
+                format!("OK\n{}\n.\n", snapshot.to_lines())
+            } else {
+                let carrier_str = if snapshot.mgmt_carrier { "ok" } else { "down" };
+                format!(
+                    "ERR: board unreachable on {} (carrier {})\n\
+                     mgmt_iface: {}\n\
+                     mgmt_carrier: {}\n\
+                     hint: ensure management interfaces are up (check dsl_control / netifd)\n\
+                     .\n",
+                    snapshot.mgmt_iface, carrier_str,
+                    snapshot.mgmt_iface,
+                    carrier_str,
+                )
+            }
+        }
         "RELOAD" => {
             let _ = stream.write_all(b"OK reloading\n");
             return Ok(IpcAction::Reload);
         }
         "RESTART" => {
-            let _ = stream.write_all(b"OK restarting line\n");
-            return Ok(IpcAction::RestartLine);
+            if snapshot.board_reachable {
+                let _ = stream.write_all(b"OK restarting line\n");
+                return Ok(IpcAction::RestartLine);
+            } else {
+                let _ = stream.write_all(b"ERR: board unreachable — cannot restart line\n");
+                return Ok(IpcAction::None);
+            }
         }
         "STOP" => {
             let _ = stream.write_all(b"OK stopping\n");
@@ -305,6 +329,9 @@ mod tests {
             down_snr: 150,
             up_snr: 120,
             fw_status: "idle".into(),
+            board_reachable: true,
+            mgmt_iface: "lan0.500".into(),
+            mgmt_carrier: true,
         };
         let text = s.to_lines();
         let parsed = StatusSnapshot::from_lines(&text);

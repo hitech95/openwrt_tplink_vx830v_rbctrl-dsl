@@ -156,9 +156,14 @@ fn find_ubus_socket() -> Option<String> {
 /// Build a [`StatusSnapshot`] from the current shared state. Reads only the
 /// mutex (never the board, never `cfg`), so it is constant-time and safe to
 /// call from the IPC path while the board worker is mid-request.
-fn build_snapshot(state: &ubus_obj::SharedState) -> StatusSnapshot {
+fn build_snapshot(state: &ubus_obj::SharedState, config_iface: &str) -> StatusSnapshot {
     let st = state.lock().unwrap();
     let fw = st.fw_status.as_str();
+    let board_reachable = st
+        .last_poll_ok
+        .map_or(false, |t| t.elapsed() < Duration::from_secs(30));
+    let link = mgmt_link::MgmtLinkStatus::probe(config_iface);
+
     let mut snap = match &st.line_obj {
         Some(line) => {
             let (state_str, state_num, up) = crate::ubus_obj::map_link_status(line.link_status);
@@ -175,6 +180,9 @@ fn build_snapshot(state: &ubus_obj::SharedState) -> StatusSnapshot {
                 down_snr: line.metrics.down_noise_margin,
                 up_snr: line.metrics.up_noise_margin,
                 fw_status: fw,
+                board_reachable,
+                mgmt_iface: config_iface.into(),
+                mgmt_carrier: link.carrier,
             }
         }
         None => StatusSnapshot {
@@ -182,6 +190,9 @@ fn build_snapshot(state: &ubus_obj::SharedState) -> StatusSnapshot {
             annex: format!("{:?}", st.annex),
             xfer_mode: format!("{:?}", st.xfer_mode.unwrap_or(XferMode::Ptm)),
             fw_status: fw,
+            board_reachable,
+            mgmt_iface: config_iface.into(),
+            mgmt_carrier: link.carrier,
             ..Default::default()
         },
     };
@@ -462,7 +473,7 @@ pub fn run(
 
         // Handle IPC commands
         if let Some(ipc) = &ipc {
-            let snap = build_snapshot(&state);
+            let snap = build_snapshot(&state, config_iface);
             match ipc.accept_one(&snap) {
                 Ok(Some(action)) => match action {
                     crate::ipc::IpcAction::Reload => {
