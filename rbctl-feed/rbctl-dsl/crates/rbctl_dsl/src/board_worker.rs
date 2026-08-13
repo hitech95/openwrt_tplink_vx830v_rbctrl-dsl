@@ -53,6 +53,9 @@ pub struct BoardWorker {
     up_since: Option<Instant>,
     tc_emitted: bool,
     cmd_rx: mpsc::Receiver<WorkerCmd>,
+    board_reachable: bool,
+    config_applied: bool,
+    transport_vlan: u16,
 }
 
 impl BoardWorker {
@@ -63,6 +66,7 @@ impl BoardWorker {
         state: SharedState,
         notify_script: Option<String>,
         cmd_rx: mpsc::Receiver<WorkerCmd>,
+        transport_vlan: u16,
     ) -> Self {
         Self {
             board,
@@ -76,6 +80,9 @@ impl BoardWorker {
             up_since: None,
             tc_emitted: false,
             cmd_rx,
+            board_reachable: false,
+            config_applied: false,
+            transport_vlan,
         }
     }
 
@@ -99,6 +106,7 @@ impl BoardWorker {
             }
 
             self.maybe_poll_board();
+            self.maybe_apply_config();
         }
 
         // Best-effort line-down.
@@ -129,6 +137,7 @@ impl BoardWorker {
                 self.cfg = new_cfg;
                 self.publish_config();
                 self.tc_emitted = false;
+                self.config_applied = true;
             } else {
                 log::info!("no line-param changes");
             }
@@ -144,6 +153,7 @@ impl BoardWorker {
             self.cfg.bitswap, self.cfg.sra,
         );
         self.tc_emitted = false;
+        self.config_applied = true;
     }
 
     fn handle_firmware_upgrade(
@@ -196,6 +206,11 @@ impl BoardWorker {
             Ok(line) => {
                 let status = line.link_status;
 
+                if !self.board_reachable {
+                    log::info!("board is now reachable");
+                    self.board_reachable = true;
+                }
+
                 if status == LinkStatus::Up && self.up_since.is_none() {
                     self.up_since = Some(Instant::now());
                 } else if status != LinkStatus::Up {
@@ -229,6 +244,11 @@ impl BoardWorker {
                 }
             }
             Err(BoardError::Timeout) => {
+                if self.board_reachable {
+                    log::warn!("board became unreachable");
+                    self.board_reachable = false;
+                    self.config_applied = false;
+                }
                 let mut st = self.state.lock().unwrap();
                 let stale = st
                     .last_poll_ok
@@ -238,6 +258,40 @@ impl BoardWorker {
                 }
             }
             Err(e) => log::error!("poll error: {e}"),
+        }
+    }
+
+    /// Retry op1 (and op5/op15 for fixed mode) if the board is reachable
+    /// but the config hasn't been applied yet. This handles the case where
+    /// the startup op1 failed because the board was unreachable — the worker
+    /// retries once the board responds to op2.
+    fn maybe_apply_config(&mut self) {
+        if !self.board_reachable || self.config_applied {
+            return;
+        }
+        log::info!("applying line config (deferred from startup)");
+        if self
+            .board
+            .line_config_up(
+                self.cfg.modulation,
+                self.cfg.annex,
+                self.cfg.profiles,
+                self.cfg.bitswap,
+                self.cfg.sra,
+            )
+            .is_ok()
+        {
+            match self.cfg.xfer_mode {
+                crate::uci_cfg::XferMode::Ptm => {
+                    let _ = self.board.ptm_link_add(0, 0, 0, self.transport_vlan);
+                }
+                crate::uci_cfg::XferMode::Atm => {
+                    let params =
+                        crate::daemon::atm_params(self.cfg.atm.as_ref(), self.transport_vlan);
+                    let _ = self.board.atm_link_add(&params);
+                }
+            }
+            self.config_applied = true;
         }
     }
 }

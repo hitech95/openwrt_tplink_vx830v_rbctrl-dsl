@@ -71,7 +71,7 @@ fn install_signal_handlers() {
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
-fn atm_params(atm: Option<&AtmConfig>, vlan_id: u16) -> AtmLinkParams<'static> {
+pub(crate) fn atm_params(atm: Option<&AtmConfig>, vlan_id: u16) -> AtmLinkParams<'static> {
     let a = atm.cloned().unwrap_or(AtmConfig {
         vpi: 8,
         vci: 35,
@@ -451,6 +451,7 @@ pub fn run(
         Arc::clone(&state),
         notify_script.map(str::to_string),
         cmd_rx,
+        transport_vlan,
     );
     let (worker_done_tx, worker_done_rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
