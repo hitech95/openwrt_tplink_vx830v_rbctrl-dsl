@@ -7,9 +7,26 @@ use std::time::Duration;
 
 use af_packet::RawSocket;
 use rbctl_proto::oem::pack::*;
+use rbctl_proto::oem::unpack::DataPath;
 use tinyln_rs::rtnl::RtnlLink;
 
 use crate::board::Board;
+use crate::mgmt_link;
+
+// ── selftest board params (static, no user input) ──────────────────────
+// Matches the board's own boot defaults — the config that trains.
+const ST_MODULATION: Modulation = Modulation::Multimode;
+const ST_ANNEX: Annex = Annex::Auto;
+const ST_PROFILES: Vdsl2Profiles = Vdsl2Profiles(0x1ff); // all profiles
+const ST_BITSWAP: bool = true;
+const ST_SRA: bool = false;
+
+/// Transport VLAN for the test link.
+const ST_TEST_VLAN: u16 = 2001;
+
+/// How long to wait for the line to train after op1.
+const ST_TRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+const ST_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 pub struct Selftest {
     config_iface: String,
@@ -20,9 +37,8 @@ pub struct Selftest {
 
 impl Selftest {
     pub fn run(config_iface: &str) -> i32 {
-        let parent = config_iface
-            .rsplit_once('.')
-            .map(|(p, _)| p.to_string())
+        let parent = mgmt_link::parent_of(config_iface)
+            .map(str::to_string)
             .unwrap_or_else(|| config_iface.to_string());
 
         let mut st = Selftest {
@@ -92,10 +108,7 @@ impl Selftest {
     }
 
     fn has_carrier(&self, iface: &str) -> bool {
-        std::fs::read_to_string(format!("/sys/class/net/{iface}/carrier"))
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-            .is_some_and(|v| v == 1)
+        mgmt_link::read_carrier(iface).unwrap_or(false)
     }
 
     fn test_socket(&self) -> Result<String, String> {
@@ -139,51 +152,123 @@ impl Selftest {
         board.set_retries(3);
 
         let mut got_response = false;
-        let mut lines = Vec::new();
 
-        match board.get_line_obj() {
-            Ok(o) => {
+        // ── Step 1: op1 — line config up with auto modulation ───────────
+        // Sends the board's default/auto config (Multimode / Annex-Auto /
+        // all profiles). If the board already has this config, dslCfgSet's
+        // diff check is a no-op. If it had a different config, it retrains
+        // to auto — the known-good config.
+        match board.line_config_up(ST_MODULATION, ST_ANNEX, ST_PROFILES, ST_BITSWAP, ST_SRA) {
+            Ok(()) => {
                 got_response = true;
-                lines.push(format!(
-                    "op2: {:?}, down={} up={} kbps, SNR d={:.1} u={:.1} dB",
-                    o.link_status, o.metrics.down_rate, o.metrics.up_rate,
-                    o.metrics.down_noise_margin as f32 / 10.0, o.metrics.up_noise_margin as f32 / 10.0,
-                ));
+                log::info!(
+                    "op1: ACK ({:?}/Annex::{:?}/0x{:x}, bitswap={} sra={})",
+                    ST_MODULATION, ST_ANNEX, ST_PROFILES.bitmask(), ST_BITSWAP, ST_SRA
+                );
             }
-            Err(crate::board::BoardError::Timeout) => lines.push("op2: no response".into()),
-            Err(e) => lines.push(format!("op2: ERROR {e}")),
+            Err(crate::board::BoardError::Timeout) => {
+                log::info!("op1: no response");
+                return Ok("no board response".into());
+            }
+            Err(e) => return Err(format!("op1: {e}")),
         }
 
+        // ── Step 2: poll op2 until Up or timeout ────────────────────────
+        log::info!("waiting for line to train (up to {}s)...", ST_TRAIN_TIMEOUT.as_secs());
+
+        let start = std::time::Instant::now();
+        let deadline = start + ST_TRAIN_TIMEOUT;
+        let mut line_obj = None;
+
+        while std::time::Instant::now() < deadline {
+            match board.get_line_obj() {
+                Ok(o) => {
+                    let elapsed = start.elapsed().as_secs();
+                    log::info!(
+                        "poll: {:?} ({}s) — mod={} datapath={:?} annex={}",
+                        o.link_status, elapsed, o.modulation_code, o.data_path, o.annex_code
+                    );
+
+                    if o.link_status == rbctl_proto::oem::unpack::LinkStatus::Up {
+                        line_obj = Some(o);
+                        break;
+                    }
+                }
+                Err(crate::board::BoardError::Timeout) => {}
+                Err(e) => log::warn!("poll error: {e}"),
+            }
+            std::thread::sleep(ST_POLL_INTERVAL);
+        }
+
+        // ── Step 3: detect modulation + provision link ──────────────────
+        let mut detected = String::new();
+
+        if let Some(ref o) = line_obj {
+            let dp = o.data_path;
+            let mode = o.modulation_code;
+            let down = o.metrics.down_rate;
+            let up = o.metrics.up_rate;
+            let snr_d = o.metrics.down_noise_margin as f32 / 10.0;
+            let snr_u = o.metrics.up_noise_margin as f32 / 10.0;
+
+            detected = format!(
+                "mod={} datapath={:?} annex={} down={} up={} kbps SNR d={:.1} u={:.1} dB",
+                mode, dp, o.annex_code, down, up, snr_d, snr_u
+            );
+            log::info!("line up: {detected}");
+
+            match dp {
+                DataPath::Ptm => {
+                    log::info!("detected: VDSL2/PTM — provisioning PTM link (vlan={ST_TEST_VLAN})");
+                    match board.ptm_link_add(0, 0, 0, ST_TEST_VLAN) {
+                        Ok(vlan) => log::info!("op15: ACK vlan={vlan}"),
+                        Err(crate::board::BoardError::Timeout) => log::info!("op15: no response"),
+                        Err(e) => log::error!("op15: ERROR {e}"),
+                    }
+                }
+                DataPath::Atm => {
+                    log::info!("detected: ADSL/ATM — provisioning ATM link (vlan={ST_TEST_VLAN})");
+                    let mut p = AtmLinkParams::default();
+                    p.vpi = 8;
+                    p.vci = 35;
+                    p.encap = AtmEncap::Llc;
+                    p.link_type = AtmLinkType::Eoa;
+                    p.qos = AtmQos::Ubr;
+                    p.pcr = 1000;
+                    p.vlan_id = ST_TEST_VLAN;
+                    match board.atm_link_add(&p) {
+                        Ok(vlan) => log::info!("op5: ACK vlan={vlan}"),
+                        Err(crate::board::BoardError::Timeout) => log::info!("op5: no response"),
+                        Err(e) => log::error!("op5: ERROR {e}"),
+                    }
+                }
+                DataPath::Unknown(code) => {
+                    log::warn!("unknown data_path code {code} — skipping link provisioning");
+                }
+            }
+        } else {
+            log::info!("line did not train within {}s timeout", ST_TRAIN_TIMEOUT.as_secs());
+            log::info!("hint: check physical line, DSLAM config, annex compatibility");
+        }
+
+        // ── Step 4: op4 — channel stats ────────────────────────────────
         match board.get_channel_stats() {
             Ok(s) => {
-                got_response = true;
-                lines.push(format!("op4: rx_blocks={} tx_blocks={}", s.receive_blocks, s.transmit_blocks));
+                log::info!("op4: rx_blocks={} tx_blocks={}", s.receive_blocks, s.transmit_blocks);
             }
-            Err(crate::board::BoardError::Timeout) => lines.push("op4: no response".into()),
-            Err(e) => lines.push(format!("op4: ERROR {e}")),
+            Err(crate::board::BoardError::Timeout) => log::info!("op4: no response"),
+            Err(e) => log::error!("op4: ERROR {e}"),
         }
 
-        match board.line_config_up(Modulation::Vdsl2, Annex::B, Vdsl2Profiles::THIRTY_A, true, true) {
-            Ok(()) => { got_response = true; lines.push("op1: ACK".into()); }
-            Err(crate::board::BoardError::Timeout) => lines.push("op1: no response".into()),
-            Err(e) => lines.push(format!("op1: ERROR {e}")),
+        // ── Step 5: summary ────────────────────────────────────────────
+        if !got_response {
+            return Ok("no board response".into());
         }
 
-        let mut p = AtmLinkParams::default();
-        p.vpi = 8; p.vci = 35; p.encap = AtmEncap::Llc; p.link_type = AtmLinkType::Eoa;
-        p.qos = AtmQos::Ubr; p.pcr = 1000;
-        match board.atm_link_add(&p) {
-            Ok(vlan) => { got_response = true; lines.push(format!("op5: ACK vlan={vlan}")); }
-            Err(crate::board::BoardError::Timeout) => lines.push("op5: no response".into()),
-            Err(e) => lines.push(format!("op5: ERROR {e}")),
-        }
-
-        for l in &lines { log::info!("{l}"); }
-
-        if got_response {
-            Ok("board is alive".into())
+        if line_obj.is_some() {
+            Ok(format!("line up, {detected}"))
         } else {
-            Ok("no board response".into())
+            Ok("board is alive but line did not train".into())
         }
     }
 
