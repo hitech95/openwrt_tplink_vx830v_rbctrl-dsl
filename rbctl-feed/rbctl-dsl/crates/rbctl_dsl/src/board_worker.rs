@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use rbctl_proto::oem::unpack::LinkStatus;
+use rbctl_proto::oem::unpack::{DataPath, LinkStatus};
 
 use crate::board::{Board, BoardError, FwProgress, FwUpgradeResult};
 use crate::daemon::SHOULD_EXIT;
@@ -56,6 +56,8 @@ pub struct BoardWorker {
     board_reachable: bool,
     config_applied: bool,
     transport_vlan: u16,
+    parent: String,
+    link_provisioned: bool,
 }
 
 impl BoardWorker {
@@ -67,6 +69,7 @@ impl BoardWorker {
         notify_script: Option<String>,
         cmd_rx: mpsc::Receiver<WorkerCmd>,
         transport_vlan: u16,
+        parent: String,
     ) -> Self {
         Self {
             board,
@@ -83,6 +86,8 @@ impl BoardWorker {
             board_reachable: false,
             config_applied: false,
             transport_vlan,
+            parent,
+            link_provisioned: false,
         }
     }
 
@@ -215,6 +220,7 @@ impl BoardWorker {
                     self.up_since = Some(Instant::now());
                 } else if status != LinkStatus::Up {
                     self.up_since = None;
+                    self.link_provisioned = false;
                 }
 
                 {
@@ -241,6 +247,47 @@ impl BoardWorker {
                         self.tc_emitted = true;
                     }
                     self.last_status = Some(status);
+                }
+
+                // Auto-mode deferred link provisioning: when the line reaches
+                // Up, detect the actual data_path from op2 and send the
+                // matching link opcode (op15 PTM or op5 ATM).
+                if status == LinkStatus::Up
+                    && !self.link_provisioned
+                    && self.cfg.xfer_mode == crate::uci_cfg::XferMode::Auto
+                {
+                    let dp = line.data_path;
+                    log::info!(
+                        "auto: line up (mod={} datapath={:?}), provisioning link",
+                        line.modulation_code, dp
+                    );
+                    let provisioned = match dp {
+                        DataPath::Ptm => {
+                            self.board.ptm_link_add(0, 0, 0, self.transport_vlan).is_ok()
+                        }
+                        DataPath::Atm => {
+                            let params = crate::daemon::atm_params(
+                                self.cfg.atm.as_ref(),
+                                self.transport_vlan,
+                            );
+                            self.board.atm_link_add(&params).is_ok()
+                        }
+                        DataPath::Unknown(code) => {
+                            log::warn!("unknown data_path={code} — skipping link provisioning");
+                            false
+                        }
+                    };
+                    if provisioned {
+                        let _ = crate::daemon::create_vlan_iface(&self.parent, self.transport_vlan);
+                        self.link_provisioned = true;
+                        let detected = match dp {
+                            DataPath::Ptm => crate::uci_cfg::XferMode::Ptm,
+                            DataPath::Atm => crate::uci_cfg::XferMode::Atm,
+                            DataPath::Unknown(_) => self.cfg.xfer_mode,
+                        };
+                        let mut st = self.state.lock().unwrap();
+                        st.xfer_mode = Some(detected);
+                    }
                 }
             }
             Err(BoardError::Timeout) => {
@@ -289,6 +336,9 @@ impl BoardWorker {
                     let params =
                         crate::daemon::atm_params(self.cfg.atm.as_ref(), self.transport_vlan);
                     let _ = self.board.atm_link_add(&params);
+                }
+                crate::uci_cfg::XferMode::Auto => {
+                    // Link provisioning deferred to Up transition in maybe_poll_board
                 }
             }
             self.config_applied = true;

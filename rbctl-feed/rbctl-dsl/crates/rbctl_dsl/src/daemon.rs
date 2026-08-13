@@ -91,7 +91,7 @@ pub(crate) fn atm_params(atm: Option<&AtmConfig>, vlan_id: u16) -> AtmLinkParams
     p
 }
 
-fn create_vlan_iface(parent: &str, vlan_id: u16) -> Result<(), String> {
+pub(crate) fn create_vlan_iface(parent: &str, vlan_id: u16) -> Result<(), String> {
     let name = format!("{parent}.{vlan_id}");
     let mut rtnl = RtnlLink::new().map_err(|e| format!("rtnl: {e}"))?;
 
@@ -318,13 +318,18 @@ pub fn run(
         log::error!("config validation failed: {e}");
         return 1;
     }
-    let transport_hint = match cfg.xfer_mode {
-        XferMode::Ptm => validate::TransportHint::Ptm,
-        XferMode::Atm => validate::TransportHint::Atm,
-    };
-    if let Err(e) = validate::validate_xfer_mode(cfg.modulation, transport_hint) {
-        log::error!("config validation failed: {e}");
-        return 1;
+    // Skip xfer_mode validation in auto mode — Multimode accepts either,
+    // and the actual mode is decided after the line trains.
+    if cfg.xfer_mode != XferMode::Auto {
+        let transport_hint = match cfg.xfer_mode {
+            XferMode::Ptm => validate::TransportHint::Ptm,
+            XferMode::Atm => validate::TransportHint::Atm,
+            XferMode::Auto => unreachable!(),
+        };
+        if let Err(e) = validate::validate_xfer_mode(cfg.modulation, transport_hint) {
+            log::error!("config validation failed: {e}");
+            return 1;
+        }
     }
 
     // 1c. Warn if ATM-specific options given with PTM mode (or vice versa)
@@ -378,7 +383,7 @@ pub fn run(
         log::error!("line_config_up: {e}");
     }
 
-    // 4. Add data-plane link
+    // 4. Add data-plane link (skip in auto mode — worker provisions after Up)
     let vlan = match cfg.xfer_mode {
         XferMode::Ptm => {
             log::info!("ptm_link_add: vlan={transport_vlan}");
@@ -395,14 +400,20 @@ pub fn run(
             let params = atm_params(cfg.atm.as_ref(), transport_vlan);
             board.atm_link_add(&params).unwrap_or(transport_vlan)
         }
+        XferMode::Auto => {
+            log::info!("auto: deferring link provisioning until line trains");
+            transport_vlan
+        }
     };
     log::info!("board assigned transport vlan: {vlan}");
 
-    // 5. Create host-side transport VLAN
+    // 5. Create host-side transport VLAN (skip in auto mode — worker creates after Up)
     let parent = mgmt_link::parent_of(config_iface).unwrap_or(config_iface);
-    match create_vlan_iface(parent, vlan) {
-        Ok(()) => log::info!("created {parent}.{vlan}"),
-        Err(e) => log::warn!("VLAN create {parent}.{vlan}: {e} (may already exist)"),
+    if cfg.xfer_mode != XferMode::Auto {
+        match create_vlan_iface(parent, vlan) {
+            Ok(()) => log::info!("created {parent}.{vlan}"),
+            Err(e) => log::warn!("VLAN create {parent}.{vlan}: {e} (may already exist)"),
+        }
     }
 
     // 6. Bind IPC socket
@@ -452,6 +463,7 @@ pub fn run(
         notify_script.map(str::to_string),
         cmd_rx,
         transport_vlan,
+        parent.to_string(),
     );
     let (worker_done_tx, worker_done_rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {

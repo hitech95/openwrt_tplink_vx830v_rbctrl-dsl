@@ -30,6 +30,10 @@ impl std::error::Error for ConfigError {}
 pub enum XferMode {
     Atm,
     Ptm,
+    /// Auto-detect from op2 response after the line trains.
+    /// The worker reads `data_path` (offset 0x06) and provisions
+    /// the matching PTM (op15) or ATM (op5) link.
+    Auto,
 }
 
 #[derive(Debug, Clone)]
@@ -62,12 +66,14 @@ pub struct DslConfig {
 
 /// Map UCI `line_mode` + `xfer_mode` → board [`Modulation`].
 ///
-/// `line_mode=vdsl` → `Vdsl2`; `line_mode=adsl` → `Adsl2Plus`.
+/// `line_mode=vdsl` → `Vdsl2`; `line_mode=adsl` → `Adsl2Plus`;
+/// `line_mode=auto` → `Multimode` (board auto-negotiates).
 /// When `line_mode` is absent, `xfer_mode=ptm` implies VDSL2.
 pub fn parse_modulation(line_mode: &str, _xfer_mode: &str) -> Result<Modulation, ConfigError> {
     match line_mode {
         "vdsl" | "" => Ok(Modulation::Vdsl2),
         "adsl" => Ok(Modulation::Adsl2Plus),
+        "auto" | "multi" => Ok(Modulation::Multimode),
         other => Err(ConfigError(format!("bad line_mode '{other}'"))),
     }
 }
@@ -80,6 +86,7 @@ pub fn parse_annex(s: &str) -> Result<Annex, ConfigError> {
         "i" | "I" => Ok(Annex::I),
         "j" | "J" => Ok(Annex::J),
         "m" | "M" => Ok(Annex::M),
+        "auto" | "Auto" | "AUTO" => Ok(Annex::Auto),
         other => Err(ConfigError(format!("bad annex '{other}'"))),
     }
 }
@@ -131,6 +138,7 @@ pub fn parse_xfer_mode(s: &str) -> Result<XferMode, ConfigError> {
     match s.trim() {
         "ptm" | "" => Ok(XferMode::Ptm),
         "atm" => Ok(XferMode::Atm),
+        "auto" => Ok(XferMode::Auto),
         other => Err(ConfigError(format!("bad xfer_mode '{other}'"))),
     }
 }
@@ -223,15 +231,16 @@ impl DslConfig {
             .unwrap_or_else(|| "vdsl".into());
 
         // ── Smart defaults derived from line_mode ──
-        let (default_xfer, default_tone) = match line_mode.as_str() {
-            "adsl" => ("atm", ""),
-            _ => ("ptm", "av"),
+        let (default_xfer, default_tone, default_annex) = match line_mode.as_str() {
+            "adsl" => ("atm", "", "a"),
+            "auto" | "multi" => ("auto", "av", "auto"),
+            _ => ("ptm", "av", "b"),
         };
 
         // ── Resolve remaining fields (override > UCI > smart default) ──
         let annex_str = nonempty(&ov.annex)
             .or_else(|| { let v = uci_get(uci, "network.dsl.annex"); (!v.is_empty()).then_some(v) })
-            .unwrap_or_else(|| "b".into());
+            .unwrap_or_else(|| default_annex.into());
         let xfer_str = nonempty(&ov.xfer_mode)
             .or_else(|| { let v = uci_get(uci, "network.dsl.xfer_mode"); (!v.is_empty()).then_some(v) })
             .unwrap_or_else(|| default_xfer.into());
@@ -250,7 +259,7 @@ impl DslConfig {
             profiles = Vdsl2Profiles::default();
         }
 
-        let atm = if xfer_mode == XferMode::Atm {
+        let atm = if matches!(xfer_mode, XferMode::Atm | XferMode::Auto) {
             let vpi_s = nonempty(&ov.vpi)
                 .or_else(|| { let v = uci_get(uci, "network.@atm-bridge[0].vpi"); (!v.is_empty()).then_some(v) })
                 .unwrap_or_else(|| "8".into());
@@ -276,13 +285,15 @@ impl DslConfig {
         };
 
         // Bitswap / SRA (opcode 1 bytes 0x02/0x03)
+        // Auto mode defaults sra=false to match the board's own boot defaults.
+        let default_sra = !matches!(line_mode.as_str(), "auto" | "multi");
         let bitswap = ov.bitswap
             .unwrap_or_else(|| {
                 uci_get(uci, "network.dsl.bitswap").parse::<u32>().map(|v| v != 0).unwrap_or(true)
             });
         let sra = ov.sra
             .unwrap_or_else(|| {
-                uci_get(uci, "network.dsl.sra").parse::<u32>().map(|v| v != 0).unwrap_or(true)
+                uci_get(uci, "network.dsl.sra").parse::<u32>().map(|v| v != 0).unwrap_or(default_sra)
             });
 
         // Transport VLAN base index (0–7, default 0 → VLAN 2000)
@@ -369,6 +380,7 @@ mod tests {
     fn xfer_mode_parsing() {
         assert_eq!(parse_xfer_mode("ptm").unwrap(), XferMode::Ptm);
         assert_eq!(parse_xfer_mode("atm").unwrap(), XferMode::Atm);
+        assert_eq!(parse_xfer_mode("auto").unwrap(), XferMode::Auto);
         assert_eq!(parse_xfer_mode("").unwrap(), XferMode::Ptm);
         assert!(parse_xfer_mode("xyz").is_err());
     }
@@ -395,6 +407,18 @@ mod tests {
     #[test]
     fn modulation_adsl() {
         assert_eq!(parse_modulation("adsl", "atm").unwrap(), Modulation::Adsl2Plus);
+    }
+
+    #[test]
+    fn modulation_auto() {
+        assert_eq!(parse_modulation("auto", "auto").unwrap(), Modulation::Multimode);
+        assert_eq!(parse_modulation("multi", "auto").unwrap(), Modulation::Multimode);
+    }
+
+    #[test]
+    fn annex_auto() {
+        assert_eq!(parse_annex("auto").unwrap(), Annex::Auto);
+        assert_eq!(parse_annex("AUTO").unwrap(), Annex::Auto);
     }
 
     #[test]

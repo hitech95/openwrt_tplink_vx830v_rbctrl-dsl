@@ -37,7 +37,7 @@ impl LineEvent {
 pub fn tc_layer_status(xfer_mode: XferMode) -> &'static str {
     match xfer_mode {
         XferMode::Atm => "ATM",
-        XferMode::Ptm => "EFM",
+        XferMode::Ptm | XferMode::Auto => "EFM",
     }
 }
 
