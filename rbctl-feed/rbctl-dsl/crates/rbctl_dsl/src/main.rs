@@ -6,6 +6,7 @@ mod daemon;
 mod hotplug;
 mod ipc;
 mod log_init;
+mod mgmt_link;
 mod pcap;
 mod selftest;
 mod transport;
