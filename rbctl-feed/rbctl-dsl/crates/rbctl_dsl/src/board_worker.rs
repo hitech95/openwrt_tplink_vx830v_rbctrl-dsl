@@ -57,6 +57,7 @@ pub struct BoardWorker {
     cmd_rx: mpsc::Receiver<WorkerCmd>,
     board_reachable: bool,
     config_applied: bool,
+    last_apply: Option<Instant>,
     transport_vlan: u16,
     parent: String,
     link_provisioned: bool,
@@ -87,6 +88,7 @@ impl BoardWorker {
             cmd_rx,
             board_reachable: false,
             config_applied: false,
+            last_apply: None,
             transport_vlan,
             parent,
             link_provisioned: false,
@@ -280,7 +282,12 @@ impl BoardWorker {
                         }
                     };
                     if provisioned {
-                        let _ = xdsl::create_vlan_iface(&self.parent, self.transport_vlan);
+                        if let Err(e) = xdsl::create_vlan_iface(&self.parent, self.transport_vlan) {
+                            log::warn!(
+                                "VLAN create {}.{}: {e} (may already exist)",
+                                self.parent, self.transport_vlan
+                            );
+                        }
                         self.link_provisioned = true;
                         let detected = match dp {
                             DataPath::Ptm => crate::uci_cfg::XferMode::Ptm,
@@ -318,6 +325,13 @@ impl BoardWorker {
         if !self.board_reachable || self.config_applied {
             return;
         }
+        // Throttle retries to the poll cadence so a persistently-failing
+        // link_add doesn't re-run line_config_up every tick (D9).
+        let due = self.last_apply.map_or(true, |t| t.elapsed() >= self.poll_interval);
+        if !due {
+            return;
+        }
+        self.last_apply = Some(Instant::now());
         log::info!("applying line config (deferred from startup)");
         if self
             .board
@@ -330,20 +344,37 @@ impl BoardWorker {
             )
             .is_ok()
         {
-            match self.cfg.xfer_mode {
+            // Provisioning counts as "applied" only once the data-plane link
+            // is acknowledged by the board (non-Auto). On failure we leave
+            // config_applied false so this retries (throttled above), and we
+            // do NOT create the host VLAN (D9).
+            let link_ok = match self.cfg.xfer_mode {
                 crate::uci_cfg::XferMode::Ptm => {
-                    let _ = self.board.ptm_link_add(0, 0, 0, self.transport_vlan);
+                    self.board.ptm_link_add(0, 0, 0, self.transport_vlan).is_ok()
                 }
                 crate::uci_cfg::XferMode::Atm => {
                     let params =
                         xdsl::atm_params(self.cfg.atm.as_ref(), self.transport_vlan);
-                    let _ = self.board.atm_link_add(&params);
+                    self.board.atm_link_add(&params).is_ok()
                 }
                 crate::uci_cfg::XferMode::Auto => {
                     // Link provisioning deferred to Up transition in maybe_poll_board
+                    true
                 }
+            };
+            if link_ok {
+                if self.cfg.xfer_mode != crate::uci_cfg::XferMode::Auto {
+                    if let Err(e) = xdsl::create_vlan_iface(&self.parent, self.transport_vlan) {
+                        log::warn!(
+                            "VLAN create {}.{}: {e} (may already exist)",
+                            self.parent, self.transport_vlan
+                        );
+                    }
+                }
+                self.config_applied = true;
+            } else {
+                log::warn!("deferred provisioning: data-plane link_add failed — will retry");
             }
-            self.config_applied = true;
         }
     }
 }

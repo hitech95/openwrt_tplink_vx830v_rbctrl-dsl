@@ -163,6 +163,26 @@ fn handle_firmware_ipc(
         }
     }
 
+    // Stat first so we never slurp a non-regular file or an oversized image
+    // into memory (D7). MAX_IMAGE_SIZE is the board's own 8 MB cap.
+    let max = rbctl_proto::oem::firmware::MAX_IMAGE_SIZE as u64;
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = stream.write_all(format!("ERR: cannot stat {path}: {e}\n.\n").as_bytes());
+            return;
+        }
+    };
+    if !meta.is_file() {
+        let _ = stream.write_all(b"ERR: not a regular file\n.\n");
+        return;
+    }
+    if meta.len() > max {
+        let _ = stream
+            .write_all(format!("ERR: image too large ({} > {max} bytes)\n.\n", meta.len()).as_bytes());
+        return;
+    }
+
     // Read and validate the file
     let image = match std::fs::read(path) {
         Ok(data) => data,
@@ -326,11 +346,24 @@ pub fn run(
         log::error!("line_config_up: {e}");
     }
 
-    // 4. Add data-plane link (skip in auto mode — worker provisions after Up)
-    let vlan = match cfg.xfer_mode {
+    // 4. Add data-plane link (skip in auto mode — worker provisions after Up).
+    //    The board's reply (assigned VLAN) is authoritative: on error we do NOT
+    //    assume the requested VLAN and skip host-side VLAN creation — the worker
+    //    retries provisioning once the board is reachable (D9).
+    let parent = mgmt_link::parent_of(config_iface).unwrap_or(config_iface);
+    let provisioned_vlan: Option<u16> = match cfg.xfer_mode {
         XferMode::Ptm => {
             log::info!("ptm_link_add: vlan={transport_vlan}");
-            board.ptm_link_add(0, 0, 0, transport_vlan).unwrap_or(transport_vlan)
+            match board.ptm_link_add(0, 0, 0, transport_vlan) {
+                Ok(v) => {
+                    log::info!("board assigned transport vlan: {v}");
+                    Some(v)
+                }
+                Err(e) => {
+                    log::warn!("ptm_link_add failed: {e} — host VLAN not created (worker will retry)");
+                    None
+                }
+            }
         }
         XferMode::Atm => {
             let a = cfg.atm.as_ref();
@@ -341,18 +374,29 @@ pub fn run(
                 a.map(|a| a.encap).unwrap_or(AtmEncap::Llc),
             );
             let params = xdsl::atm_params(cfg.atm.as_ref(), transport_vlan);
-            board.atm_link_add(&params).unwrap_or(transport_vlan)
+            match board.atm_link_add(&params) {
+                Ok(v) => {
+                    log::info!("board assigned transport vlan: {v}");
+                    Some(v)
+                }
+                Err(e) => {
+                    log::warn!("atm_link_add failed: {e} — host VLAN not created (worker will retry)");
+                    None
+                }
+            }
         }
         XferMode::Auto => {
             log::info!("auto: deferring link provisioning until line trains");
-            transport_vlan
+            None
         }
     };
-    log::info!("board assigned transport vlan: {vlan}");
+    // For best-effort cleanup at shutdown: the board-assigned VLAN when
+    // provisioning succeeded, else the requested one.
+    let vlan = provisioned_vlan.unwrap_or(transport_vlan);
 
-    // 5. Create host-side transport VLAN (skip in auto mode — worker creates after Up)
-    let parent = mgmt_link::parent_of(config_iface).unwrap_or(config_iface);
-    if cfg.xfer_mode != XferMode::Auto {
+    // 5. Create host-side transport VLAN — only when the board acknowledged
+    //    the link (auto mode defers this to the worker's Up-transition path).
+    if cfg.xfer_mode != XferMode::Auto && provisioned_vlan.is_some() {
         match xdsl::create_vlan_iface(parent, vlan) {
             Ok(()) => log::info!("created {parent}.{vlan}"),
             Err(e) => log::warn!("VLAN create {parent}.{vlan}: {e} (may already exist)"),
@@ -417,6 +461,22 @@ pub fn run(
     log::info!("entering control loop");
     let tick = constants::POLL_TICK;
     while !SHOULD_EXIT.load(Ordering::SeqCst) {
+        // D10: detect board-worker exit (panic, early return, or channel
+        // close). The worker owns the board socket; without it the daemon can
+        // only zombie-run and silently drop control commands — shut down
+        // instead. (Guarded by SHOULD_EXIT so a normal shutdown in progress
+        // isn't misreported as unexpected.)
+        match worker_done_rx.try_recv() {
+            Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                if !SHOULD_EXIT.load(Ordering::SeqCst) {
+                    log::error!("board worker exited unexpectedly — shutting down");
+                    SHOULD_EXIT.store(true, Ordering::SeqCst);
+                }
+                break;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+
         // Forward signal-driven flags to the worker command channel.
         // Commands are naturally deferred if a firmware upgrade is in
         // progress (mpsc FIFO buffers them until the worker is ready).

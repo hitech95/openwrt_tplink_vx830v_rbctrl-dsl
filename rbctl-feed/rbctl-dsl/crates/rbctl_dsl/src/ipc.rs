@@ -22,6 +22,7 @@
 //! on its own line.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
@@ -132,6 +133,11 @@ impl IpcListener {
         let _ = std::fs::remove_file(path);
         let listener = UnixListener::bind(Path::new(path))?;
         listener.set_nonblocking(true)?;
+        // Lock the socket to its owner (root). Default perms are umask-governed
+        // and would otherwise let any local user issue STOP / FIRMWARE (D6).
+        if unsafe { libc::fchmod(listener.as_raw_fd(), 0o600) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
         Ok(Self { listener })
     }
 
@@ -146,6 +152,10 @@ impl IpcListener {
     ) -> io::Result<Option<IpcAction>> {
         match self.listener.accept() {
             Ok((stream, _)) => {
+                if !peer_is_root(&stream) {
+                    log::warn!("IPC: rejected connection from non-root peer");
+                    return Ok(None);
+                }
                 stream.set_read_timeout(Some(crate::constants::IPC_READ_TIMEOUT))?;
                 let action = handle_client(stream, snapshot)?;
                 Ok(Some(action))
@@ -176,10 +186,39 @@ impl Default for IpcAction {
     }
 }
 
+/// Verify the peer is root via `SO_PEERCRED` (Linux). Defense in depth on top
+/// of the `0600` socket mode: denies any connection that reached us without
+/// being uid 0 (D6).
+fn peer_is_root(stream: &UnixStream) -> bool {
+    let fd = stream.as_raw_fd();
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let cred: libc::ucred = unsafe {
+        let mut cred: libc::ucred = std::mem::zeroed();
+        let rc = libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut _ as *mut libc::c_void,
+            &mut len,
+        );
+        if rc != 0 {
+            return false;
+        }
+        cred
+    };
+    cred.uid == 0
+}
+
 fn handle_client(mut stream: UnixStream, snapshot: &StatusSnapshot) -> io::Result<IpcAction> {
-    let mut reader = BufReader::new(&stream);
+    // Bound the read so a client can't grow memory by withholding `\n` (D8).
+    let max = crate::constants::IPC_MAX_CMD_LINE as u64;
+    let mut reader = BufReader::new(&stream).take(max);
     let mut line = String::new();
     reader.read_line(&mut line)?;
+    if line.len() >= crate::constants::IPC_MAX_CMD_LINE && !line.contains('\n') {
+        let _ = stream.write_all(b"ERR: command too long\n");
+        return Ok(IpcAction::None);
+    }
 
     let cmd = line.trim();
 

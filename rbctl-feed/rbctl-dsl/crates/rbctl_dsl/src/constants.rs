@@ -64,6 +64,10 @@ pub const IPC_SOCK_PATH: &str = "/var/run/rbctl-dsl.sock";
 /// Read timeout for IPC command/reply (both server and client side).
 pub const IPC_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Maximum bytes accepted on a single IPC command line — bounds `read_line`
+/// so a client cannot grow memory by withholding `\n` (D8).
+pub const IPC_MAX_CMD_LINE: usize = 4096;
+
 /// Read timeout for firmware upload progress streaming (long — upload
 /// can take minutes).
 pub const IPC_FW_UPLOAD_TIMEOUT: Duration = Duration::from_secs(600);
