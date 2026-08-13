@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use crate::uci_cfg::XferMode;
 
-pub const SOCK_PATH: &str = "/var/run/rbctl-dsl.sock";
+pub const SOCK_PATH: &str = crate::constants::IPC_SOCK_PATH;
 
 // ── commands ─────────────────────────────────────────────────────────────
 
@@ -149,7 +149,7 @@ impl IpcListener {
     ) -> io::Result<Option<IpcAction>> {
         match self.listener.accept() {
             Ok((stream, _)) => {
-                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                stream.set_read_timeout(Some(crate::constants::IPC_READ_TIMEOUT))?;
                 let action = handle_client(stream, snapshot)?;
                 Ok(Some(action))
             }
@@ -241,7 +241,7 @@ fn handle_client(mut stream: UnixStream, snapshot: &StatusSnapshot) -> io::Resul
 /// Connect to a running daemon and send a command. Returns the raw reply.
 pub fn send_command(path: &str, cmd: IpcCmd) -> io::Result<String> {
     let mut stream = UnixStream::connect(Path::new(path))?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_read_timeout(Some(crate::constants::IPC_READ_TIMEOUT))?;
     stream.write_all(format!("{}\n", cmd.as_wire()).as_bytes())?;
 
     let mut response = String::new();
@@ -265,7 +265,7 @@ pub fn send_firmware(
 ) -> io::Result<String> {
     let mut stream = UnixStream::connect(Path::new(SOCK_PATH))?;
     // Long read timeout — firmware upload can take minutes
-    stream.set_read_timeout(Some(Duration::from_secs(600)))?;
+    stream.set_read_timeout(Some(crate::constants::IPC_FW_UPLOAD_TIMEOUT))?;
 
     stream.write_all(format!("FIRMWARE {path}\n").as_bytes())?;
 

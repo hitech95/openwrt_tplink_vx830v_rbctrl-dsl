@@ -11,6 +11,7 @@ use rbctl_proto::oem::unpack::DataPath;
 use tinyln_rs::rtnl::RtnlLink;
 
 use crate::board::Board;
+use crate::constants;
 use crate::mgmt_link;
 
 // ── selftest board params (static, no user input) ──────────────────────
@@ -112,10 +113,10 @@ impl Selftest {
     }
 
     fn test_socket(&self) -> Result<String, String> {
-        let sock = RawSocket::open(&self.config_iface, 0x88B5).map_err(|e| e.to_string())?;
+        let sock = RawSocket::open(&self.config_iface, constants::BOARD_ETHERTYPE_CMD).map_err(|e| e.to_string())?;
         let mac = sock.local_mac();
         sock.set_timeout(Duration::from_millis(500)).map_err(|e| e.to_string())?;
-        Ok(format!("bound {}, MAC {:02x?}, BPF 0x88B5", self.config_iface, mac))
+        Ok(format!("bound {}, MAC {:02x?}, BPF {:#06x}", self.config_iface, mac, constants::BOARD_ETHERTYPE_CMD))
     }
 
     fn test_vlan(&self) -> Result<String, String> {
@@ -146,10 +147,10 @@ impl Selftest {
     }
 
     fn test_board(&self) -> Result<String, String> {
-        let sock = RawSocket::open(&self.config_iface, 0x88B5).map_err(|e| e.to_string())?;
+        let sock = RawSocket::open(&self.config_iface, constants::BOARD_ETHERTYPE_CMD).map_err(|e| e.to_string())?;
         let mut board = Board::new(sock);
-        board.set_timeout(Duration::from_secs(2));
-        board.set_retries(3);
+        board.set_timeout(constants::BOARD_DEFAULT_TIMEOUT);
+        board.set_retries(constants::BOARD_DEFAULT_RETRIES);
 
         let mut got_response = false;
 
@@ -229,8 +230,8 @@ impl Selftest {
                 DataPath::Atm => {
                     log::info!("detected: ADSL/ATM — provisioning ATM link (vlan={ST_TEST_VLAN})");
                     let mut p = AtmLinkParams::default();
-                    p.vpi = 8;
-                    p.vci = 35;
+                    p.vpi = constants::ATM_DEFAULT_VPI;
+                    p.vci = constants::ATM_DEFAULT_VCI;
                     p.encap = AtmEncap::Llc;
                     p.link_type = AtmLinkType::Eoa;
                     p.qos = AtmQos::Ubr;
@@ -329,7 +330,7 @@ pub fn sniff(config_iface: &str, dump_file: Option<&str>) {
 
     log::info!("listening on {config_iface} for 0x88B5 / 0x88B6 frames (Ctrl+C to stop)");
 
-    let mut buf = [0u8; 1518];
+    let mut buf = [0u8; constants::BUF_ETH_MTU];
     let mut count = 0u32;
 
     loop {
@@ -346,7 +347,7 @@ pub fn sniff(config_iface: &str, dump_file: Option<&str>) {
         if n < 14 { continue; }
 
         let ethertype = u16::from_be_bytes([pkt.data[12], pkt.data[13]]);
-        if ethertype != 0x88B5 && ethertype != 0x88B6 {
+        if ethertype != constants::BOARD_ETHERTYPE_CMD && ethertype != constants::BOARD_ETHERTYPE_RSP {
             continue;
         }
 
@@ -365,8 +366,8 @@ pub fn sniff(config_iface: &str, dump_file: Option<&str>) {
             dst_mac, src_mac,
         );
 
-        let show = n.min(64);
-        for chunk in pkt.data[..show].chunks(16) {
+        let show = n.min(constants::BUF_HEX_DUMP_MAX);
+        for chunk in pkt.data[..show].chunks(constants::BUF_HEX_DUMP_ROW_WIDTH) {
             let hex: Vec<String> = chunk.iter().map(|b| format!("{:02x}", b)).collect();
             let ascii: String = chunk.iter()
                 .map(|&b| if (32..=126).contains(&b) { b as char } else { '.' })

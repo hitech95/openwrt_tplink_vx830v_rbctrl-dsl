@@ -17,19 +17,7 @@ use ubus::blobmsg::{BlobBuilder, BlobMsgTable};
 use ubus::error::UbusError;
 
 use crate::uci_cfg::XferMode;
-
-// ── LSTATE_MAP ABI enum values (from dsl_cpe_ubus.c, do not renumber) ────
-
-mod lstate {
-    pub const UNKNOWN: i32 = -1;
-    pub const NOT_INITIALIZED: i32 = 0;
-    pub const IDLE: i32 = 2;
-    pub const SILENT: i32 = 3;
-    pub const HANDSHAKE: i32 = 4;
-    pub const FULL_INIT: i32 = 5;
-    pub const SHOWTIME_NO_SYNC: i32 = 6;
-    pub const SHOWTIME_TC_SYNC: i32 = 7;
-}
+use crate::utils::mapping;
 
 // ── shared state ─────────────────────────────────────────────────────────
 
@@ -137,7 +125,7 @@ fn build_metrics_reply(st: &DslState) -> Result<BlobMsgTable, UbusError> {
 
     match &st.line_obj {
         Some(line) => {
-            let (state_str, state_num, up) = map_link_status(line.link_status);
+            let (state_str, state_num, up) = mapping::map_link_status(line.link_status);
 
             bb.put_str(Some("state"), state_str);
             bb.put_i32(Some("state_num"), state_num);
@@ -147,7 +135,7 @@ fn build_metrics_reply(st: &DslState) -> Result<BlobMsgTable, UbusError> {
             // Mode / standard / annex / profile
             let mode = mode_string(line);
             bb.put_str(Some("mode"), &mode);
-            bb.put_str(Some("annex"), annex_string(line.annex_code));
+            bb.put_str(Some("annex"), mapping::annex_string(line.annex_code));
 
             if let Some(profiles) = line.vdsl2_profiles() {
                 bb.put_str(Some("profile"), &profile_string(profiles));
@@ -163,7 +151,7 @@ fn build_metrics_reply(st: &DslState) -> Result<BlobMsgTable, UbusError> {
         }
         None => {
             bb.put_str(Some("state"), "Not initialized");
-            bb.put_i32(Some("state_num"), lstate::NOT_INITIALIZED);
+            bb.put_i32(Some("state_num"), mapping::lstate::NOT_INITIALIZED);
             bb.put_bool(Some("up"), false);
             bb.put_i64(Some("uptime"), 0);
         }
@@ -173,33 +161,11 @@ fn build_metrics_reply(st: &DslState) -> Result<BlobMsgTable, UbusError> {
     Ok(bb.finish_table())
 }
 
-/// Map board [`LinkStatus`] → (LuCI state string, LSTATE_MAP enum, up bool).
-pub fn map_link_status(status: LinkStatus) -> (&'static str, i32, bool) {
-    match status {
-        LinkStatus::NoSignal => ("Silent", lstate::SILENT, false),
-        LinkStatus::EstablishingLink => ("Handshake", lstate::HANDSHAKE, false),
-        LinkStatus::Initializing => ("Full init", lstate::FULL_INIT, false),
-        LinkStatus::Up => ("Showtime with TC-Layer sync", lstate::SHOWTIME_TC_SYNC, true),
-        LinkStatus::Unknown(_) => ("Unknown", lstate::UNKNOWN, false),
-    }
-}
-
 fn mode_string(line: &LineObj) -> String {
     match line.modulation_code {
         6 => "G.993.2 (VDSL2)".to_string(),
         4 => "G.992.5 (ADSL2+)".to_string(),
         c => format!("G.992.x (modulation {c})"),
-    }
-}
-
-pub fn annex_string(code: u8) -> &'static str {
-    match code {
-        0 => "A",
-        1 => "B",
-        2 => "I",
-        3 => "M",
-        6 => "J",
-        _ => "?",
     }
 }
 
@@ -249,32 +215,34 @@ mod tests {
 
     #[test]
     fn map_status_up() {
-        let (s, n, up) = map_link_status(LinkStatus::Up);
+        let (s, n, up) = mapping::map_link_status(LinkStatus::Up);
         assert_eq!(s, "Showtime with TC-Layer sync");
-        assert_eq!(n, lstate::SHOWTIME_TC_SYNC);
+        assert!(up);
+        assert_eq!(n, mapping::lstate::SHOWTIME_TC_SYNC);
         assert!(up);
     }
 
     #[test]
     fn map_status_nosignal() {
-        let (s, n, up) = map_link_status(LinkStatus::NoSignal);
+        let (s, n, up) = mapping::map_link_status(LinkStatus::NoSignal);
         assert_eq!(s, "Silent");
-        assert_eq!(n, lstate::SILENT);
+        assert!(!up);
+        assert_eq!(n, mapping::lstate::SILENT);
         assert!(!up);
     }
 
     #[test]
     fn map_status_handshake() {
-        let (s, n, _) = map_link_status(LinkStatus::EstablishingLink);
+        let (s, n, _) = mapping::map_link_status(LinkStatus::EstablishingLink);
         assert_eq!(s, "Handshake");
-        assert_eq!(n, lstate::HANDSHAKE);
+        assert_eq!(n, mapping::lstate::HANDSHAKE);
     }
 
     #[test]
     fn map_status_training() {
-        let (s, n, _) = map_link_status(LinkStatus::Initializing);
+        let (s, n, _) = mapping::map_link_status(LinkStatus::Initializing);
         assert_eq!(s, "Full init");
-        assert_eq!(n, lstate::FULL_INIT);
+        assert_eq!(n, mapping::lstate::FULL_INIT);
     }
 
     #[test]
@@ -286,9 +254,9 @@ mod tests {
 
     #[test]
     fn annex_string_basic() {
-        assert_eq!(annex_string(0), "A");
-        assert_eq!(annex_string(1), "B");
-        assert_eq!(annex_string(99), "?");
+        assert_eq!(mapping::annex_string(0), "A");
+        assert_eq!(mapping::annex_string(1), "B");
+        assert_eq!(mapping::annex_string(99), "?");
     }
 
     #[test]

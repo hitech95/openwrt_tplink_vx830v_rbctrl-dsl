@@ -20,17 +20,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rbctl_proto::oem::pack::{AtmEncap, AtmLinkParams, AtmLinkType, AtmQos};
 use rbctl_proto::oem::validate;
-use tinyln_rs::rtnl::RtnlLink;
 
 use crate::board::Board;
 use crate::board_worker::BoardWorker;
+use crate::constants;
 use crate::hotplug::{self, LineEvent};
 use crate::ipc::{IpcListener, StatusSnapshot};
 use crate::mgmt_link;
-use crate::uci_cfg::{AtmConfig, CliOverrides, DslConfig, XferMode};
+use crate::uci_cfg::{CliOverrides, DslConfig, XferMode};
 use crate::ubus_obj;
+use crate::utils::{mapping, xdsl};
 
 // ── signal flags ─────────────────────────────────────────────────────────
 //
@@ -41,12 +41,6 @@ use crate::ubus_obj;
 pub(crate) static SHOULD_EXIT: AtomicBool = AtomicBool::new(false);
 pub(crate) static SHOULD_RELOAD: AtomicBool = AtomicBool::new(false);
 pub(crate) static SHOULD_RESTART_LINE: AtomicBool = AtomicBool::new(false);
-
-/// How long the main thread waits for the board worker to finish its
-/// best-effort `line_config_down()` before abandoning it at shutdown. The
-/// worker drops its retry budget first, so a responsive board finishes well
-/// within this; a silent board is abandoned (process exit reaps the thread).
-const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
 
 extern "C" fn handle_sigterm(_sig: libc::c_int) {
     SHOULD_EXIT.store(true, Ordering::SeqCst);
@@ -71,52 +65,6 @@ fn install_signal_handlers() {
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
-pub(crate) fn atm_params(atm: Option<&AtmConfig>, vlan_id: u16) -> AtmLinkParams<'static> {
-    let a = atm.cloned().unwrap_or(AtmConfig {
-        vpi: 8,
-        vci: 35,
-        encap: AtmEncap::Llc,
-        link_type: AtmLinkType::Eoa,
-        qos: AtmQos::Ubr,
-        pcr: 0,
-    });
-    let mut p = AtmLinkParams::default();
-    p.vpi = a.vpi;
-    p.vci = a.vci;
-    p.encap = a.encap;
-    p.link_type = a.link_type;
-    p.qos = a.qos;
-    p.pcr = a.pcr;
-    p.vlan_id = vlan_id;
-    p
-}
-
-pub(crate) fn create_vlan_iface(parent: &str, vlan_id: u16) -> Result<(), String> {
-    let name = format!("{parent}.{vlan_id}");
-    let mut rtnl = RtnlLink::new().map_err(|e| format!("rtnl: {e}"))?;
-
-    // RTM_NEWLINK uses NLM_F_CREATE | NLM_F_EXCL, so EEXIST means the
-    // interface is already present (e.g. after a daemon restart) — benign.
-    match rtnl.add_vlan(parent, vlan_id) {
-        Ok(_) => {}
-        Err(e) if e.raw_os_error() == Some(libc::EEXIST) => {}
-        Err(e) => return Err(format!("add_vlan {name}: {e}")),
-    }
-
-    // Ensure it is up whether we just created it or it pre-existed.
-    rtnl.set_up(&name).map_err(|e| format!("set_up {name}: {e}"))
-}
-
-fn delete_vlan_iface(parent: &str, vlan_id: u16) {
-    let name = format!("{parent}.{vlan_id}");
-    match RtnlLink::new().and_then(|mut r| r.del(&name)) {
-        Ok(()) => {}
-        // Interface already gone (normal during shutdown) — silently ignore.
-        Err(e) if matches!(e.raw_os_error(), Some(libc::ENODEV) | Some(libc::ENXIO)) => {}
-        Err(e) => log::warn!("delete {name}: {e}"),
-    }
-}
-
 fn connect_ubus(
     obj: ubus::server::UbusObject,
 ) -> Option<ubus::server::UbusConnection<crate::transport::UnixUbusTransport>> {
@@ -140,12 +88,7 @@ fn connect_ubus(
 
 /// Try common ubus socket paths (varies between OpenWrt versions/devices).
 fn find_ubus_socket() -> Option<String> {
-    for path in &[
-        "/var/run/ubus.sock",
-        "/var/run/ubus/ubus.sock",
-        "/tmp/run/ubus.sock",
-        "/tmp/run/ubus/ubus.sock",
-    ] {
+    for path in constants::UBUS_SOCKET_PATHS {
         if std::os::unix::net::UnixStream::connect(path).is_ok() {
             return Some((*path).into());
         }
@@ -161,19 +104,19 @@ fn build_snapshot(state: &ubus_obj::SharedState, config_iface: &str) -> StatusSn
     let fw = st.fw_status.as_str();
     let board_reachable = st
         .last_poll_ok
-        .map_or(false, |t| t.elapsed() < Duration::from_secs(30));
+        .map_or(false, |t| t.elapsed() < constants::POLL_STALE_TIMEOUT);
     let link = mgmt_link::MgmtLinkStatus::probe(config_iface);
 
     let mut snap = match &st.line_obj {
         Some(line) => {
-            let (state_str, state_num, up) = crate::ubus_obj::map_link_status(line.link_status);
+            let (state_str, state_num, up) = mapping::map_link_status(line.link_status);
             StatusSnapshot {
                 state: state_str.into(),
                 state_num,
                 up,
                 uptime_secs: st.uptime_secs,
                 modulation: format!("{:?}", line.modulation_code),
-                annex: format!("{}", crate::ubus_obj::annex_string(line.annex_code)),
+                annex: format!("{}", mapping::annex_string(line.annex_code)),
                 xfer_mode: format!("{:?}", st.xfer_mode.unwrap_or(XferMode::Ptm)),
                 down_rate: line.metrics.down_rate,
                 up_rate: line.metrics.up_rate,
@@ -258,7 +201,7 @@ fn handle_firmware_ipc(
     }
 
     // Stream progress until done
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(constants::IPC_FW_STREAM_WRITE_TIMEOUT));
     while let Ok(event) = reply_rx.recv() {
         match event {
             crate::board_worker::FwEvent::Progress(p) => {
@@ -341,7 +284,7 @@ pub fn run(
     }
 
     // Compute transport VLAN id from base index
-    let transport_vlan = cfg.transport_vlan_base as u16 + 2000;
+    let transport_vlan = cfg.transport_vlan_base as u16 + constants::VLAN_TRANSPORT_BASE_OFFSET;
 
     // 2. Verify management interface — read-only carrier check via
     //    MgmtLinkStatus. The daemon never alters management interfaces;
@@ -362,7 +305,7 @@ pub fn run(
     }
 
     // 3. Open board socket
-    let sock = match af_packet::RawSocket::open(config_iface, 0x88B5) {
+    let sock = match af_packet::RawSocket::open(config_iface, constants::BOARD_ETHERTYPE_CMD) {
         Ok(s) => s,
         Err(e) => {
             log::error!("socket: open {config_iface}: {e}");
@@ -370,8 +313,8 @@ pub fn run(
         }
     };
     let mut board: Board = Board::new(sock);
-    board.set_timeout(Duration::from_millis(2000));
-    board.set_retries(3);
+    board.set_timeout(constants::BOARD_DEFAULT_TIMEOUT);
+    board.set_retries(constants::BOARD_DEFAULT_RETRIES);
     log::info!("board socket on {config_iface} (mac={:02x?})", board.local_mac());
 
     // 3. Configure DSL line (op 1)
@@ -397,7 +340,7 @@ pub fn run(
                 a.map(|a| a.vci).unwrap_or(35),
                 a.map(|a| a.encap).unwrap_or(AtmEncap::Llc),
             );
-            let params = atm_params(cfg.atm.as_ref(), transport_vlan);
+            let params = xdsl::atm_params(cfg.atm.as_ref(), transport_vlan);
             board.atm_link_add(&params).unwrap_or(transport_vlan)
         }
         XferMode::Auto => {
@@ -410,7 +353,7 @@ pub fn run(
     // 5. Create host-side transport VLAN (skip in auto mode — worker creates after Up)
     let parent = mgmt_link::parent_of(config_iface).unwrap_or(config_iface);
     if cfg.xfer_mode != XferMode::Auto {
-        match create_vlan_iface(parent, vlan) {
+        match xdsl::create_vlan_iface(parent, vlan) {
             Ok(()) => log::info!("created {parent}.{vlan}"),
             Err(e) => log::warn!("VLAN create {parent}.{vlan}: {e} (may already exist)"),
         }
@@ -472,7 +415,7 @@ pub fn run(
     });
 
     log::info!("entering control loop");
-    let tick = Duration::from_millis(50);
+    let tick = constants::POLL_TICK;
     while !SHOULD_EXIT.load(Ordering::SeqCst) {
         // Forward signal-driven flags to the worker command channel.
         // Commands are naturally deferred if a firmware upgrade is in
@@ -531,13 +474,14 @@ pub fn run(
     }
     // The worker performs `line_config_down()` on its way out; bound the wait
     // so a silent board can't hold shutdown (it drops its retry budget first).
-    match worker_done_rx.recv_timeout(SHUTDOWN_DEADLINE) {
+    match worker_done_rx.recv_timeout(constants::DAEMON_SHUTDOWN_DEADLINE) {
         Ok(()) => log::info!("board worker exited cleanly"),
         Err(_) => log::warn!(
-            "board worker didn't exit within {SHUTDOWN_DEADLINE:?}; abandoning (process exit reaps it)"
+            "board worker didn't exit within {:?}; abandoning (process exit reaps it)",
+            constants::DAEMON_SHUTDOWN_DEADLINE
         ),
     }
-    delete_vlan_iface(parent, vlan);
+    xdsl::delete_vlan_iface(parent, vlan);
     let _ = std::fs::remove_file(crate::ipc::SOCK_PATH);
 
     0

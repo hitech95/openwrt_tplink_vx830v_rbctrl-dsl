@@ -2,6 +2,7 @@
 
 mod board;
 mod board_worker;
+mod constants;
 mod daemon;
 mod hotplug;
 mod ipc;
@@ -12,6 +13,7 @@ mod selftest;
 mod transport;
 mod ubus_obj;
 mod uci_cfg;
+mod utils;
 
 use clap::{Parser, Subcommand};
 use uci_cfg::CliOverrides;

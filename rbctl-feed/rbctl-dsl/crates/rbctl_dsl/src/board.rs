@@ -25,8 +25,8 @@ use rbctl_proto::{
 };
 
 /// Default per-request timeout (matches the original binary's 2000 ms).
-const DEFAULT_TIMEOUT: Duration = Duration::from_millis(2000);
-const DEFAULT_RETRIES: u8 = 3;
+const DEFAULT_TIMEOUT: Duration = crate::constants::BOARD_DEFAULT_TIMEOUT;
+const DEFAULT_RETRIES: u8 = crate::constants::BOARD_DEFAULT_RETRIES;
 
 /// Maximum payload we ever send or receive.
 const MAX_PAYLOAD: usize = 128;
@@ -220,7 +220,7 @@ impl<T: Transport> Board<T> {
 
     /// **Opcode 6** — ATM link delete.
     pub fn atm_link_del(&mut self, vlan_id: u16) -> Result<(), BoardError> {
-        let del = pack::pack_link_del(vlan_id, 3);
+        let del = pack::pack_link_del(vlan_id, crate::constants::BOARD_LINK_DEL_TYPE_DELETE);
         let mut pl = vec![0x06];
         pl.extend_from_slice(&del);
         self.request(6, &pl)?;
@@ -247,7 +247,7 @@ impl<T: Transport> Board<T> {
 
     /// **Opcode 16** — PTM/VDSL link delete.
     pub fn ptm_link_del(&mut self, vlan_id: u16) -> Result<(), BoardError> {
-        let del = pack::pack_link_del(vlan_id, 3);
+        let del = pack::pack_link_del(vlan_id, crate::constants::BOARD_LINK_DEL_TYPE_DELETE);
         let mut pl = vec![0x10];
         pl.extend_from_slice(&del);
         self.request(16, &pl)?;
@@ -277,7 +277,7 @@ impl<T: Transport> Board<T> {
         let saved_timeout = self.timeout;
         let saved_retries = self.retries;
 
-        let content_start = 0x100usize; // skip 2RDH header
+        let content_start = crate::constants::FW_HEADER_SIZE; // skip 2RDH header
         let content_len = image.len().saturating_sub(content_start);
         let total_chunks = ((content_len + CHUNK_SIZE - 1) / CHUNK_SIZE) as u32;
 
@@ -330,7 +330,7 @@ impl<T: Transport> Board<T> {
             chunk_idx += 1;
 
             let pct = ((chunk_idx * 100) / total_chunks.max(1)) as u8;
-            if pct >= last_pct + 10 || chunk_idx == total_chunks {
+            if pct >= last_pct + crate::constants::FW_PROGRESS_STEP_PCT || chunk_idx == total_chunks {
                 last_pct = pct;
                 progress(&FwProgress::streaming(pct));
             }
@@ -466,7 +466,7 @@ mod tests {
             // Ethernet header
             buf[0x00..0x06].copy_from_slice(&[0xFF; 6]); // broadcast
             buf[0x06..0x0c].copy_from_slice(&[0x00; 6]); // board MAC placeholder
-            buf[0x0c..0x0e].copy_from_slice(&0x88B5u16.to_be_bytes());
+            buf[0x0c..0x0e].copy_from_slice(&crate::constants::BOARD_ETHERTYPE_CMD.to_be_bytes());
             // Protocol header
             buf[0x0E] = MAGIC_RESPONSE; // 0x10
             buf[0x0F] = subtype;

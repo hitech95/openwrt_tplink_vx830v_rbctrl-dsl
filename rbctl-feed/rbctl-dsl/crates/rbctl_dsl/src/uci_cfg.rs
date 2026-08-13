@@ -301,7 +301,7 @@ impl DslConfig {
             .unwrap_or_else(|| {
                 uci_get(uci, "network.dsl.transport_vlan").parse().unwrap_or(0u8)
             })
-            .min(7);
+            .min(crate::constants::VLAN_TRANSPORT_BASE_MAX);
 
         Ok(Self {
             modulation,

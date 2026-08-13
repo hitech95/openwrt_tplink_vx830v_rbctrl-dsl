@@ -14,13 +14,15 @@ use std::time::{Duration, Instant};
 use rbctl_proto::oem::unpack::{DataPath, LinkStatus};
 
 use crate::board::{Board, BoardError, FwProgress, FwUpgradeResult};
+use crate::constants;
 use crate::daemon::SHOULD_EXIT;
 use crate::hotplug::{self, LineEvent};
 use crate::uci_cfg::{CliOverrides, DslConfig};
 use crate::ubus_obj::SharedState;
+use crate::utils::{mapping, xdsl};
 
 /// Worker tick — bounds how long a command waits before being acted upon.
-const WORKER_TICK: Duration = Duration::from_millis(50);
+const WORKER_TICK: Duration = constants::POLL_TICK;
 
 /// Commands sent from the main thread to the worker.
 pub enum WorkerCmd {
@@ -77,7 +79,7 @@ impl BoardWorker {
             overrides,
             state,
             notify_script,
-            poll_interval: Duration::from_secs(1),
+            poll_interval: constants::POLL_INTERVAL,
             last_poll: None,
             last_status: None,
             up_since: None,
@@ -115,7 +117,7 @@ impl BoardWorker {
         }
 
         // Best-effort line-down.
-        self.board.set_retries(0);
+        self.board.set_retries(constants::BOARD_SHUTDOWN_RETRIES);
         let _ = self.board.line_config_down();
         log::info!("board worker exiting");
     }
@@ -152,7 +154,7 @@ impl BoardWorker {
     fn handle_restart(&mut self) {
         log::info!("restart-line — bouncing DSL line");
         let _ = self.board.line_config_down();
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(constants::POLL_RESTART_DELAY);
         let _ = self.board.line_config_up(
             self.cfg.modulation, self.cfg.annex, self.cfg.profiles,
             self.cfg.bitswap, self.cfg.sra,
@@ -266,7 +268,7 @@ impl BoardWorker {
                             self.board.ptm_link_add(0, 0, 0, self.transport_vlan).is_ok()
                         }
                         DataPath::Atm => {
-                            let params = crate::daemon::atm_params(
+                            let params = xdsl::atm_params(
                                 self.cfg.atm.as_ref(),
                                 self.transport_vlan,
                             );
@@ -278,7 +280,7 @@ impl BoardWorker {
                         }
                     };
                     if provisioned {
-                        let _ = crate::daemon::create_vlan_iface(&self.parent, self.transport_vlan);
+                        let _ = xdsl::create_vlan_iface(&self.parent, self.transport_vlan);
                         self.link_provisioned = true;
                         let detected = match dp {
                             DataPath::Ptm => crate::uci_cfg::XferMode::Ptm,
@@ -299,7 +301,7 @@ impl BoardWorker {
                 let mut st = self.state.lock().unwrap();
                 let stale = st
                     .last_poll_ok
-                    .map_or(true, |t| t.elapsed() > Duration::from_secs(30));
+                    .map_or(true, |t| t.elapsed() > constants::POLL_STALE_TIMEOUT);
                 if stale {
                     st.line_obj = None;
                 }
@@ -334,7 +336,7 @@ impl BoardWorker {
                 }
                 crate::uci_cfg::XferMode::Atm => {
                     let params =
-                        crate::daemon::atm_params(self.cfg.atm.as_ref(), self.transport_vlan);
+                        xdsl::atm_params(self.cfg.atm.as_ref(), self.transport_vlan);
                     let _ = self.board.atm_link_add(&params);
                 }
                 crate::uci_cfg::XferMode::Auto => {

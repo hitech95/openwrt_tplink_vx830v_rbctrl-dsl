@@ -33,14 +33,14 @@ impl UnixUbusTransport {
         // full frame is buffered, and its handshake loops call wait_recv()
         // between polls.
         stream.set_nonblocking(true).map_err(io_err)?;
-        Ok(Self { stream, rx_buf: Vec::with_capacity(1024) })
+        Ok(Self { stream, rx_buf: Vec::with_capacity(crate::constants::BUF_UBUS_RX_CAPACITY) })
     }
 
     /// Drain the kernel socket buffer into `rx_buf`. Returns `true` if the peer
     /// closed the connection (EOF), `false` if the read just WouldBlocked.
     fn fill_rx(&mut self) -> Result<bool, UbusError> {
         const RX_BUF_CAP: usize = MAX_MSG_LEN * 2;
-        let mut chunk = [0u8; 2048];
+        let mut chunk = [0u8; crate::constants::BUF_UBUS_READ_CHUNK];
         loop {
             match self.stream.read(&mut chunk) {
                 Ok(0) => return Ok(true), // EOF
