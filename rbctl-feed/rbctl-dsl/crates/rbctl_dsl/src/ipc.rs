@@ -79,6 +79,8 @@ pub struct StatusSnapshot {
     pub board_reachable: bool,
     pub mgmt_iface: String,
     pub mgmt_carrier: bool,
+    /// Monitor mode active — daemon polls only, never configures.
+    pub monitor: bool,
 }
 
 impl StatusSnapshot {
@@ -86,11 +88,12 @@ impl StatusSnapshot {
     pub fn to_lines(&self) -> String {
         format!(
             "state: {}\nstate_num: {}\nup: {}\nuptime: {}\nmodulation: {}\nannex: {}\n\
-             xfer_mode: {}\ndown_rate: {}\nup_rate: {}\ndown_snr: {}\nup_snr: {}\nfw_status: {}",
+             xfer_mode: {}\ndown_rate: {}\nup_rate: {}\ndown_snr: {}\nup_snr: {}\n\
+             fw_status: {}\nmonitor: {}",
             self.state, self.state_num, self.up, self.uptime_secs,
             self.modulation, self.annex, self.xfer_mode,
             self.down_rate, self.up_rate, self.down_snr, self.up_snr,
-            self.fw_status,
+            self.fw_status, self.monitor,
         )
     }
 
@@ -112,6 +115,7 @@ impl StatusSnapshot {
                     "down_snr" => s.down_snr = v.trim().parse().unwrap_or(0),
                     "up_snr" => s.up_snr = v.trim().parse().unwrap_or(0),
                     "fw_status" => s.fw_status = v.trim().to_string(),
+                    "monitor" => s.monitor = v.trim() == "true",
                     _ => {}
                 }
             }
@@ -253,7 +257,10 @@ fn handle_client(mut stream: UnixStream, snapshot: &StatusSnapshot) -> io::Resul
             return Ok(IpcAction::Reload);
         }
         "RESTART" => {
-            if snapshot.board_reachable {
+            if snapshot.monitor {
+                let _ = stream.write_all(b"ERR: restart-line not available in monitor mode\n");
+                return Ok(IpcAction::None);
+            } else if snapshot.board_reachable {
                 let _ = stream.write_all(b"OK restarting line\n");
                 return Ok(IpcAction::RestartLine);
             } else {

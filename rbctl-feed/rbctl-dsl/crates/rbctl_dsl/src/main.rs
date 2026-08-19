@@ -131,6 +131,13 @@ struct DaemonArgs {
     /// Override transport VLAN base index (0–7, VLAN id = base + 2000)
     #[arg(short = 't', long)]
     transport_vlan: Option<u8>,
+
+    /// Monitor mode: only poll the board (op2/op4) and publish status.
+    /// Never sends op1/op3/op5/op15 — the board keeps whatever config it
+    /// booted with. Useful for observing a line the board trained on its
+    /// own defaults without the daemon disrupting it.
+    #[arg(long)]
+    monitor: bool,
 }
 
 impl DaemonArgs {
@@ -172,6 +179,7 @@ fn main() {
                 &args.config_iface,
                 args.notify.as_deref(),
                 &overrides,
+                args.monitor,
             );
             std::process::exit(code);
         }

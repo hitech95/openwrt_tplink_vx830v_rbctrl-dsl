@@ -1,11 +1,19 @@
-//! Board worker — owns the [`Board`] and runs the periodic line-status poll,
-//! reload, restart-line, and firmware-upgrade logic on a dedicated thread so
-//! the main loop's IPC and ubus paths stay responsive regardless of board
-//! latency.
+//! Board worker — polls the board (op2) and executes commands sent by the
+//! daemon's control loop.
 //!
-//! Commands (reload / restart-line / firmware-upgrade / stop) flow through an
-//! mpsc channel (`WorkerCmd`); the worker polls it on a short tick. See
-//! `plans/daemon-event-loop-plan.md` and `plans/firmware-upgrade-plan.md`.
+//! The worker makes **no autonomous decisions**: every configuration or
+//! provisioning action is gated by the daemon, which sends [`WorkerCmd`]s
+//! and consumes [`WorkerEvent`]s. The worker's own responsibilities are
+//! exactly two:
+//!
+//! 1. Poll `get_line_obj` (op2) once per [`constants::POLL_INTERVAL`] and
+//!    publish the result into the shared state.
+//! 2. Report state transitions (line state, board reachability) back to
+//!    the daemon as events, and execute whatever commands arrive.
+//!
+//! This keeps the board socket single-owned (no locking) while the daemon
+//! stays the sole policy maker — monitor mode, retries, and deferred
+//! provisioning all live in `daemon/mod.rs`.
 
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
@@ -15,26 +23,49 @@ use rbctl_proto::oem::unpack::{DataPath, LinkStatus};
 
 use crate::board::{Board, BoardError, FwProgress, FwUpgradeResult};
 use crate::constants;
-use crate::daemon::SHOULD_EXIT;
-use crate::hotplug::{self, LineEvent};
-use crate::uci_cfg::{CliOverrides, DslConfig};
+use crate::daemon::signals::SHOULD_EXIT;
+use crate::uci_cfg::{DslConfig, XferMode};
 use crate::ubus_obj::SharedState;
 use crate::utils::xdsl;
 
 /// Worker tick — bounds how long a command waits before being acted upon.
 const WORKER_TICK: Duration = constants::POLL_TICK;
 
-/// Commands sent from the main thread to the worker.
+/// Commands sent from the daemon (the gate) to the worker.
 pub enum WorkerCmd {
-    /// Reload UCI config (same as SIGHUP).
-    Reload,
-    /// Restart DSL line (bounce).
+    /// op1 — apply `cfg` line config to the board.
+    ApplyLineConfig,
+    /// op5/op15 — provision the data-plane link for `xfer`.
+    ProvisionLink { xfer: XferMode },
+    /// op3 + delay + op1 — bounce the line.
     RestartLine,
+    /// op3 — best-effort teardown (zero retries).
+    LineDown,
+    /// Replace the worker's config copy (display fields + command params).
+    UpdateConfig(Box<DslConfig>),
     /// Upload firmware to the board. `reply_tx` receives progress + result.
     FirmwareUpgrade {
         image: Vec<u8>,
         reply_tx: mpsc::Sender<FwEvent>,
     },
+    /// Exit the worker loop.
+    Shutdown,
+}
+
+/// Events reported from the worker back to the daemon (the gate decides
+/// what to do with them).
+pub enum WorkerEvent {
+    /// The board started responding to op2.
+    BoardReachable,
+    /// The board stopped responding to op2.
+    BoardUnreachable,
+    /// Line state transition. `data_path` is the op2-observed TC mode,
+    /// meaningful when `status` is `Up` (drives auto provisioning).
+    LineState { status: LinkStatus, data_path: DataPath },
+    /// op1 acknowledged by the board.
+    LineConfigApplied,
+    /// op5/op15 acknowledged; `vlan` is the board-assigned transport VLAN.
+    LinkProvisioned { vlan: u16 },
 }
 
 /// Events sent from the worker back to the firmware requester.
@@ -46,123 +77,131 @@ pub enum FwEvent {
 pub struct BoardWorker {
     board: Board,
     cfg: DslConfig,
-    overrides: CliOverrides,
     state: SharedState,
-    notify_script: Option<String>,
+    cmd_rx: mpsc::Receiver<WorkerCmd>,
+    event_tx: mpsc::Sender<WorkerEvent>,
     poll_interval: Duration,
     last_poll: Option<Instant>,
     last_status: Option<LinkStatus>,
     up_since: Option<Instant>,
-    tc_emitted: bool,
-    cmd_rx: mpsc::Receiver<WorkerCmd>,
     board_reachable: bool,
-    config_applied: bool,
-    last_apply: Option<Instant>,
-    transport_vlan: u16,
-    parent: String,
-    link_provisioned: bool,
 }
 
 impl BoardWorker {
     pub(crate) fn new(
         board: Board,
         cfg: DslConfig,
-        overrides: CliOverrides,
         state: SharedState,
-        notify_script: Option<String>,
         cmd_rx: mpsc::Receiver<WorkerCmd>,
-        transport_vlan: u16,
-        parent: String,
+        event_tx: mpsc::Sender<WorkerEvent>,
     ) -> Self {
         Self {
             board,
             cfg,
-            overrides,
             state,
-            notify_script,
+            cmd_rx,
+            event_tx,
             poll_interval: constants::POLL_INTERVAL,
             last_poll: None,
             last_status: None,
             up_since: None,
-            tc_emitted: false,
-            cmd_rx,
             board_reachable: false,
-            config_applied: false,
-            last_apply: None,
-            transport_vlan,
-            parent,
-            link_provisioned: false,
         }
     }
 
-    /// Run the worker loop until `SHOULD_EXIT`, then perform a best-effort
-    /// `line_config_down()`.
     pub(crate) fn run(mut self) {
-        log::info!("board worker started");
-        while !SHOULD_EXIT.load(Ordering::SeqCst) {
-            // Check for commands from main thread (non-blocking via timeout)
+        log::info!("board worker started (poll + command executor)");
+        loop {
             match self.cmd_rx.recv_timeout(WORKER_TICK) {
-                Ok(WorkerCmd::Reload) => self.handle_reload(),
-                Ok(WorkerCmd::RestartLine) => self.handle_restart(),
-                Ok(WorkerCmd::FirmwareUpgrade { image, reply_tx }) => {
-                    self.handle_firmware_upgrade(image, reply_tx);
-                }
+                Ok(WorkerCmd::Shutdown) => break,
+                Ok(cmd) => self.handle_cmd(cmd),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     log::warn!("worker command channel disconnected, exiting");
                     break;
                 }
             }
-
-            self.maybe_poll_board();
-            self.maybe_apply_config();
+            if !SHOULD_EXIT.load(Ordering::SeqCst) {
+                self.maybe_poll_board();
+            }
         }
-
-        // Best-effort line-down.
-        self.board.set_retries(constants::BOARD_SHUTDOWN_RETRIES);
-        let _ = self.board.line_config_down();
         log::info!("board worker exiting");
+    }
+
+    // ── command execution (no decisions — the daemon already decided) ──
+
+    fn handle_cmd(&mut self, cmd: WorkerCmd) {
+        match cmd {
+            WorkerCmd::ApplyLineConfig => {
+                match self.board.line_config_up(
+                    self.cfg.modulation,
+                    self.cfg.annex,
+                    self.cfg.profiles,
+                    self.cfg.bitswap,
+                    self.cfg.sra,
+                ) {
+                    Ok(()) => {
+                        let _ = self.event_tx.send(WorkerEvent::LineConfigApplied);
+                    }
+                    Err(e) => log::warn!("line_config_up: {e} (daemon will retry)"),
+                }
+            }
+            WorkerCmd::ProvisionLink { xfer } => {
+                let vlan = self.cfg.transport_vlan_base as u16
+                    + constants::VLAN_TRANSPORT_BASE_OFFSET;
+                let result = match xfer {
+                    XferMode::Ptm => self.board.ptm_link_add(0, 0, 0, vlan),
+                    XferMode::Atm => {
+                        let params = xdsl::atm_params(self.cfg.atm.as_ref(), vlan);
+                        self.board.atm_link_add(&params)
+                    }
+                    XferMode::Auto => {
+                        log::warn!("ProvisionLink with XferMode::Auto — ignored");
+                        return;
+                    }
+                };
+                match result {
+                    Ok(v) => {
+                        let _ = self.event_tx.send(WorkerEvent::LinkProvisioned { vlan: v });
+                    }
+                    Err(e) => log::warn!("link provisioning ({xfer:?}): {e} (daemon will retry)"),
+                }
+            }
+            WorkerCmd::RestartLine => {
+                log::info!("restart-line — bouncing DSL line");
+                let _ = self.board.line_config_down();
+                std::thread::sleep(constants::POLL_RESTART_DELAY);
+                if let Err(e) = self.board.line_config_up(
+                    self.cfg.modulation,
+                    self.cfg.annex,
+                    self.cfg.profiles,
+                    self.cfg.bitswap,
+                    self.cfg.sra,
+                ) {
+                    log::warn!("line_config_up after restart: {e}");
+                }
+            }
+            WorkerCmd::LineDown => {
+                self.board.set_retries(constants::BOARD_SHUTDOWN_RETRIES);
+                let _ = self.board.line_config_down();
+            }
+            WorkerCmd::UpdateConfig(cfg) => {
+                self.cfg = *cfg;
+                self.publish_config();
+            }
+            WorkerCmd::FirmwareUpgrade { image, reply_tx } => {
+                self.handle_firmware_upgrade(image, reply_tx);
+            }
+            WorkerCmd::Shutdown => unreachable!("handled in run()"),
+        }
     }
 
     /// Publish cfg-derived display fields into shared state (callers read
     /// these instead of borrowing cfg, which lives on this thread).
     fn publish_config(&self) {
         let mut st = self.state.lock().unwrap();
-        st.xfer_mode = Some(self.cfg.xfer_mode);
         st.modulation = self.cfg.modulation;
         st.annex = self.cfg.annex;
-    }
-
-    fn handle_reload(&mut self) {
-        log::info!("reload — re-reading UCI config");
-        if let Ok(new_cfg) = DslConfig::load(&self.overrides) {
-            if config_changed(&self.cfg, &new_cfg) {
-                log::info!("line params changed — reconfiguring");
-                let _ = self.board.line_config_down();
-                let _ = self.board.line_config_up(
-                    new_cfg.modulation, new_cfg.annex, new_cfg.profiles,
-                    new_cfg.bitswap, new_cfg.sra,
-                );
-                self.cfg = new_cfg;
-                self.publish_config();
-                self.tc_emitted = false;
-                self.config_applied = true;
-            } else {
-                log::info!("no line-param changes");
-            }
-        }
-    }
-
-    fn handle_restart(&mut self) {
-        log::info!("restart-line — bouncing DSL line");
-        let _ = self.board.line_config_down();
-        std::thread::sleep(constants::POLL_RESTART_DELAY);
-        let _ = self.board.line_config_up(
-            self.cfg.modulation, self.cfg.annex, self.cfg.profiles,
-            self.cfg.bitswap, self.cfg.sra,
-        );
-        self.tc_emitted = false;
-        self.config_applied = true;
     }
 
     fn handle_firmware_upgrade(
@@ -170,7 +209,6 @@ impl BoardWorker {
         image: Vec<u8>,
         reply_tx: mpsc::Sender<FwEvent>,
     ) {
-        // Set fw_status in shared state
         {
             let mut st = self.state.lock().unwrap();
             st.fw_status = crate::ubus_obj::FwStatus::Upgrading;
@@ -179,7 +217,6 @@ impl BoardWorker {
         log::info!("firmware upgrade: {} bytes", image.len());
         let result = self.board.firmware_upgrade(&image, &mut |p| {
             let _ = reply_tx.send(FwEvent::Progress(p.clone()));
-            // Update shared state for status queries
             let mut st = self.state.lock().unwrap();
             st.fw_status = crate::ubus_obj::FwStatus::UpgradingProgress {
                 stage: p.stage,
@@ -204,8 +241,12 @@ impl BoardWorker {
         let _ = reply_tx.send(event);
     }
 
+    // ── status polling (the worker's only autonomous activity) ─────────
+
     fn maybe_poll_board(&mut self) {
-        let due = self.last_poll.map_or(true, |t| t.elapsed() >= self.poll_interval);
+        let due = self
+            .last_poll
+            .map_or(true, |t| t.elapsed() >= self.poll_interval);
         if !due {
             return;
         }
@@ -214,17 +255,17 @@ impl BoardWorker {
         match self.board.get_line_obj() {
             Ok(line) => {
                 let status = line.link_status;
+                let data_path = line.data_path;
 
                 if !self.board_reachable {
-                    log::info!("board is now reachable");
                     self.board_reachable = true;
+                    let _ = self.event_tx.send(WorkerEvent::BoardReachable);
                 }
 
                 if status == LinkStatus::Up && self.up_since.is_none() {
                     self.up_since = Some(Instant::now());
                 } else if status != LinkStatus::Up {
                     self.up_since = None;
-                    self.link_provisioned = false;
                 }
 
                 {
@@ -233,77 +274,17 @@ impl BoardWorker {
                     st.board_ever_seen = true;
                     st.line_obj = Some(line.clone());
                     st.uptime_secs = self.up_since.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-                    st.xfer_mode = Some(self.cfg.xfer_mode);
-                    st.modulation = self.cfg.modulation;
-                    st.annex = self.cfg.annex;
                 }
 
                 if Some(status) != self.last_status {
-                    let event = link_status_to_event(status);
-                    log::info!("line state: {status:?} → {event:?}");
-                    if let Some(script) = self.notify_script.as_deref() {
-                        hotplug::emit_status(script, event);
-                    }
-                    if status == LinkStatus::Up && !self.tc_emitted {
-                        if let Some(script) = self.notify_script.as_deref() {
-                            hotplug::emit_tc_layer(script, self.cfg.xfer_mode);
-                        }
-                        self.tc_emitted = true;
-                    }
                     self.last_status = Some(status);
-                }
-
-                // Auto-mode deferred link provisioning: when the line reaches
-                // Up, detect the actual data_path from op2 and send the
-                // matching link opcode (op15 PTM or op5 ATM).
-                if status == LinkStatus::Up
-                    && !self.link_provisioned
-                    && self.cfg.xfer_mode == crate::uci_cfg::XferMode::Auto
-                {
-                    let dp = line.data_path;
-                    log::info!(
-                        "auto: line up (mod={} datapath={:?}), provisioning link",
-                        line.modulation_code, dp
-                    );
-                    let provisioned = match dp {
-                        DataPath::Ptm => {
-                            self.board.ptm_link_add(0, 0, 0, self.transport_vlan).is_ok()
-                        }
-                        DataPath::Atm => {
-                            let params = xdsl::atm_params(
-                                self.cfg.atm.as_ref(),
-                                self.transport_vlan,
-                            );
-                            self.board.atm_link_add(&params).is_ok()
-                        }
-                        DataPath::Unknown(code) => {
-                            log::warn!("unknown data_path={code} — skipping link provisioning");
-                            false
-                        }
-                    };
-                    if provisioned {
-                        if let Err(e) = xdsl::create_vlan_iface(&self.parent, self.transport_vlan) {
-                            log::warn!(
-                                "VLAN create {}.{}: {e} (may already exist)",
-                                self.parent, self.transport_vlan
-                            );
-                        }
-                        self.link_provisioned = true;
-                        let detected = match dp {
-                            DataPath::Ptm => crate::uci_cfg::XferMode::Ptm,
-                            DataPath::Atm => crate::uci_cfg::XferMode::Atm,
-                            DataPath::Unknown(_) => self.cfg.xfer_mode,
-                        };
-                        let mut st = self.state.lock().unwrap();
-                        st.xfer_mode = Some(detected);
-                    }
+                    let _ = self.event_tx.send(WorkerEvent::LineState { status, data_path });
                 }
             }
             Err(BoardError::Timeout) => {
                 if self.board_reachable {
-                    log::warn!("board became unreachable");
                     self.board_reachable = false;
-                    self.config_applied = false;
+                    let _ = self.event_tx.send(WorkerEvent::BoardUnreachable);
                 }
                 let mut st = self.state.lock().unwrap();
                 let stale = st
@@ -315,112 +296,5 @@ impl BoardWorker {
             }
             Err(e) => log::error!("poll error: {e}"),
         }
-    }
-
-    /// Retry op1 (and op5/op15 for fixed mode) if the board is reachable
-    /// but the config hasn't been applied yet. This handles the case where
-    /// the startup op1 failed because the board was unreachable — the worker
-    /// retries once the board responds to op2.
-    fn maybe_apply_config(&mut self) {
-        if !self.board_reachable || self.config_applied {
-            return;
-        }
-        // Throttle retries to the poll cadence so a persistently-failing
-        // link_add doesn't re-run line_config_up every tick (D9).
-        let due = self.last_apply.map_or(true, |t| t.elapsed() >= self.poll_interval);
-        if !due {
-            return;
-        }
-        self.last_apply = Some(Instant::now());
-        log::info!("applying line config (deferred from startup)");
-        if self
-            .board
-            .line_config_up(
-                self.cfg.modulation,
-                self.cfg.annex,
-                self.cfg.profiles,
-                self.cfg.bitswap,
-                self.cfg.sra,
-            )
-            .is_ok()
-        {
-            // Provisioning counts as "applied" only once the data-plane link
-            // is acknowledged by the board (non-Auto). On failure we leave
-            // config_applied false so this retries (throttled above), and we
-            // do NOT create the host VLAN (D9).
-            let link_ok = match self.cfg.xfer_mode {
-                crate::uci_cfg::XferMode::Ptm => {
-                    self.board.ptm_link_add(0, 0, 0, self.transport_vlan).is_ok()
-                }
-                crate::uci_cfg::XferMode::Atm => {
-                    let params =
-                        xdsl::atm_params(self.cfg.atm.as_ref(), self.transport_vlan);
-                    self.board.atm_link_add(&params).is_ok()
-                }
-                crate::uci_cfg::XferMode::Auto => {
-                    // Link provisioning deferred to Up transition in maybe_poll_board
-                    true
-                }
-            };
-            if link_ok {
-                if self.cfg.xfer_mode != crate::uci_cfg::XferMode::Auto {
-                    if let Err(e) = xdsl::create_vlan_iface(&self.parent, self.transport_vlan) {
-                        log::warn!(
-                            "VLAN create {}.{}: {e} (may already exist)",
-                            self.parent, self.transport_vlan
-                        );
-                    }
-                }
-                self.config_applied = true;
-            } else {
-                log::warn!("deferred provisioning: data-plane link_add failed — will retry");
-            }
-        }
-    }
-}
-
-// ── helpers (moved from daemon.rs — used only by the worker) ──────────────
-
-fn link_status_to_event(status: LinkStatus) -> LineEvent {
-    match status {
-        LinkStatus::Up => LineEvent::Up,
-        LinkStatus::Initializing => LineEvent::Training,
-        LinkStatus::EstablishingLink => LineEvent::Handshake,
-        LinkStatus::NoSignal | LinkStatus::Unknown(_) => LineEvent::Down,
-    }
-}
-
-fn config_changed(old: &DslConfig, new: &DslConfig) -> bool {
-    old.modulation != new.modulation
-        || old.annex != new.annex
-        || old.profiles.bitmask() != new.profiles.bitmask()
-        || old.xfer_mode != new.xfer_mode
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rbctl_proto::oem::pack::Annex;
-
-    #[test]
-    fn link_status_events() {
-        assert_eq!(link_status_to_event(LinkStatus::Up), LineEvent::Up);
-        assert_eq!(link_status_to_event(LinkStatus::NoSignal), LineEvent::Down);
-        assert_eq!(link_status_to_event(LinkStatus::Initializing), LineEvent::Training);
-        assert_eq!(link_status_to_event(LinkStatus::EstablishingLink), LineEvent::Handshake);
-    }
-
-    #[test]
-    fn config_change_detection() {
-        let a = DslConfig::default();
-        let b = DslConfig { annex: Annex::A, ..DslConfig::default() };
-        assert!(config_changed(&a, &b));
-    }
-
-    #[test]
-    fn config_no_change() {
-        let a = DslConfig::default();
-        let b = DslConfig::default();
-        assert!(!config_changed(&a, &b));
     }
 }
