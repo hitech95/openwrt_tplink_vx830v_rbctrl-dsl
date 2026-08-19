@@ -1,8 +1,8 @@
-//! IPC control socket — lets a second `rbctl-dsl` instance act as a
-//! control client instead of spawning a duplicate daemon.
+//! Daemon IPC server + wire protocol.
 //!
-//! The daemon binds `/var/run/rbctl-dsl.sock` (non-blocking `UnixListener`).
-//! A second instance that connects sends one command and reads the reply:
+//! The daemon binds `/var/run/rbctl-dsl.sock` (non-blocking
+//! `UnixListener`); a second `rbctl-dsl` instance (the client half, in
+//! `crate::cli`) connects, sends one command, and reads the reply:
 //!
 //! ```text
 //! rbctl-dsl status        → print live line state, then exit
@@ -277,69 +277,6 @@ fn handle_client(mut stream: UnixStream, snapshot: &StatusSnapshot) -> io::Resul
 
     stream.write_all(response.as_bytes())?;
     Ok(IpcAction::None)
-}
-
-// ── client side ──────────────────────────────────────────────────────────
-
-/// Connect to a running daemon and send a command. Returns the raw reply.
-pub fn send_command(path: &str, cmd: IpcCmd) -> io::Result<String> {
-    let mut stream = UnixStream::connect(Path::new(path))?;
-    stream.set_read_timeout(Some(crate::constants::IPC_READ_TIMEOUT))?;
-    stream.write_all(format!("{}\n", cmd.as_wire()).as_bytes())?;
-
-    let mut response = String::new();
-    let mut reader = BufReader::new(&stream);
-    reader.read_to_string(&mut response)?;
-    Ok(response)
-}
-
-/// Try to connect to a running daemon. Returns `Ok(())` if one exists.
-pub fn daemon_running() -> bool {
-    UnixStream::connect(SOCK_PATH).is_ok()
-}
-
-/// Connect to a running daemon, send `FIRMWARE <path>`, and stream progress
-/// lines to the caller via `on_progress`. Returns the final reply text.
-///
-/// The connection stays open until the daemon sends `DONE` or `ERR`.
-pub fn send_firmware(
-    path: &str,
-    on_progress: &mut dyn FnMut(&str),
-) -> io::Result<String> {
-    let mut stream = UnixStream::connect(Path::new(SOCK_PATH))?;
-    // Long read timeout — firmware upload can take minutes
-    stream.set_read_timeout(Some(crate::constants::IPC_FW_UPLOAD_TIMEOUT))?;
-
-    stream.write_all(format!("FIRMWARE {path}\n").as_bytes())?;
-
-    let mut reader = BufReader::new(&stream);
-    let mut result = String::new();
-    let mut line = String::new();
-
-    loop {
-        line.clear();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
-            break; // connection closed
-        }
-
-        let trimmed = line.trim();
-        if trimmed == "." {
-            break; // end of response
-        }
-        if trimmed.starts_with("ERR:") || trimmed.starts_with("DONE") {
-            result = trimmed.to_string();
-            break;
-        }
-        if trimmed.starts_with("OK") {
-            // Initial acknowledgment — keep reading
-            continue;
-        }
-        // Progress line
-        on_progress(trimmed);
-    }
-
-    Ok(result)
 }
 
 // ── tests ────────────────────────────────────────────────────────────────

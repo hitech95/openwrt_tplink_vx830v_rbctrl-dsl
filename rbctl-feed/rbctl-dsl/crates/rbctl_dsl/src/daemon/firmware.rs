@@ -8,7 +8,7 @@
 use std::io::Write;
 use std::sync::mpsc;
 
-use crate::board_worker::{FwEvent, WorkerCmd};
+use super::worker::{FwEvent, WorkerCmd};
 use crate::constants;
 use crate::ubus_obj::{self, SharedState};
 

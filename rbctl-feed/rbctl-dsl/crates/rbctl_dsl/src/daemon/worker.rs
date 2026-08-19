@@ -22,11 +22,11 @@ use std::time::{Duration, Instant};
 use rbctl_proto::oem::unpack::{DataPath, LinkStatus};
 
 use crate::board::{Board, BoardError, FwProgress, FwUpgradeResult};
+use crate::config::{self, DslConfig, XferMode};
 use crate::constants;
-use crate::daemon::signals::SHOULD_EXIT;
-use crate::config::{DslConfig, XferMode};
 use crate::ubus_obj::SharedState;
-use crate::config;
+
+use super::SHOULD_EXIT;
 
 /// Worker tick — bounds how long a command waits before being acted upon.
 const WORKER_TICK: Duration = constants::POLL_TICK;

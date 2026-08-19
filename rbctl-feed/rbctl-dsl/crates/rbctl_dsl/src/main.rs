@@ -1,16 +1,14 @@
 //! rbctl-dsl — EcoNet xDSL board configuration daemon.
 
 mod board;
-mod board_worker;
+mod cli;
+mod config;
 mod constants;
 mod daemon;
-mod hotplug;
-mod ipc;
 mod logging;
 mod pcap;
 mod selftest;
 mod ubus_obj;
-mod config;
 mod utils;
 
 use clap::{Parser, Subcommand};
@@ -181,10 +179,10 @@ fn main() {
             );
             std::process::exit(code);
         }
-        Command::Status => ipc_exit(ipc::IpcCmd::Status),
-        Command::Reload => ipc_exit(ipc::IpcCmd::Reload),
-        Command::RestartLine => ipc_exit(ipc::IpcCmd::Restart),
-        Command::Stop => ipc_exit(ipc::IpcCmd::Stop),
+        Command::Status => ipc_exit(daemon::ipc::IpcCmd::Status),
+        Command::Reload => ipc_exit(daemon::ipc::IpcCmd::Reload),
+        Command::RestartLine => ipc_exit(daemon::ipc::IpcCmd::Restart),
+        Command::Stop => ipc_exit(daemon::ipc::IpcCmd::Stop),
         Command::FirmwareUpgrade { path } => {
             // Quick local header check before contacting the daemon
             match std::fs::read(&path) {
@@ -204,7 +202,7 @@ fn main() {
             }
 
             eprintln!("connecting to daemon...");
-            match ipc::send_firmware(&path, &mut |line| {
+            match cli::send_firmware(&path, &mut |line| {
                 eprintln!("  {line}");
             }) {
                 Ok(result) if result.starts_with("DONE") => {
@@ -232,14 +230,14 @@ fn main() {
     }
 }
 
-fn ipc_exit(cmd: ipc::IpcCmd) {
-    match ipc::send_command(ipc::SOCK_PATH, cmd) {
+fn ipc_exit(cmd: daemon::ipc::IpcCmd) {
+    match cli::send_command(daemon::SOCK_PATH, cmd) {
         Ok(response) => {
             print!("{response}");
             std::process::exit(if response.contains("ERR") { 1 } else { 0 });
         }
         Err(e) => {
-            log::error!("cannot connect to daemon at {}: {e}", ipc::SOCK_PATH);
+            log::error!("cannot connect to daemon at {}: {e}", daemon::SOCK_PATH);
             std::process::exit(1);
         }
     }

@@ -3,7 +3,7 @@
 //! ## Architecture
 //!
 //! ```text
-//! Daemon (this module)                     BoardWorker (board_worker.rs)
+//! Daemon (this module)                     BoardWorker (worker.rs)
 //! ─────────────────────                    ─────────────────────────────
 //! owns: policy state                       owns: board socket
 //!   cfg / config_applied /                 does: op2 poll → WorkerEvent
@@ -18,29 +18,72 @@
 //!
 //! Submodules:
 //! - [`init`] — startup phase (config, validation, socket)
-//! - [`signals`] — SIGTERM/SIGINT/SIGHUP → AtomicBool flags
+//! - [`worker`] — board poll + command executor (the daemon's agent)
+//! - [`ipc`] — control-socket server + wire protocol
+//! - [`hotplug`] — DSL notify-script emission
 //! - [`firmware`] — `FIRMWARE <path>` IPC streaming handler
 
 mod firmware;
+mod hotplug;
 mod init;
-pub(crate) mod signals;
+mod ipc;
+mod snapshot;
+mod worker;
 
-use std::sync::atomic::Ordering;
+pub(crate) use ipc::SOCK_PATH;
+
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
 
 use rbctl_proto::oem::unpack::{DataPath, LinkStatus};
 
-use crate::board_worker::{BoardWorker, WorkerCmd, WorkerEvent};
-use crate::constants;
-use crate::hotplug::{self, LineEvent};
-use crate::ipc::{IpcAction, IpcListener, StatusSnapshot};
 use crate::config::{CliOverrides, DslConfig, XferMode};
+use crate::constants;
 use crate::ubus_obj;
 use crate::utils::{mapping, ubus as ubus_util, vlan};
 
-use signals::{SHOULD_EXIT as EXIT, SHOULD_RELOAD as RELOAD, SHOULD_RESTART_LINE as RESTART};
+use hotplug::{self, LineEvent};
+use ipc::{IpcAction, IpcListener, StatusSnapshot};
+use worker::{BoardWorker, WorkerCmd, WorkerEvent};
+
+// ── signal flags ─────────────────────────────────────────────────────────
+//
+// Read by the control loop below and by the worker (SHOULD_EXIT only);
+// written by the signal handlers and the IPC Stop action. Plain
+// `AtomicBool` is fine because we only ever treat them as level triggers
+// (swap-to-clear).
+
+pub(crate) static SHOULD_EXIT: AtomicBool = AtomicBool::new(false);
+pub(crate) static SHOULD_RELOAD: AtomicBool = AtomicBool::new(false);
+pub(crate) static SHOULD_RESTART_LINE: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_sigterm(_sig: libc::c_int) {
+    SHOULD_EXIT.store(true, Ordering::SeqCst);
+}
+
+extern "C" fn handle_sighup(_sig: libc::c_int) {
+    SHOULD_RELOAD.store(true, Ordering::SeqCst);
+}
+
+/// Install SIGTERM/SIGINT → exit flag, SIGHUP → reload flag.
+fn install_signal_handlers() {
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = handle_sigterm as usize;
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+
+        let mut sa_hup: libc::sigaction = std::mem::zeroed();
+        sa_hup.sa_sigaction = handle_sighup as usize;
+        libc::sigaction(libc::SIGHUP, &sa_hup, std::ptr::null_mut());
+    }
+}
+
+use SHOULD_EXIT as EXIT;
+use SHOULD_RELOAD as RELOAD;
+use SHOULD_RESTART_LINE as RESTART;
 
 // ── free helpers ─────────────────────────────────────────────────────────
 
@@ -67,12 +110,12 @@ fn config_changed(old: &DslConfig, new: &DslConfig) -> bool {
 /// [`Daemon::startup`], driven by [`Daemon::run`].
 pub(crate) struct Daemon {
     // ── immutable after startup ──
-    config_iface: String,
+    pub(super) config_iface: String,
     notify_script: Option<String>,
     overrides: CliOverrides,
-    monitor: bool,
+    pub(super) monitor: bool,
     parent: String,
-    state: ubus_obj::SharedState,
+    pub(super) state: ubus_obj::SharedState,
     ipc: Option<IpcListener>,
     cmd_tx: mpsc::Sender<WorkerCmd>,
     event_rx: mpsc::Receiver<WorkerEvent>,
@@ -113,9 +156,9 @@ impl Daemon {
         let init::Init { board, cfg, parent, .. } = init;
 
         // Bind IPC socket
-        let ipc = match IpcListener::bind(crate::ipc::SOCK_PATH) {
+        let ipc = match IpcListener::bind(ipc::SOCK_PATH) {
             Ok(l) => {
-                log::info!("IPC socket at {}", crate::ipc::SOCK_PATH);
+                log::info!("IPC socket at {}", ipc::SOCK_PATH);
                 Some(l)
             }
             Err(e) => {
@@ -285,52 +328,6 @@ impl Daemon {
         )
     }
 
-    /// Build a [`StatusSnapshot`] from the current shared state. Reads only
-    /// the mutex (never the board, never `cfg`), so it is constant-time and
-    /// safe to call from the IPC path while the board worker is mid-request.
-    fn build_snapshot(&self) -> StatusSnapshot {
-        let st = self.state.lock().unwrap();
-        let fw = st.fw_status.as_str();
-        let board_reachable = st
-            .last_poll_ok
-            .map_or(false, |t| t.elapsed() < constants::POLL_STALE_TIMEOUT);
-        let link = crate::utils::mgmt_link::MgmtLinkStatus::probe(&self.config_iface);
-
-        let snap = match &st.line_obj {
-            Some(line) => {
-                let (state_str, state_num, up) = mapping::map_link_status(line.link_status);
-                StatusSnapshot {
-                    state: state_str.into(),
-                    state_num,
-                    up,
-                    uptime_secs: st.uptime_secs,
-                    modulation: format!("{:?}", line.modulation_code),
-                    annex: format!("{}", mapping::annex_string(line.annex_code)),
-                    xfer_mode: format!("{:?}", st.xfer_mode.unwrap_or(XferMode::Ptm)),
-                    down_rate: line.metrics.down_rate,
-                    up_rate: line.metrics.up_rate,
-                    down_snr: line.metrics.down_noise_margin,
-                    up_snr: line.metrics.up_noise_margin,
-                    fw_status: fw,
-                    board_reachable,
-                    mgmt_iface: self.config_iface.clone(),
-                    mgmt_carrier: link.carrier,
-                    monitor: self.monitor,
-                }
-            }
-            None => StatusSnapshot {
-                modulation: format!("{:?}", st.modulation),
-                annex: format!("{:?}", st.annex),
-                xfer_mode: format!("{:?}", st.xfer_mode.unwrap_or(XferMode::Ptm)),
-                fw_status: fw,
-                board_reachable,
-                mgmt_iface: self.config_iface.clone(),
-                mgmt_carrier: link.carrier,
-                monitor: self.monitor,
-                ..Default::default()
-            },
-        };
-        snap
     }
 
     // ── event handlers (the gate) ────────────────────────────────────────
@@ -534,7 +531,7 @@ impl Daemon {
                 vlan::delete_vlan_iface(&self.parent, vlan);
             }
         }
-        let _ = std::fs::remove_file(crate::ipc::SOCK_PATH);
+        let _ = std::fs::remove_file(ipc::SOCK_PATH);
     }
 }
 
@@ -547,7 +544,7 @@ pub fn run(
     overrides: &CliOverrides,
     monitor: bool,
 ) -> i32 {
-    signals::install();
+    install_signal_handlers();
 
     let daemon = match Daemon::startup(config_iface, notify_script, overrides, monitor) {
         Ok(d) => d,
