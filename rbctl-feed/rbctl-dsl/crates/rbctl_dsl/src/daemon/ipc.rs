@@ -64,25 +64,50 @@ impl IpcCmd {
 // ── status payload (shared between daemon and client) ────────────────────
 
 /// Snapshot of daemon state returned by `STATUS`.
+///
+/// Fields that only have a meaning once the line trained (modulation,
+/// annex, uptime, rates, SNR margins) are `Option`s: `None` until the line
+/// reaches `Up`. `Default::default()` therefore yields exactly the valid
+/// "untrained line" snapshot — builders only fill what they truly know.
 #[derive(Debug, Clone, Default)]
 pub struct StatusSnapshot {
     pub state: String,
     pub state_num: i32,
     pub up: bool,
-    pub uptime_secs: u64,
-    pub modulation: String,
-    pub annex: String,
+    /// None until the line is Up.
+    pub uptime_secs: Option<u64>,
+    /// Active (trained) modulation — None until the line is Up.
+    pub modulation: Option<String>,
+    /// Active (trained) annex — None until the line is Up.
+    pub annex: Option<String>,
     pub xfer_mode: String,
-    pub down_rate: u32,
-    pub up_rate: u32,
-    pub down_snr: u32,
-    pub up_snr: u32,
+    /// None until the line is Up.
+    pub down_rate: Option<u32>,
+    /// None until the line is Up.
+    pub up_rate: Option<u32>,
+    /// None until the line is Up.
+    pub down_snr: Option<u32>,
+    /// None until the line is Up.
+    pub up_snr: Option<u32>,
     pub fw_status: String,
     pub board_reachable: bool,
     pub mgmt_iface: String,
     pub mgmt_carrier: bool,
     /// Monitor mode active — daemon polls only, never configures.
     pub monitor: bool,
+}
+
+/// Render an optional value; `None` becomes `null` on the wire.
+fn opt<T: std::fmt::Display>(v: &Option<T>) -> String {
+    match v {
+        Some(x) => x.to_string(),
+        None => "null".to_string(),
+    }
+}
+
+/// Parse a wire value back into an Option (`null` → None).
+fn unopt<T, F: Fn(&str) -> Option<T>>(s: &str, f: F) -> Option<T> {
+    if s == "null" { None } else { f(s) }
 }
 
 impl StatusSnapshot {
@@ -92,9 +117,9 @@ impl StatusSnapshot {
             "state: {}\nstate_num: {}\nup: {}\nuptime: {}\nmodulation: {}\nannex: {}\n\
              xfer_mode: {}\ndown_rate: {}\nup_rate: {}\ndown_snr: {}\nup_snr: {}\n\
              fw_status: {}\nmonitor: {}",
-            self.state, self.state_num, self.up, self.uptime_secs,
-            self.modulation, self.annex, self.xfer_mode,
-            self.down_rate, self.up_rate, self.down_snr, self.up_snr,
+            self.state, self.state_num, self.up, opt(&self.uptime_secs),
+            opt(&self.modulation), opt(&self.annex), self.xfer_mode,
+            opt(&self.down_rate), opt(&self.up_rate), opt(&self.down_snr), opt(&self.up_snr),
             self.fw_status, self.monitor,
         )
     }
@@ -110,14 +135,14 @@ impl StatusSnapshot {
                     "state" => s.state = v.trim().to_string(),
                     "state_num" => s.state_num = v.trim().parse().unwrap_or(0),
                     "up" => s.up = v.trim() == "true",
-                    "uptime" => s.uptime_secs = v.trim().parse().unwrap_or(0),
-                    "modulation" => s.modulation = v.trim().to_string(),
-                    "annex" => s.annex = v.trim().to_string(),
+                    "uptime" => s.uptime_secs = unopt(v.trim(), |x| x.parse().ok()),
+                    "modulation" => s.modulation = unopt(v.trim(), |x| Some(x.to_string())),
+                    "annex" => s.annex = unopt(v.trim(), |x| Some(x.to_string())),
                     "xfer_mode" => s.xfer_mode = v.trim().to_string(),
-                    "down_rate" => s.down_rate = v.trim().parse().unwrap_or(0),
-                    "up_rate" => s.up_rate = v.trim().parse().unwrap_or(0),
-                    "down_snr" => s.down_snr = v.trim().parse().unwrap_or(0),
-                    "up_snr" => s.up_snr = v.trim().parse().unwrap_or(0),
+                    "down_rate" => s.down_rate = unopt(v.trim(), |x| x.parse().ok()),
+                    "up_rate" => s.up_rate = unopt(v.trim(), |x| x.parse().ok()),
+                    "down_snr" => s.down_snr = unopt(v.trim(), |x| x.parse().ok()),
+                    "up_snr" => s.up_snr = unopt(v.trim(), |x| x.parse().ok()),
                     "fw_status" => s.fw_status = v.trim().to_string(),
                     "monitor" => s.monitor = v.trim() == "true",
                     _ => {}
@@ -304,27 +329,44 @@ mod tests {
             state: "Up".into(),
             state_num: 7,
             up: true,
-            uptime_secs: 300,
-            modulation: "Vdsl2".into(),
-            annex: "B".into(),
+            uptime_secs: Some(300),
+            modulation: Some("Vdsl2".into()),
+            annex: Some("B".into()),
             xfer_mode: "Ptm".into(),
-            down_rate: 50000,
-            up_rate: 10000,
-            down_snr: 150,
-            up_snr: 120,
+            down_rate: Some(50000),
+            up_rate: Some(10000),
+            down_snr: Some(150),
+            up_snr: Some(120),
             fw_status: "idle".into(),
             board_reachable: true,
             mgmt_iface: "lan0.500".into(),
             mgmt_carrier: true,
+            monitor: false,
         };
         let text = s.to_lines();
         let parsed = StatusSnapshot::from_lines(&text);
         assert_eq!(parsed.state, "Up");
         assert_eq!(parsed.state_num, 7);
         assert!(parsed.up);
-        assert_eq!(parsed.uptime_secs, 300);
-        assert_eq!(parsed.down_rate, 50000);
-        assert_eq!(parsed.up_snr, 120);
+        assert_eq!(parsed.uptime_secs, Some(300));
+        assert_eq!(parsed.modulation.as_deref(), Some("Vdsl2"));
+        assert_eq!(parsed.down_rate, Some(50000));
+        assert_eq!(parsed.up_snr, Some(120));
         assert_eq!(parsed.fw_status, "idle");
+    }
+
+    #[test]
+    fn untrained_snapshot_renders_null() {
+        let s = StatusSnapshot::default();
+        let text = s.to_lines();
+        assert!(text.contains("modulation: null"));
+        assert!(text.contains("annex: null"));
+        assert!(text.contains("uptime: null"));
+        assert!(text.contains("down_rate: null"));
+        assert!(text.contains("up_snr: null"));
+        // Round-trip keeps them None.
+        let parsed = StatusSnapshot::from_lines(&text);
+        assert_eq!(parsed.modulation, None);
+        assert_eq!(parsed.down_rate, None);
     }
 }

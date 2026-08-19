@@ -48,6 +48,11 @@ pub const POLL_STALE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Delay between line_config_down and line_config_up during restart-line.
 pub const POLL_RESTART_DELAY: Duration = Duration::from_secs(1);
 
+/// With config applied, a line sitting in NoSignal for this long gets an
+/// op3 retrain kick from the daemon watchdog ( Initializing/Handshake do
+/// not count — training in progress).
+pub const NOSIGNAL_WATCHDOG: Duration = Duration::from_secs(30);
+
 // ── VLAN: VLAN configuration ────────────────────────────────────────────
 
 /// Transport VLAN id = base index + this offset (e.g. base 0 → VLAN 2000).

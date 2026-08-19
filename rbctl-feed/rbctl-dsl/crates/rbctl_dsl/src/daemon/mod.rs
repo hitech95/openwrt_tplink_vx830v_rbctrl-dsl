@@ -140,6 +140,8 @@ pub(crate) struct Daemon {
     last_apply: Option<Instant>,
     /// One TC-layer hotplug emission per Up session.
     tc_emitted: bool,
+    /// When the line has been continuously in NoSignal (watchdog dwell).
+    nosignal_since: Option<Instant>,
 }
 
 impl Daemon {
@@ -219,6 +221,7 @@ impl Daemon {
             vlan_owned: false,
             last_apply: None,
             tc_emitted: false,
+            nosignal_since: None,
         };
 
         // Initial configuration — the only place startup config is decided.
@@ -226,12 +229,16 @@ impl Daemon {
             log::info!("monitor mode: observing the board, no configuration will be sent");
         } else {
             let _ = daemon.cmd_tx.send(WorkerCmd::ApplyLineConfig);
-            if let XferMode::Ptm | XferMode::Atm = daemon.cfg.xfer_mode {
-                let _ = daemon.cmd_tx.send(WorkerCmd::ProvisionLink {
-                    xfer: daemon.cfg.xfer_mode,
-                    vlan: daemon.transport_vlan(),
-                });
-            }
+            // op3 retrain right after op1: the board's dslCfgSet dedups a
+            // config identical to its cache (no retrain, no `wan adsl
+            // open`), so op1 alone cannot revive a line that a previous
+            // daemon instance left reset via shutdown-op3. The kick makes
+            // "daemon start ⇒ line trains" deterministic. (A daemon crash
+            // while the line was Up costs one extra retrain here.)
+            let _ = daemon.cmd_tx.send(WorkerCmd::RetrainLine);
+            // Data-plane provisioning is NOT queued here — it follows from
+            // the LineConfigApplied (fixed mode) / line-Up (auto) events,
+            // which keeps exactly one provisioning path.
             // Emit initial TC-layer status (monitor mode has no configured
             // mode to report; it emits on Up transitions instead).
             if let Some(script) = daemon.notify_script.as_deref() {
@@ -283,6 +290,9 @@ impl Daemon {
                 self.on_worker_event(ev);
             }
 
+            // NoSignal watchdog — recover a line that trains nowhere.
+            self.watchdog_tick();
+
             // Signals → commands.
             if RELOAD.swap(false, Ordering::SeqCst) {
                 self.on_reload();
@@ -332,6 +342,44 @@ impl Daemon {
     }
 
     // ── event handlers (the gate) ────────────────────────────────────────
+
+    /// NoSignal watchdog: with config applied and the board reachable, a
+    /// line sitting in NoSignal for [`constants::NOSIGNAL_WATCHDOG`] gets an
+    /// op3 retrain kick. This recovers zombie states (e.g. a line left
+    /// reset by an older daemon whose op1 was deduplicated by the board's
+    /// config cache). Initializing/Handshake states mean training is in
+    /// progress — those never trigger the watchdog. No carrier plugged in
+    /// also shows NoSignal; the periodic kick is harmless there (resetting
+    /// an idle line) and keeps recovering once the line returns.
+    fn watchdog_tick(&mut self) {
+        if self.monitor || !self.config_applied || self.flashing() {
+            self.nosignal_since = None;
+            return;
+        }
+        let status = self
+            .state
+            .lock()
+            .unwrap()
+            .line_obj
+            .as_ref()
+            .map(|l| l.link_status);
+        match status {
+            Some(LinkStatus::NoSignal) => {
+                let since = *self.nosignal_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= constants::NOSIGNAL_WATCHDOG {
+                    log::warn!(
+                        "line in NoSignal for {:?} — forcing retrain",
+                        since.elapsed()
+                    );
+                    let _ = self.cmd_tx.send(WorkerCmd::RetrainLine);
+                    // Restart the dwell so kicks stay throttled.
+                    self.nosignal_since = Some(Instant::now());
+                }
+            }
+            // Training in progress, Up, or no fresh poll — nothing to do.
+            _ => self.nosignal_since = None,
+        }
+    }
 
     fn on_worker_event(&mut self, ev: WorkerEvent) {
         match ev {
@@ -546,6 +594,10 @@ impl Daemon {
                 }
             }
             let _ = self.cmd_tx.send(WorkerCmd::LineDown);
+            // Deliberate final state: daemon stopped ⇒ line is DOWN (op3
+            // retrain was issued). Starting the daemon again brings it back
+            // (startup op1 + retrain kick).
+            log::info!("line left DOWN by request — daemon stopped");
         }
         let _ = self.cmd_tx.send(WorkerCmd::Shutdown);
         match self.worker_done_rx.recv_timeout(constants::DAEMON_SHUTDOWN_DEADLINE) {

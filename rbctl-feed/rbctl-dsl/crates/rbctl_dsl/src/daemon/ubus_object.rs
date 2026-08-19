@@ -136,7 +136,10 @@ fn add_direction(bb: &mut BlobBuilder, name: &str, m: &LineMetrics, upstream: bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rbctl_proto::oem::unpack::LinkStatus;
+    use crate::config::XferMode;
+    use rbctl_proto::oem::unpack::{DataPath, LinkStatus};
+
+    use super::super::state::new_shared_state;
 
     #[test]
     fn map_status_up() {

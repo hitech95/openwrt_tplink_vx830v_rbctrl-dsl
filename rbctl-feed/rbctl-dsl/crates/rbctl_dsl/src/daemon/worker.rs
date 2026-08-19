@@ -41,8 +41,11 @@ pub enum WorkerCmd {
     /// op6/op16 — deprovision the data-plane link on the board (the host
     /// VLAN is deleted by the daemon).
     RemoveLink { xfer: XferMode, vlan: u16 },
-    /// op3 + delay + op1 — bounce the line.
+    /// op3 + delay + op1 — bounce the line (user-initiated restart).
     RestartLine,
+    /// op3 only — force a retrain with the board's cached config. Used at
+    /// startup (right after op1) and by the NoSignal watchdog.
+    RetrainLine,
     /// op3 — best-effort teardown (zero retries).
     LineDown,
     /// Replace the worker's config copy (display fields + command params).
@@ -137,6 +140,11 @@ impl BoardWorker {
     fn handle_cmd(&mut self, cmd: WorkerCmd) {
         match cmd {
             WorkerCmd::ApplyLineConfig => {
+                log::info!(
+                    "line_config_up: mod={:?} annex={:?} profiles=0x{:x} bitswap={} sra={}",
+                    self.cfg.modulation, self.cfg.annex,
+                    self.cfg.profiles.bitmask(), self.cfg.bitswap, self.cfg.sra
+                );
                 match self.board.line_config_up(
                     self.cfg.modulation,
                     self.cfg.annex,
@@ -153,9 +161,16 @@ impl BoardWorker {
             WorkerCmd::ProvisionLink { xfer, vlan } => {
                 debug_assert!(matches!(xfer, XferMode::Ptm | XferMode::Atm));
                 let result = match xfer {
-                    XferMode::Ptm => self.board.ptm_link_add(0, 0, 0, vlan),
+                    XferMode::Ptm => {
+                        log::info!("ptm_link_add: vlan={vlan}");
+                        self.board.ptm_link_add(0, 0, 0, vlan)
+                    }
                     XferMode::Atm => {
                         let params = config::atm_params(self.cfg.atm.as_ref(), vlan);
+                        log::info!(
+                            "atm_link_add: vpi={} vci={} encap={:?} vlan={vlan}",
+                            params.vpi, params.vci, params.encap
+                        );
                         self.board.atm_link_add(&params)
                     }
                     // The daemon always resolves Auto to the observed mode
@@ -187,7 +202,7 @@ impl BoardWorker {
             }
             WorkerCmd::RestartLine => {
                 log::info!("restart-line — bouncing DSL line");
-                let _ = self.board.line_config_down();
+                let _ = self.board.line_retrain();
                 std::thread::sleep(constants::POLL_RESTART_DELAY);
                 if let Err(e) = self.board.line_config_up(
                     self.cfg.modulation,
@@ -199,9 +214,17 @@ impl BoardWorker {
                     log::warn!("line_config_up after restart: {e}");
                 }
             }
+            WorkerCmd::RetrainLine => {
+                // Pure retrain kick — the board re-negotiates with its
+                // cached config (which op1 has already brought up to date).
+                log::info!("retrain — forcing DSL retrain (op3)");
+                if let Err(e) = self.board.line_retrain() {
+                    log::warn!("line_retrain: {e}");
+                }
+            }
             WorkerCmd::LineDown => {
                 self.board.set_retries(constants::BOARD_SHUTDOWN_RETRIES);
-                let _ = self.board.line_config_down();
+                let _ = self.board.line_retrain();
             }
             WorkerCmd::UpdateConfig(cfg) => {
                 self.cfg = *cfg;

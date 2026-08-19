@@ -243,44 +243,105 @@ against `libuci`, `libnl-tiny`, and `libc` (all staged by the OpenWrt SDK).
 
 ### Startup sequence
 
-`daemon::run()` is the entry point. It is deliberately ordered so each step
-can fail fast and leave the system in a sane state.
+`daemon::run()` → `Daemon::startup()` (`daemon/init.rs`) is deliberately
+ordered so each step can fail fast and leave the system in a sane state.
 
 ```mermaid
 flowchart TD
     A["1. install signal handlers<br/>SIGTERM/SIGINT/SIGHUP → AtomicBool"]
     B["2. DslConfig::load<br/>UCI + CLI overrides"]
     C["3. validate_line_config + validate_xfer_mode"]
-    D["4. iface_exists(config_iface)?<br/>(if_nametoindex)"]
+    D["4. mgmt-link probe<br/>(carrier check, read-only)"]
     E["5. RawSocket::open(iface, 0x88B5)<br/>BPF filter installed"]
-    F["6. board.line_config_up<br/>opcode 1: modulation/annex/profiles"]
-    G{"xfer_mode?"}
-    G1["7a. ptm_link_add<br/>(opcode 15)"]
-    G2["7b. atm_link_add<br/>(opcode 5)"]
-    H["8. create_vlan_iface(parent, vlan)<br/>rtnetlink RTM_NEWLINK + set_up"]
-    I["9. IpcListener::bind<br/>/var/run/rbctl-dsl.sock"]
-    J["10. connect_ubus + register 'dsl'<br/>(best-effort)"]
-    K["11. hotplug::emit_tc_layer<br/>(initial TC status)"]
-    L["12. spawn BoardWorker thread"]
-    M["13. control loop (50 ms tick)<br/>IPC + ubus poll + sleep"]
+    F["6. IpcListener::bind<br/>/var/run/rbctl-dsl.sock"]
+    G["7. connect_ubus + register 'dsl'<br/>(best-effort)"]
+    H["8. spawn BoardWorker thread"]
+    I["9. queue ApplyLineConfig + RetrainLine<br/>(monitor mode: queue nothing)"]
+    J["10. control loop (50 ms tick)<br/>events + IPC + ubus + watchdog"]
 
-    A --> B --> C --> D --> E --> F --> G
-    G --> G1 --> H
-    G --> G2 --> H
-    H --> I --> J --> K --> L --> M
+    A --> B --> C --> D --> E --> F --> G --> H --> I --> J
 
     style A fill:#16213e,color:#fff
     style E fill:#1b4332,color:#fff
-    style F fill:#3a1a5a,color:#fff
-    style H fill:#7a1a1a,color:#fff
-    style M fill:#3a1a5a,color:#fff
+    style I fill:#3a1a5a,color:#fff
+    style J fill:#3a1a5a,color:#fff
 ```
 
-Steps 1–4 must succeed or the process exits non-zero before touching the
-board. Steps 6–7 (line config + link add) are best-effort — a silent board
-during boot is logged but doesn't abort, because the worker will keep polling
-and may recover. Step 8 (VLAN create) tolerates `EEXIST` so a daemon restart
-is idempotent.
+Steps 1–5 must succeed or the process exits non-zero before touching the
+board. All board operations happen **after** the worker is spawned — the
+daemon only sends `WorkerCmd`s and consumes `WorkerEvent`s.
+
+### Line bring-up (the important part)
+
+The board's `dslCfgSet` (op1 handler) keeps a **config cache** and
+early-returns when the incoming config is identical — no chipset writes, no
+`wan adsl open`, **no retrain**. A daemon restart therefore cannot rely on
+op1 alone: the previous instance's shutdown-retrain left the line reset, and
+an identical op1 is deduplicated. The startup sequence thus always pairs
+op1 with an **op3 retrain kick**:
+
+```mermaid
+sequenceDiagram
+    participant D as Daemon (gate)
+    participant W as BoardWorker
+    participant B as Board firmware
+    participant T as Board status thread (2 s poll)
+
+    Note over D,W: startup queues [ApplyLineConfig, RetrainLine]
+    D->>W: WorkerCmd::ApplyLineConfig
+    W->>B: op1 dsl_config_up<br/>(mod, annex, bitswap, sra, profiles)
+    B->>B: dslCfgSet: diff vs cache
+    Note right of B: identical → dedup (no retrain)<br/>different → apply + wan adsl open
+    B-->>W: ack (status 0)
+    W-->>D: WorkerEvent::LineConfigApplied
+    W->>B: op3 wan adsl reset (queued at startup)
+    B-->>W: ack
+    Note right of B: line drops, re-negotiates<br/>with cached config
+
+    D->>W: WorkerCmd::ProvisionLink (fixed ptm/atm)
+    Note over D: fired by LineConfigApplied
+    W->>B: op15 / op5 link add (line still training)
+    Note right of B: not UP → enqueue in g_interfaceList<br/>(ack now, apply at showtime)
+    B-->>W: 4-byte status ack
+    Note over W,B: status decoded (decompiled handlers):<br/>0 = applied now · 1 = queued/duplicate<br/>(accepted — materializes at showtime) ·<br/>2 = rejected (vlan out of range) → Err,<br/>daemon does not create the host VLAN
+    W-->>D: WorkerEvent::LinkProvisioned{vlan}
+    D->>D: create host VLAN parent.vlan<br/>(rtnetlink, EEXIST tolerated)
+
+    loop until showtime
+        T->>T: poll /proc/tc3162/xdsl_stats
+        W->>B: op2 get_line_obj (1 s daemon poll)
+    end
+    Note right of B: showtime reached
+    T->>B: dslHandleStatusUp:<br/>materialize queued link<br/>(nas dev, bridge, eth0.1.vlan)
+    B-->>W: op2: link_status=Up, data_path
+    W-->>D: WorkerEvent::LineState{Up, data_path}
+    D->>D: hotplug UP + tc_layer event
+```
+
+Three properties fall out of this sequence:
+
+- **Provisioning before Up is intended.** The op5/op15 handlers explicitly
+  queue link requests in the board's `g_interfaceList` when the line isn't
+  up — "configuration is decoupled from link state". The board's own status
+  thread materializes them at showtime and re-materializes them after every
+  drop (DOWN resets nodes to *pending*, config preserved). The daemon never
+  needs to re-send op5/op15 after a resync.
+- **`wan adsl reset` (op3) ≠ reboot.** Op3 retrains with the *cached* config;
+  op7 is the board reboot. The startup kick makes "daemon start ⇒ line
+  trains" deterministic even when op1 is deduplicated. Cost: one extra
+  retrain when the previous shutdown left the line Up.
+- **Auto mode** skips the startup `ProvisionLink` (the TC mode is unknown
+  until showtime). The `LineState{Up}` event carries the observed
+  `data_path`, and the daemon provisions with the *observed* mode then.
+
+### NoSignal watchdog
+
+With config applied and the board reachable, a line that sits in `NoSignal`
+for 30 s (`NOSIGNAL_WATCHDOG`) gets an op3 retrain kick, repeated every 30 s.
+`Initializing`/`Handshake` mean training is in progress and never trigger
+the watchdog. This recovers zombie lines (e.g. one left reset by an older
+daemon version whose op1 was deduplicated) and self-heals after a carrier
+outage ends.
 
 ### Two threads, one shared state
 
@@ -290,53 +351,53 @@ Once startup completes, the process splits in two:
 flowchart LR
     subgraph MAIN["control thread  (50 ms tick)"]
         direction TB
-        M1["IPC accept_one"]
-        M2["read SHOULD_RELOAD /<br/>SHOULD_RESTART_LINE flags"]
-        M3["ubus poll_one"]
-        M4["sleep 50 ms"]
-        M1 --> M2 --> M3 --> M4
+        M1["drain WorkerEvents<br/>(gate decisions)"]
+        M2["watchdog_tick<br/>(NoSignal retrain)"]
+        M3["IPC accept_one"]
+        M4["ubus poll_one"]
+        M5["sleep 50 ms"]
+        M1 --> M2 --> M3 --> M4 --> M5
     end
     subgraph WORKER["board worker thread"]
         direction TB
-        W1["handle_reload<br/>(re-read UCI, line down/up)"]
-        W2["handle_restart<br/>(bounce line)"]
-        W3["maybe_poll_board<br/>(get_line_obj every 1 s)"]
-        W4["sleep 50 ms"]
-        W1 --> W2 --> W3 --> W4
+        W1["execute WorkerCmds<br/>(op1/op3/op5/op15/op16…)"]
+        W2["maybe_poll_board<br/>(op2 every 1 s)"]
+        W3["sleep 50 ms"]
+        W1 --> W2 --> W3
     end
     STATE[("SharedState<br/>Arc&lt;Mutex&lt;DslState&gt;&gt;")]
-    FLAGS[("SHOULD_* AtomicBool<br/>(process-global)")]
-
+    MAIN -->|"WorkerCmd"| WORKER
+    WORKER -->|"WorkerEvent"| MAIN
     MAIN -.->|"build_snapshot read"| STATE
     WORKER -.->|"poll write"| STATE
-    MAIN -->|"set"| FLAGS
-    WORKER -->|"swap-to-clear"| FLAGS
     WORKER -.->|"fork + env"| HOTPLUG["notify script"]
 
     style MAIN fill:#16213e,color:#fff
     style WORKER fill:#3a1a5a,color:#fff
 ```
 
+The worker is a pure executor ("no decisions"); the daemon is the gate that
+owns all policy state (`config_applied`, `link_provisioned`, `vlan_owned`).
 This split exists because the board can block for **seconds** on a silent or
-training line (2 s timeout × 3 retries × drain-loop). Putting it on its own
-thread keeps the IPC/ubus path responsive at all times — `status` returns
-within microseconds even while the worker is mid-retransmit. Commands flow
-through three process-global `AtomicBool` flags
-(`SHOULD_EXIT` / `SHOULD_RELOAD` / `SHOULD_RESTART_LINE`) that both threads
-read; the board can't stall the control plane.
+training line (2 s timeout × 3 retries × drain-loop). Keeping it on its own
+thread means `status` returns within microseconds even while the worker is
+mid-retransmit.
 
 ### Clean shutdown
 
 On `SIGTERM` / `SIGINT` / `Stop` IPC command:
 
-1. `SHOULD_EXIT` is set.
+1. `SHOULD_EXIT` is set (deferred while a firmware flash is in flight).
 2. Control loop exits, emits a final `Down` hotplug event.
-3. Worker sees `SHOULD_EXIT`, drops its retry budget to 0, attempts one
-   best-effort `line_config_down()` on the board.
-4. Main thread waits up to `SHUTDOWN_DEADLINE` (3 s) for the worker via a
-   one-shot mpsc channel; a silent board is abandoned (process exit reaps
-   the thread).
-5. Host transport VLAN is deleted via rtnetlink.
+3. Daemon gates teardown through the worker: `RemoveLink` (op6/op16, board
+   side) then `LineDown` — a **zero-retry op3 retrain**. The line is left
+   deliberately DOWN: "daemon stopped ⇒ line down" is a defined state, and
+   the next daemon start brings it back (op1 + retrain kick).
+4. Main thread waits up to `SHUTDOWN_DEADLINE` (3 s) for the worker; a
+   silent board is abandoned (process exit reaps the thread).
+5. The host transport VLAN is deleted **only if this daemon instance
+   created it** (`vlan_owned` — a pre-existing VLAN from an earlier run or
+   the operator is left alone).
 6. IPC socket file is removed.
 
 ---

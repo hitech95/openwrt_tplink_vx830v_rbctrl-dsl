@@ -171,8 +171,13 @@ impl<T: Transport> Board<T> {
         Ok(())
     }
 
-    /// **Opcode 3** — DSL line config down.
-    pub fn line_config_down(&mut self) -> Result<(), BoardError> {
+    /// **Opcode 3** — force a DSL retrain (`wan adsl reset` on the board).
+    ///
+    /// Drops the line and re-negotiates with the board's **cached** config.
+    /// This is NOT a board reboot (that is opcode 7). Note: op1 with a
+    /// config identical to the board's cache is deduplicated by `dslCfgSet`
+    /// (no retrain) — op3 is the only reliable way to revive a reset line.
+    pub fn line_retrain(&mut self) -> Result<(), BoardError> {
         let r = self.request(3, &[0x03])?;
         let data = strip_echo(&r, 0x03);
         if !data.is_empty() && data[0] != 0 {
@@ -203,8 +208,9 @@ impl<T: Transport> Board<T> {
 
     /// **Opcode 5** — ATM link add (init / VLAN discovery).
     ///
-    /// Returns the board-assigned transport VLAN id. If the board returns
-    /// a short response (just a status ACK), falls back to the requested VLAN.
+    /// Returns the board-assigned transport VLAN id. Long replies (≥ 0x14)
+    /// echo the descriptor with the assigned VLAN at `[0x12]`; short 4-byte
+    /// replies are a status word — see [`link_add_short_status`].
     pub fn atm_link_add(&mut self, params: &AtmLinkParams<'_>) -> Result<u16, BoardError> {
         let atm = pack::pack_atm_link(params);
         let mut pl = vec![0x05];
@@ -214,7 +220,7 @@ impl<T: Transport> Board<T> {
         if data.len() >= 0x14 {
             return Ok(u16::from_be_bytes([data[0x12], data[0x13]]));
         }
-        Ok(params.vlan_id)
+        link_add_short_status(data).map(|_| params.vlan_id)
     }
 
     /// **Opcode 6** — ATM link delete.
@@ -228,8 +234,9 @@ impl<T: Transport> Board<T> {
 
     /// **Opcode 15** — PTM/VDSL link add.
     ///
-    /// Returns the board-assigned transport VLAN id. Falls back to the
-    /// requested VLAN on short responses.
+    /// Returns the board-assigned transport VLAN id. Long replies (≥ 8)
+    /// echo the descriptor with the assigned VLAN at `[6..8]`; short 4-byte
+    /// replies are a status word — see [`link_add_short_status`].
     pub fn ptm_link_add(
         &mut self, tag_enable: u8, tag_vid: u16, tag_pri: u16, vlan_id: u16,
     ) -> Result<u16, BoardError> {
@@ -241,7 +248,7 @@ impl<T: Transport> Board<T> {
         if data.len() >= 8 {
             return Ok(u16::from_be_bytes([data[6], data[7]]));
         }
-        Ok(vlan_id)
+        link_add_short_status(data).map(|_| vlan_id)
     }
 
     /// **Opcode 16** — PTM/VDSL link delete.
@@ -417,13 +424,43 @@ fn strip_echo<'a>(payload: &'a [u8], opcode: u8) -> &'a [u8] {
     }
 }
 
+/// Decode the short (4-byte) link-add status reply shared by op5/op15.
+///
+/// Ground truth from the decompiled board firmware (`board_op5/op15_handler`
+/// + `dsl_linkAdd` / `vdsl_linkAdd`):
+///
+/// | status | meaning |
+/// |--------|---------|
+/// | `0` | applied now (line up, matching TC mode) |
+/// | `1` | accepted but **not materialized**: either queued in the board's `g_interfaceList` (line down — the board's 2 s status thread applies it at showtime) or a duplicate re-add (idempotent). Both converge to a working data plane. |
+/// | `2` | rejected — vlanId outside 2000–2007 (ATM: or invalid tag params) |
+///
+/// Values ≥ 3 are not produced by the decompiled handlers; treated as
+/// errors defensively. `Ok(())` means the link is configured (now or at
+/// showtime); `Err` means the board rejected it.
+fn link_add_short_status(data: &[u8]) -> Result<(), BoardError> {
+    if data.len() < 4 {
+        return Err(BoardError::BadResponse("link-add reply too short"));
+    }
+    match u32::from_be_bytes(data[0..4].try_into().unwrap()) {
+        0 => Ok(()),
+        1 => {
+            log::info!("link add: queued/duplicate on board — materializes at showtime");
+            Ok(())
+        }
+        2 => Err(BoardError::BadResponse("board rejected link (vlan id out of range)")),
+        _ => Err(BoardError::BadResponse("board rejected link (unknown status)")),
+    }
+}
+
 // ── tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rbctl_proto::checksum::set_checksum;
-    use rbctl_proto::MAGIC_OEM_COMMAND as MAGIC_COMMAND;
+    use rbctl_proto::oem::MAGIC_OEM_COMMAND as MAGIC_COMMAND;
+    use rbctl_proto::oem::unpack::LinkStatus;
     use std::cell::RefCell;
 
     /// Mock transport that auto-generates valid responses.
@@ -575,9 +612,9 @@ mod tests {
     }
 
     #[test]
-    fn line_config_down_roundtrip() {
+    fn line_retrain_roundtrip() {
         let mut board = make_board();
-        assert!(board.line_config_down().is_ok());
+        assert!(board.line_retrain().is_ok());
     }
 
     #[test]
@@ -593,7 +630,7 @@ mod tests {
         let mut board = make_board();
         let stats = board.get_channel_stats().unwrap();
         // Default mock response is all zeros
-        assert_eq!(stats.down_total_bytes, 0);
+        assert_eq!(stats.receive_blocks, 0);
     }
 
     #[test]
@@ -623,10 +660,10 @@ mod tests {
     }
 
     #[test]
-    fn line_status_helper() {
+    fn line_status_via_get_line_obj() {
         let mut board = make_board();
-        let status = board.line_status().unwrap();
-        assert_eq!(status, LinkStatus::Up);
+        let obj = board.get_line_obj().unwrap();
+        assert_eq!(obj.link_status, LinkStatus::Up);
     }
 
     // ── error / edge case tests ───────────────────────────────────────
@@ -654,15 +691,19 @@ mod tests {
         // First request
         board.get_line_obj().unwrap();
         // Check that TX had seq=1 (first call to SeqCounter::next)
-        let tx = board.sock.last_tx.borrow();
-        let f = Frame::parse(&tx).unwrap();
-        assert_eq!(f.seq(), 1);
+        let seq1 = {
+            let tx = board.sock.last_tx.borrow();
+            Frame::parse(&tx).unwrap().seq()
+        };
+        assert_eq!(seq1, 1);
 
         // Second request should have seq=2
         board.get_line_obj().unwrap();
-        let tx = board.sock.last_tx.borrow();
-        let f = Frame::parse(&tx).unwrap();
-        assert_eq!(f.seq(), 2);
+        let seq2 = {
+            let tx = board.sock.last_tx.borrow();
+            Frame::parse(&tx).unwrap().seq()
+        };
+        assert_eq!(seq2, 2);
     }
 
     #[test]
@@ -729,9 +770,7 @@ mod tests {
     fn op5_short_response_with_nonzero_vlan() {
         let mut board = make_board();
         board.sock.set_response(5, vec![0x00, 0x00, 0x00, 0x00]);
-        let params = AtmLinkParams {
-            vlan_id: 2001, ..Default::default()
-        };
+        let params = crate::config::atm_params(None, 2001);
         let vlan = board.atm_link_add(&params).unwrap();
         assert_eq!(vlan, 2001);
     }
@@ -742,6 +781,43 @@ mod tests {
         board.sock.set_response(15, vec![0x00, 0x00, 0x00, 0x00]);
         let vlan = board.ptm_link_add(0, 0, 0, 2001).unwrap();
         assert_eq!(vlan, 2001);
+    }
+
+    #[test]
+    fn link_add_short_status_queued_is_ok() {
+        // status 1 = queued (line down) or duplicate re-add — accepted,
+        // materializes at showtime. Observed on real hardware (pcap).
+        let mut board = make_board();
+        board.sock.set_response(15, vec![0x00, 0x00, 0x00, 0x01]);
+        assert_eq!(board.ptm_link_add(0, 0, 0, 2000).unwrap(), 2000);
+        board.sock.set_response(5, vec![0x00, 0x00, 0x00, 0x01]);
+        let params = crate::config::atm_params(None, 2000);
+        assert_eq!(board.atm_link_add(&params).unwrap(), 2000);
+    }
+
+    #[test]
+    fn link_add_short_status_rejected() {
+        let mut board = make_board();
+        board.sock.set_response(15, vec![0x00, 0x00, 0x00, 0x02]);
+        assert!(board.ptm_link_add(0, 0, 0, 2000).is_err());
+        board.sock.set_response(5, vec![0x00, 0x00, 0x00, 0x02]);
+        let params = crate::config::atm_params(None, 2000);
+        assert!(board.atm_link_add(&params).is_err());
+    }
+
+    #[test]
+    fn link_add_short_status_unknown_rejected() {
+        // ≥3 not produced by the decompiled firmware — defensive error.
+        let mut board = make_board();
+        board.sock.set_response(15, vec![0x00, 0x00, 0x00, 0x7F]);
+        assert!(board.ptm_link_add(0, 0, 0, 2000).is_err());
+    }
+
+    #[test]
+    fn link_add_short_status_truncated_rejected() {
+        let mut board = make_board();
+        board.sock.set_response(15, vec![0x00, 0x00]);
+        assert!(board.ptm_link_add(0, 0, 0, 2000).is_err());
     }
 
     #[test]
