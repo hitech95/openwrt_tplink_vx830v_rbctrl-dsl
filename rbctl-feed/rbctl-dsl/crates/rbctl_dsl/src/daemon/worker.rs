@@ -24,7 +24,7 @@ use rbctl_proto::oem::unpack::{DataPath, LinkStatus};
 use crate::board::{Board, BoardError, FwProgress, FwUpgradeResult};
 use crate::config::{self, DslConfig, XferMode};
 use crate::constants;
-use crate::ubus_obj::SharedState;
+use super::state::SharedState;
 
 use super::SHOULD_EXIT;
 
@@ -210,14 +210,14 @@ impl BoardWorker {
     ) {
         {
             let mut st = self.state.lock().unwrap();
-            st.fw_status = crate::ubus_obj::FwStatus::Upgrading;
+            st.fw_status = super::state::FwStatus::Upgrading;
         }
 
         log::info!("firmware upgrade: {} bytes", image.len());
         let result = self.board.firmware_upgrade(&image, &mut |p| {
             let _ = reply_tx.send(FwEvent::Progress(p.clone()));
             let mut st = self.state.lock().unwrap();
-            st.fw_status = crate::ubus_obj::FwStatus::UpgradingProgress {
+            st.fw_status = super::state::FwStatus::UpgradingProgress {
                 stage: p.stage,
                 pct: p.pct,
             };
@@ -227,13 +227,13 @@ impl BoardWorker {
             Ok(r) => {
                 log::info!("firmware upgrade done: version=0x{:08X}", r.version);
                 let mut st = self.state.lock().unwrap();
-                st.fw_status = crate::ubus_obj::FwStatus::Done;
+                st.fw_status = super::state::FwStatus::Done;
                 FwEvent::Done(Ok(r.clone()))
             }
             Err(e) => {
                 log::error!("firmware upgrade failed: {e}");
                 let mut st = self.state.lock().unwrap();
-                st.fw_status = crate::ubus_obj::FwStatus::Failed(e.to_string());
+                st.fw_status = super::state::FwStatus::Failed(e.to_string());
                 FwEvent::Done(Err(e.to_string()))
             }
         };

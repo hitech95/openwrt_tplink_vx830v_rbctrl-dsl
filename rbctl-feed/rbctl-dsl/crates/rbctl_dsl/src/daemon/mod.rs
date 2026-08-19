@@ -28,6 +28,8 @@ mod hotplug;
 mod init;
 mod ipc;
 mod snapshot;
+mod state;
+mod ubus_object;
 mod worker;
 
 pub(crate) use ipc::SOCK_PATH;
@@ -41,8 +43,9 @@ use rbctl_proto::oem::unpack::{DataPath, LinkStatus};
 
 use crate::config::{CliOverrides, DslConfig, XferMode};
 use crate::constants;
-use crate::ubus_obj;
 use crate::utils::{mapping, ubus as ubus_util, vlan};
+
+pub(crate) use state::{new_shared_state, FwStatus, SharedState};
 
 use hotplug::{self, LineEvent};
 use ipc::{IpcAction, IpcListener, StatusSnapshot};
@@ -115,7 +118,7 @@ pub(crate) struct Daemon {
     overrides: CliOverrides,
     pub(super) monitor: bool,
     parent: String,
-    pub(super) state: ubus_obj::SharedState,
+    pub(super) state: SharedState,
     ipc: Option<IpcListener>,
     cmd_tx: mpsc::Sender<WorkerCmd>,
     event_rx: mpsc::Receiver<WorkerEvent>,
@@ -168,14 +171,14 @@ impl Daemon {
         };
 
         // Shared state + ubus object
-        let state = ubus_obj::new_shared_state();
+        let state = new_shared_state();
         {
             let mut st = state.lock().unwrap();
             st.xfer_mode = Some(cfg.xfer_mode);
             st.modulation = cfg.modulation;
             st.annex = cfg.annex;
         }
-        let ubus_obj_handle = ubus_obj::build_dsl_object(Arc::clone(&state));
+        let ubus_obj_handle = ubus_object::build_dsl_object(Arc::clone(&state));
         let ubus_conn = match ubus_util::connect_and_register(ubus_obj_handle) {
             Some(c) => {
                 log::info!("ubus object 'dsl' registered");
@@ -324,7 +327,7 @@ impl Daemon {
         let st = self.state.lock().unwrap();
         matches!(
             st.fw_status,
-            ubus_obj::FwStatus::Upgrading | ubus_obj::FwStatus::UpgradingProgress { .. }
+            FwStatus::Upgrading | FwStatus::UpgradingProgress { .. }
         )
     }
 

@@ -7,9 +7,9 @@
 
 use crate::config::XferMode;
 use crate::constants;
-use crate::daemon::ipc::StatusSnapshot;
-use crate::daemon::Daemon;
-use crate::ubus_obj::SharedState;
+use super::ipc::StatusSnapshot;
+use super::Daemon;
+use super::state::SharedState;
 use crate::utils::{mapping, mgmt_link};
 
 impl Daemon {

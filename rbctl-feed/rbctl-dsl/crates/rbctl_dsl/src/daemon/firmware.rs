@@ -10,7 +10,7 @@ use std::sync::mpsc;
 
 use super::worker::{FwEvent, WorkerCmd};
 use crate::constants;
-use crate::ubus_obj::{self, SharedState};
+use super::state::{FwStatus, SharedState};
 
 pub(crate) fn handle_firmware_ipc(
     path: &str,
@@ -23,7 +23,7 @@ pub(crate) fn handle_firmware_ipc(
         let st = state.lock().unwrap();
         if !matches!(
             st.fw_status,
-            ubus_obj::FwStatus::Idle | ubus_obj::FwStatus::Done | ubus_obj::FwStatus::Failed(_)
+            FwStatus::Idle | FwStatus::Done | FwStatus::Failed(_)
         ) {
             let _ = stream.write_all(b"ERR: upgrade already in progress\n.\n");
             return;

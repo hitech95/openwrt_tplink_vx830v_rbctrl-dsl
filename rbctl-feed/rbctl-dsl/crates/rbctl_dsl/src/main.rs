@@ -8,7 +8,6 @@ mod daemon;
 mod logging;
 mod pcap;
 mod selftest;
-mod ubus_obj;
 mod utils;
 
 use clap::{Parser, Subcommand};
