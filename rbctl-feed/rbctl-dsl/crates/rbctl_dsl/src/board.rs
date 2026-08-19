@@ -8,7 +8,7 @@ use std::io;
 use std::time::Duration;
 
 use rbctl_proto::{
-    checksum::{set_checksum, verify_checksum},
+    checksum::verify_checksum,
     frame::{Frame, SeqCounter, HEADER_LEN, MIN_FRAME},
     oem::{
         build_command_frame,
@@ -18,8 +18,7 @@ use rbctl_proto::{
             TIMEOUT_ANNOUNCE_MS, TIMEOUT_COMPLETE_MS, TIMEOUT_STREAM_MS, TIMEOUT_VERIFY_MS,
         },
         pack::{self, AtmLinkParams, Modulation, Annex, Vdsl2Profiles},
-        unpack::{self, ChannelStats, LineObj, LinkStatus},
-        MAGIC_OEM_COMMAND as MAGIC_COMMAND,
+        unpack::{self, ChannelStats, LineObj},
         MAGIC_OEM_RESPONSE as MAGIC_RESPONSE,
     },
 };
@@ -125,7 +124,7 @@ impl<T: Transport> Board<T> {
 
         let mut rx_buf = [0u8; RX_BUF_SIZE];
 
-        for attempt in 0..=self.retries {
+        for _attempt in 0..=self.retries {
             self.sock.send(&tx_buf[..tx_len])?;
 
             // Drain the receive queue: the kernel echoes our own TX back to us
@@ -252,11 +251,6 @@ impl<T: Transport> Board<T> {
         pl.extend_from_slice(&del);
         self.request(16, &pl)?;
         Ok(())
-    }
-
-    /// Convenience: poll line status.
-    pub fn line_status(&mut self) -> Result<LinkStatus, BoardError> {
-        Ok(self.get_line_obj()?.link_status)
     }
 
     // ── opcode 8: firmware upgrade ─────────────────────────────────────
@@ -428,6 +422,8 @@ fn strip_echo<'a>(payload: &'a [u8], opcode: u8) -> &'a [u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rbctl_proto::checksum::set_checksum;
+    use rbctl_proto::MAGIC_OEM_COMMAND as MAGIC_COMMAND;
     use std::cell::RefCell;
 
     /// Mock transport that auto-generates valid responses.

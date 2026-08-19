@@ -2,7 +2,6 @@
 //! dependency probes. Frame inspection is provided by the `sniff` subcommand;
 //! selftest itself no longer writes captures to disk.
 
-use std::ffi::CString;
 use std::time::Duration;
 
 use af_packet::RawSocket;
@@ -129,9 +128,8 @@ impl Selftest {
         rtnl.add_vlan(&self.parent, test_vid).map_err(|e| format!("add_vlan: {e}"))?;
 
         let result = (|| -> Result<String, String> {
-            let parent_idx = ifindex(&self.parent)?;
-            let vlan_idx = ifindex(&name)?;
-            if vlan_idx == 0 {
+            let parent_idx = mgmt_link::iface_exists(&self.parent);
+            if !mgmt_link::iface_exists(&name) {
                 return Err(format!("{name} was not created"));
             }
             rtnl.set_up(&name).map_err(|e| format!("set_up: {e}"))?;
@@ -140,7 +138,7 @@ impl Selftest {
         })();
 
         let _ = rtnl.del(&name);
-        if result.is_ok() && ifindex(&name).unwrap_or(0) != 0 {
+        if result.is_ok() && mgmt_link::iface_exists(&name) {
             return Err(format!("{name} was not deleted"));
         }
         result
@@ -152,8 +150,6 @@ impl Selftest {
         board.set_timeout(constants::BOARD_DEFAULT_TIMEOUT);
         board.set_retries(constants::BOARD_DEFAULT_RETRIES);
 
-        let mut got_response = false;
-
         // ── Step 1: op1 — line config up with auto modulation ───────────
         // Sends the board's default/auto config (Multimode / Annex-Auto /
         // all profiles). If the board already has this config, dslCfgSet's
@@ -161,7 +157,6 @@ impl Selftest {
         // to auto — the known-good config.
         match board.line_config_up(ST_MODULATION, ST_ANNEX, ST_PROFILES, ST_BITSWAP, ST_SRA) {
             Ok(()) => {
-                got_response = true;
                 log::info!(
                     "op1: ACK ({:?}/Annex::{:?}/0x{:x}, bitswap={} sra={})",
                     ST_MODULATION, ST_ANNEX, ST_PROFILES.bitmask(), ST_BITSWAP, ST_SRA
@@ -262,10 +257,6 @@ impl Selftest {
         }
 
         // ── Step 5: summary ────────────────────────────────────────────
-        if !got_response {
-            return Ok("no board response".into());
-        }
-
         if line_obj.is_some() {
             Ok(format!("line up, {detected}"))
         } else {

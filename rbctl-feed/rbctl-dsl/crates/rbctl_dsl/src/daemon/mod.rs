@@ -23,14 +23,14 @@
 //! - [`hotplug`] — DSL notify-script emission
 //! - [`firmware`] — `FIRMWARE <path>` IPC streaming handler
 
-mod firmware;
-mod hotplug;
+pub(crate) mod firmware;
+pub(crate) mod hotplug;
 mod init;
-mod ipc;
+pub(crate) mod ipc;
 mod snapshot;
-mod state;
+pub(crate) mod state;
 mod ubus_object;
-mod worker;
+pub(crate) mod worker;
 
 pub(crate) use ipc::SOCK_PATH;
 
@@ -43,12 +43,12 @@ use rbctl_proto::oem::unpack::{DataPath, LinkStatus};
 
 use crate::config::{CliOverrides, DslConfig, XferMode};
 use crate::constants;
-use crate::utils::{mapping, ubus as ubus_util, vlan};
+use crate::utils::{ubus as ubus_util, vlan};
 
 pub(crate) use state::{new_shared_state, FwStatus, SharedState};
 
-use hotplug::{self, LineEvent};
-use ipc::{IpcAction, IpcListener, StatusSnapshot};
+use hotplug::LineEvent;
+use ipc::{IpcAction, IpcListener};
 use worker::{BoardWorker, WorkerCmd, WorkerEvent};
 
 // ── signal flags ─────────────────────────────────────────────────────────
@@ -200,7 +200,7 @@ impl Daemon {
             let _ = worker_done_tx.send(());
         });
 
-        let mut daemon = Self {
+        let daemon = Self {
             config_iface: config_iface.to_string(),
             notify_script: notify_script.map(str::to_string),
             overrides: overrides.clone(),
@@ -331,8 +331,6 @@ impl Daemon {
         )
     }
 
-    }
-
     // ── event handlers (the gate) ────────────────────────────────────────
 
     fn on_worker_event(&mut self, ev: WorkerEvent) {
@@ -453,8 +451,21 @@ impl Daemon {
         }
         if changed {
             log::info!("line params changed — reconfiguring");
+            // Deprovision the old link on the board before retraining.
+            if self.link_provisioned {
+                if let Some(vlan) = self.provisioned_vlan {
+                    let xfer = self
+                        .state
+                        .lock()
+                        .unwrap()
+                        .xfer_mode
+                        .unwrap_or(self.cfg.xfer_mode);
+                    let _ = self.cmd_tx.send(WorkerCmd::RemoveLink { xfer, vlan });
+                }
+            }
             self.config_applied = false;
             self.link_provisioned = false;
+            self.vlan_owned = false;
             self.tc_emitted = false;
             let _ = self.cmd_tx.send(WorkerCmd::LineDown);
             let _ = self.cmd_tx.send(WorkerCmd::ApplyLineConfig);
@@ -517,6 +528,23 @@ impl Daemon {
         // Teardown through the gate: monitor mode never configured the
         // board, so it must not tear it down either.
         if !self.monitor {
+            // Deprovision the board side first (op6/op16), then the line.
+            if self.link_provisioned {
+                if let Some(vlan) = self.provisioned_vlan {
+                    let xfer = match self.cfg.xfer_mode {
+                        XferMode::Ptm => XferMode::Ptm,
+                        XferMode::Atm => XferMode::Atm,
+                        // Auto: the observed mode was stored on Up.
+                        XferMode::Auto => self
+                            .state
+                            .lock()
+                            .unwrap()
+                            .xfer_mode
+                            .unwrap_or(XferMode::Ptm),
+                    };
+                    let _ = self.cmd_tx.send(WorkerCmd::RemoveLink { xfer, vlan });
+                }
+            }
             let _ = self.cmd_tx.send(WorkerCmd::LineDown);
         }
         let _ = self.cmd_tx.send(WorkerCmd::Shutdown);

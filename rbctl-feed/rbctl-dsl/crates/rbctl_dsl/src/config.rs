@@ -216,7 +216,8 @@ impl DslConfig {
         Self::build(&mut uci, overrides)
     }
 
-    /// Load from a specific UCI config dir (for testing).
+    /// Load from a specific UCI config dir (testing hook).
+    #[allow(dead_code)]
     pub fn load_from_dir(config_dir: &str, overrides: &CliOverrides) -> Result<Self, ConfigError> {
         let mut uci = rust_uci::Uci::new().map_err(|e| ConfigError(e.to_string()))?;
         uci.set_config_dir(config_dir).map_err(|e| ConfigError(e.to_string()))?;

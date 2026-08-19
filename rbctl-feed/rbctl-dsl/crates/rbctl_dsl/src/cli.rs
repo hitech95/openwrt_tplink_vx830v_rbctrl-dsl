@@ -6,7 +6,7 @@
 //! only connects and speaks it. Dependency direction is strictly
 //! cli → daemon::ipc, never the reverse.
 
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
@@ -63,4 +63,19 @@ pub fn send_firmware(path: &str, on_progress: &mut dyn FnMut(&str)) -> io::Resul
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::ipc::IpcCmd;
+
+    #[test]
+    fn cmd_from_arg() {
+        assert_eq!(IpcCmd::from_arg("status"), Some(IpcCmd::Status));
+        assert_eq!(IpcCmd::from_arg("reload"), Some(IpcCmd::Reload));
+        assert_eq!(IpcCmd::from_arg("restart-line"), Some(IpcCmd::Restart));
+        assert_eq!(IpcCmd::from_arg("stop"), Some(IpcCmd::Stop));
+        assert_eq!(IpcCmd::from_arg("bogus"), None);
+    }
 }

@@ -38,6 +38,9 @@ pub enum WorkerCmd {
     /// op5/op15 — provision the data-plane link. The daemon computed `xfer`
     /// and `vlan`; the worker only executes the matching board opcode.
     ProvisionLink { xfer: XferMode, vlan: u16 },
+    /// op6/op16 — deprovision the data-plane link on the board (the host
+    /// VLAN is deleted by the daemon).
+    RemoveLink { xfer: XferMode, vlan: u16 },
     /// op3 + delay + op1 — bounce the line.
     RestartLine,
     /// op3 — best-effort teardown (zero retries).
@@ -148,12 +151,15 @@ impl BoardWorker {
                 }
             }
             WorkerCmd::ProvisionLink { xfer, vlan } => {
+                debug_assert!(matches!(xfer, XferMode::Ptm | XferMode::Atm));
                 let result = match xfer {
                     XferMode::Ptm => self.board.ptm_link_add(0, 0, 0, vlan),
                     XferMode::Atm => {
                         let params = config::atm_params(self.cfg.atm.as_ref(), vlan);
                         self.board.atm_link_add(&params)
                     }
+                    // The daemon always resolves Auto to the observed mode
+                    // before sending ProvisionLink.
                     XferMode::Auto => {
                         log::warn!("ProvisionLink with XferMode::Auto — ignored");
                         return;
@@ -164,6 +170,19 @@ impl BoardWorker {
                         let _ = self.event_tx.send(WorkerEvent::LinkProvisioned { vlan: v });
                     }
                     Err(e) => log::warn!("link provisioning ({xfer:?}): {e} (daemon will retry)"),
+                }
+            }
+            WorkerCmd::RemoveLink { xfer, vlan } => {
+                // The board's op6/op16 delete handler tears down its own
+                // side; retries are unnecessary at shutdown (best effort).
+                self.board.set_retries(constants::BOARD_SHUTDOWN_RETRIES);
+                let result = match xfer {
+                    XferMode::Ptm => self.board.ptm_link_del(vlan),
+                    XferMode::Atm => self.board.atm_link_del(vlan),
+                    XferMode::Auto => return,
+                };
+                if let Err(e) = result {
+                    log::warn!("link teardown ({xfer:?} vlan={vlan}): {e}");
                 }
             }
             WorkerCmd::RestartLine => {

@@ -114,10 +114,3 @@ pub fn sniff(config_iface: &str, dump_file: Option<&str>) {
     }
 }
 
-// ── helpers ───────────────────────────────────────────────────────────
-
-fn ifindex(name: &str) -> Result<u32, String> {
-    let c = CString::new(name).unwrap();
-    let idx = unsafe { libc::if_nametoindex(c.as_ptr()) };
-    if idx == 0 { Err(format!("if_nametoindex({name}) failed")) } else { Ok(idx) }
-}

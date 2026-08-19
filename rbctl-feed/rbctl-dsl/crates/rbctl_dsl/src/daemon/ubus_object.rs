@@ -17,7 +17,7 @@ use ubus::server::UbusObject;
 
 use crate::utils::mapping;
 
-use super::state::SharedState;
+use super::state::{DslState, SharedState};
 
 // ── object builder ───────────────────────────────────────────────────────
 

@@ -39,6 +39,8 @@ pub enum IpcCmd {
 }
 
 impl IpcCmd {
+    /// Parse a CLI verb into an IPC command (client-side helper).
+    #[allow(dead_code)]
     pub fn from_arg(s: &str) -> Option<Self> {
         match s {
             "status" | "info" => Some(Self::Status),
@@ -97,7 +99,9 @@ impl StatusSnapshot {
         )
     }
 
-    /// Parse `key: value` lines back into a snapshot.
+    /// Parse `key: value` lines back into a snapshot. Round-trip helper
+    /// for the wire format (used by tests; kept for future consumers).
+    #[allow(dead_code)]
     pub fn from_lines(body: &str) -> Self {
         let mut s = Self::default();
         for line in body.lines() {

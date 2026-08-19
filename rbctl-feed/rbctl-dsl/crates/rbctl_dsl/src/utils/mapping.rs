@@ -7,7 +7,11 @@
 use rbctl_proto::oem::unpack::LinkStatus;
 
 // ── LSTATE_MAP ABI enum values (from dsl_cpe_ubus.c, do not renumber) ────
+//
+// IDLE / SHOWTIME_NO_SYNC are unused by this board's state machine but are
+// part of the Lantiq ABI surface — kept for completeness.
 
+#[allow(dead_code)]
 pub mod lstate {
     pub const UNKNOWN: i32 = -1;
     pub const NOT_INITIALIZED: i32 = 0;

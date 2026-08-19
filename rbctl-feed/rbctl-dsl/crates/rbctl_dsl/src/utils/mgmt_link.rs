@@ -17,6 +17,9 @@ pub struct MgmtLinkStatus {
     /// Whether the interface name resolves to an index (if_nametoindex).
     pub exists: bool,
     /// operstate ("up", "down", "unknown") — None if unreadable.
+    /// Informational: included for probe completeness; not read by the
+    /// daemon's readiness logic (which uses carrier).
+    #[allow(dead_code)]
     pub operstate: Option<String>,
     /// Carrier present on the config interface.
     pub carrier: bool,
