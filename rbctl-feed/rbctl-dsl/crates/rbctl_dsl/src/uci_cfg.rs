@@ -10,7 +10,11 @@
 //! The `parse_*` functions are pure and host-testable. The `DslConfig::load`
 //! method wraps them with UCI access (requires libuci, target-only).
 
-use rbctl_proto::oem::pack::{Annex, AtmEncap, AtmLinkType, AtmQos, Modulation, Vdsl2Profiles};
+use rbctl_proto::oem::pack::{
+    Annex, AtmEncap, AtmLinkParams, AtmLinkType, AtmQos, Modulation, Vdsl2Profiles,
+};
+
+use crate::constants;
 
 // ── error type ───────────────────────────────────────────────────────────
 
@@ -44,6 +48,28 @@ pub struct AtmConfig {
     pub link_type: AtmLinkType,
     pub qos: AtmQos,
     pub pcr: u32,
+}
+
+/// Build op5 wire params from the UCI ATM config (or defaults) plus the
+/// daemon-computed transport VLAN id.
+pub fn atm_params(atm: Option<&AtmConfig>, vlan_id: u16) -> AtmLinkParams<'static> {
+    let a = atm.cloned().unwrap_or(AtmConfig {
+        vpi: constants::ATM_DEFAULT_VPI,
+        vci: constants::ATM_DEFAULT_VCI,
+        encap: AtmEncap::Llc,
+        link_type: AtmLinkType::Eoa,
+        qos: AtmQos::Ubr,
+        pcr: 0,
+    });
+    let mut p = AtmLinkParams::default();
+    p.vpi = a.vpi;
+    p.vci = a.vci;
+    p.encap = a.encap;
+    p.link_type = a.link_type;
+    p.qos = a.qos;
+    p.pcr = a.pcr;
+    p.vlan_id = vlan_id;
+    p
 }
 
 #[derive(Debug, Clone)]

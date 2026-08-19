@@ -38,7 +38,7 @@ use crate::hotplug::{self, LineEvent};
 use crate::ipc::{IpcAction, IpcListener, StatusSnapshot};
 use crate::uci_cfg::{CliOverrides, DslConfig, XferMode};
 use crate::ubus_obj;
-use crate::utils::{mapping, ubus as ubus_util, xdsl};
+use crate::utils::{mapping, ubus as ubus_util, vlan};
 
 use signals::{SHOULD_EXIT as EXIT, SHOULD_RELOAD as RELOAD, SHOULD_RESTART_LINE as RESTART};
 
@@ -77,7 +77,7 @@ pub(crate) struct Daemon {
     cmd_tx: mpsc::Sender<WorkerCmd>,
     event_rx: mpsc::Receiver<WorkerEvent>,
     worker_done_rx: mpsc::Receiver<()>,
-    ubus_conn: Option<ubus::server::UbusConnection<crate::transport::UnixUbusTransport>>,
+    ubus_conn: Option<ubus::server::UbusConnection<crate::utils::ubus_transport::UnixUbusTransport>>,
 
     // ── gate state (all board-operation decisions) ──
     cfg: DslConfig,
@@ -294,7 +294,7 @@ impl Daemon {
         let board_reachable = st
             .last_poll_ok
             .map_or(false, |t| t.elapsed() < constants::POLL_STALE_TIMEOUT);
-        let link = crate::mgmt_link::MgmtLinkStatus::probe(&self.config_iface);
+        let link = crate::utils::mgmt_link::MgmtLinkStatus::probe(&self.config_iface);
 
         let snap = match &st.line_obj {
             Some(line) => {
@@ -387,7 +387,7 @@ impl Daemon {
                 // Track whether WE created the host-side interface, so
                 // shutdown only deletes what it owns (a pre-existing VLAN
                 // from an earlier daemon run is left alone).
-                match xdsl::create_vlan_iface(&self.parent, vlan) {
+                match vlan::create_vlan_iface(&self.parent, vlan) {
                     Ok(true) => {
                         self.vlan_owned = true;
                         log::info!("created {}.{}", self.parent, vlan);
@@ -531,7 +531,7 @@ impl Daemon {
         // daemon run, operator-created) is left in place.
         if !self.monitor && self.vlan_owned {
             if let Some(vlan) = self.provisioned_vlan {
-                xdsl::delete_vlan_iface(&self.parent, vlan);
+                vlan::delete_vlan_iface(&self.parent, vlan);
             }
         }
         let _ = std::fs::remove_file(crate::ipc::SOCK_PATH);

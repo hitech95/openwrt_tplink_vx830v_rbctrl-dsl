@@ -10,10 +10,10 @@ use crate::constants;
 /// when ubus is unavailable — callers treat it as optional.
 pub fn connect_and_register(
     obj: ubus::server::UbusObject,
-) -> Option<ubus::server::UbusConnection<crate::transport::UnixUbusTransport>> {
+) -> Option<ubus::server::UbusConnection<crate::utils::ubus_transport::UnixUbusTransport>> {
     let path = find_socket()?;
     log::info!("ubus: connecting to {path}");
-    let transport = match crate::transport::UnixUbusTransport::connect(&path) {
+    let transport = match crate::utils::ubus_transport::UnixUbusTransport::connect(&path) {
         Ok(t) => t,
         Err(e) => {
             log::warn!("ubus: connect to {path} failed: {e}");

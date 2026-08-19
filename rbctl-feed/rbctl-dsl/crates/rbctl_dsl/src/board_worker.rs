@@ -26,7 +26,7 @@ use crate::constants;
 use crate::daemon::signals::SHOULD_EXIT;
 use crate::uci_cfg::{DslConfig, XferMode};
 use crate::ubus_obj::SharedState;
-use crate::utils::xdsl;
+use crate::uci_cfg;
 
 /// Worker tick — bounds how long a command waits before being acted upon.
 const WORKER_TICK: Duration = constants::POLL_TICK;
@@ -151,7 +151,7 @@ impl BoardWorker {
                 let result = match xfer {
                     XferMode::Ptm => self.board.ptm_link_add(0, 0, 0, vlan),
                     XferMode::Atm => {
-                        let params = xdsl::atm_params(self.cfg.atm.as_ref(), vlan);
+                        let params = uci_cfg::atm_params(self.cfg.atm.as_ref(), vlan);
                         self.board.atm_link_add(&params)
                     }
                     XferMode::Auto => {

@@ -6,7 +6,7 @@ use rbctl_proto::oem::validate;
 
 use crate::board::Board;
 use crate::constants;
-use crate::mgmt_link;
+use crate::utils::mgmt_link;
 use crate::uci_cfg::{CliOverrides, DslConfig, XferMode};
 
 /// Result of a successful startup — the ingredients the control loop needs.

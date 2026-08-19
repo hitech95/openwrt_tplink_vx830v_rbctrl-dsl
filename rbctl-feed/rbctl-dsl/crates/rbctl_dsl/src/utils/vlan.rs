@@ -1,40 +1,12 @@
-//! xDSL data-plane helpers — ATM/PTM link parameter construction and
-//! host-side VLAN interface management.
+//! Host-side VLAN interface management (transport VLAN create/delete).
 //!
-//! These were previously inline in `daemon.rs` but are used by both the
-//! daemon startup and the board worker (for deferred provisioning).
+//! Generic rtnetlink helpers — no types from other crate modules.
 
-use rbctl_proto::oem::pack::{AtmEncap, AtmLinkParams, AtmLinkType, AtmQos};
 use tinyln_rs::rtnl::RtnlLink;
-
-use crate::constants;
-use crate::uci_cfg::AtmConfig;
-
-/// Build [`AtmLinkParams`] from the UCI ATM config (or defaults) plus the
-/// computed transport VLAN id.
-pub fn atm_params(atm: Option<&AtmConfig>, vlan_id: u16) -> AtmLinkParams<'static> {
-    let a = atm.cloned().unwrap_or(AtmConfig {
-        vpi: constants::ATM_DEFAULT_VPI,
-        vci: constants::ATM_DEFAULT_VCI,
-        encap: AtmEncap::Llc,
-        link_type: AtmLinkType::Eoa,
-        qos: AtmQos::Ubr,
-        pcr: 0,
-    });
-    let mut p = AtmLinkParams::default();
-    p.vpi = a.vpi;
-    p.vci = a.vci;
-    p.encap = a.encap;
-    p.link_type = a.link_type;
-    p.qos = a.qos;
-    p.pcr = a.pcr;
-    p.vlan_id = vlan_id;
-    p
-}
 
 /// Check whether a VLAN sub-interface (`parent.vlan_id`) already exists.
 pub fn vlan_iface_exists(parent: &str, vlan_id: u16) -> bool {
-    crate::mgmt_link::iface_exists(&format!("{parent}.{vlan_id}"))
+    crate::utils::mgmt_link::iface_exists(&format!("{parent}.{vlan_id}"))
 }
 
 /// Create a host-side VLAN sub-interface (`parent.vlan_id`) and bring it up.

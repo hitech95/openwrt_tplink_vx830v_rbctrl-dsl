@@ -12,7 +12,7 @@ use tinyln_rs::rtnl::RtnlLink;
 
 use crate::board::Board;
 use crate::constants;
-use crate::mgmt_link;
+use crate::utils::mgmt_link;
 
 // ── selftest board params (static, no user input) ──────────────────────
 // Matches the board's own boot defaults — the config that trains.
