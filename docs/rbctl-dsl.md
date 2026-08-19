@@ -175,23 +175,40 @@ This is where 86 of the workspace's `unsafe` blocks live — all reviewed in
 
 ### `rbctl_dsl` — the daemon binary
 
-This is what ships in the `.apk`. One binary target (`rbctl-dsl`), 12 source
-modules:
+This is what ships in the `.apk`. One binary target (`rbctl-dsl`), organized
+as daemon-centric subsystems — directories are runtime subsystems, single
+files stay flat, `utils/` holds only dependency-light generic helpers:
 
 | Module | Role |
 |---|---|
 | `main.rs` | `clap` subcommand dispatch (`daemon` / `status` / `reload` / `restart-line` / `stop` / `selftest` / `sniff`) |
-| `daemon.rs` | Startup sequence, signal handlers, control loop, clean shutdown |
+| `cli.rs` | IPC client half — `send_command` / `send_firmware` (speaks the daemon's protocol) |
+| `config.rs` | UCI config loader → typed `DslConfig`; `atm_params()` op5 wire builder |
+| `logging.rs` | stderr / syslog init |
+| `constants.rs` | shared constants (prefixed groups: `BOARD_`, `POLL_`, `VLAN_`, `IPC_`, …) |
 | `board.rs` | `Board<T: Transport>` — typed methods for all 8 opcodes, seq, retries, checksum verify |
-| `board_worker.rs` | Background thread that owns the board + 1 s status poll |
-| `transport.rs` | `UnixUbusTransport` — non-blocking AF_UNIX adapter for ubus-zero |
-| `uci_cfg.rs` | UCI config loader → typed `DslConfig` |
-| `ubus_obj.rs` | ubus `dsl` object (`metrics` / `statistics` methods, Lantiq ABI) |
-| `ipc.rs` | `/var/run/rbctl-dsl.sock` control socket (line-based ASCII) |
-| `hotplug.rs` | Forks the DSL notify script on line-state transitions |
-| `selftest.rs` | `--selftest` and `--sniff` modes (socket + VLAN + board probe, pcap dump) |
-| `pcap.rs` | pcap writer for `--sniff --dump` |
-| `log_init.rs` | stderr / syslog init |
+| `daemon/mod.rs` | **The gate**: `Daemon` struct, control loop, signal flags, all board-operation decisions |
+| `daemon/init.rs` | Startup phase: config load + validation, mgmt-link probe, board socket |
+| `daemon/worker.rs` | `BoardWorker` — op2 poll + `WorkerCmd` executor (the daemon's agent, no decisions) |
+| `daemon/state.rs` | `DslState` / `SharedState` / `FwStatus` — worker↔daemon blackboard |
+| `daemon/ubus_object.rs` | ubus `dsl` object (`metrics` / `statistics` methods, Lantiq ABI) |
+| `daemon/snapshot.rs` | `StatusSnapshot` builder for IPC `STATUS` |
+| `daemon/ipc.rs` | IPC server + wire protocol (`IpcListener`, `IpcCmd`, `StatusSnapshot`) |
+| `daemon/hotplug.rs` | Forks the DSL notify script on line-state transitions |
+| `daemon/firmware.rs` | `FIRMWARE <path>` IPC streaming handler |
+| `diag/selftest.rs` | `--selftest` (socket + VLAN + board probe, auto-modulation sequence) |
+| `diag/sniff.rs` | `--sniff` passive 0x88B5/0x88B6 listener + hexdump |
+| `diag/pcap.rs` | pcap writer for `--sniff --dump` |
+| `utils/mapping.rs` | protocol enums → LuCI/IPC strings, `lstate` ABI consts |
+| `utils/vlan.rs` | transport VLAN netdev create/delete/exists |
+| `utils/mgmt_link.rs` | read-only sysfs management-interface probe (`MgmtLinkStatus`) |
+| `utils/ubus.rs` | ubus socket discovery + connect/register |
+| `utils/ubus_transport.rs` | non-blocking AF_UNIX adapter for ubus-zero |
+
+Layering (acyclic): `main → daemon/cli/diag → board/config/utils → external
+crates`. The daemon consumes `WorkerEvent`s and issues `WorkerCmd`s — every
+board-operation decision (monitor mode, retries, auto provisioning,
+teardown) lives in `daemon/mod.rs`.
 
 **Dependencies:** `rust-uci` (git, for UCI), `ubus-zero` (git, pure-Rust ubus
 client+server), `af_packet` + `tinyln-rs` + `rbctl_proto` (workspace path
