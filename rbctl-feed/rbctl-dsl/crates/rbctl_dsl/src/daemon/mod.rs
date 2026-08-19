@@ -88,6 +88,53 @@ use SHOULD_EXIT as EXIT;
 use SHOULD_RELOAD as RELOAD;
 use SHOULD_RESTART_LINE as RESTART;
 
+// ── single-instance guard ────────────────────────────────────────────────
+
+/// Exclusive `flock` on [`constants::DAEMON_LOCK_PATH`] — held for the
+/// daemon's lifetime.
+///
+/// The kernel releases the lock when the process dies (any exit path,
+/// including SIGKILL), so there is no stale-pidfile race to handle. This
+/// prevents a second daemon from running concurrently: a second instance
+/// would steal the IPC socket (`bind()` unlinks the stale path), collide
+/// with the first on the ubus `dsl` object (ADD_OBJECT → duplicate path →
+/// `Status(2)`), and double-configure the board (op1/op3/op15).
+struct PidLock {
+    fd: std::os::unix::io::OwnedFd,
+}
+
+impl PidLock {
+    /// Acquire the singleton lock. `Err` if another daemon holds it.
+    fn acquire(path: &str) -> std::io::Result<Self> {
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)?;
+        match unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } {
+            0 => {
+                // Best-effort pid content for diagnostics; the lock itself
+                // is the source of truth, never the file contents.
+                let _ = std::fs::write(path, format!("{}\n", std::process::id()));
+                Ok(Self { fd: file.into() })
+            }
+            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock => {
+                let holder = std::fs::read_to_string(path)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<i32>().ok())
+                    .map(|pid| format!(" (pid {pid}?)"))
+                    .unwrap_or_default();
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!("another rbctl-dsl instance is running{holder}"),
+                ))
+            }
+            _ => Err(std::io::Error::last_os_error()),
+        }
+    }
+}
+
 // ── free helpers ─────────────────────────────────────────────────────────
 
 fn link_status_to_event(status: LinkStatus) -> LineEvent {
@@ -120,6 +167,8 @@ pub(crate) struct Daemon {
     parent: String,
     pub(super) state: SharedState,
     ipc: Option<IpcListener>,
+    /// Single-instance flock — held for the daemon's lifetime.
+    _pid_lock: PidLock,
     cmd_tx: mpsc::Sender<WorkerCmd>,
     event_rx: mpsc::Receiver<WorkerEvent>,
     worker_done_rx: mpsc::Receiver<()>,
@@ -154,6 +203,18 @@ impl Daemon {
         overrides: &CliOverrides,
         monitor: bool,
     ) -> Result<Self, i32> {
+        // 0. Single-instance guard — before touching the board, the IPC
+        //    socket, or ubus. A concurrent instance would steal the control
+        //    socket, collide on the ubus 'dsl' object (duplicate path), and
+        //    double-configure the line. Hard-fail, never degrade.
+        let _pid_lock = match PidLock::acquire(constants::DAEMON_LOCK_PATH) {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("singleton lock: {e}");
+                return Err(1);
+            }
+        };
+
         let init = match init::startup(config_iface, overrides) {
             Ok(i) => i,
             Err(code) => return Err(code),
@@ -210,6 +271,7 @@ impl Daemon {
             parent,
             state,
             ipc,
+            _pid_lock,
             cmd_tx,
             event_rx,
             worker_done_rx,
@@ -640,6 +702,25 @@ pub fn run(
 mod tests {
     use super::*;
     use rbctl_proto::oem::pack::Annex;
+
+    #[test]
+    fn pid_lock_is_exclusive() {
+        let dir = std::env::temp_dir().join(format!("rbctl-lock-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("daemon.lock");
+        let _ = std::fs::remove_file(&path);
+
+        let first = PidLock::acquire(path.to_str().unwrap()).unwrap();
+        let second = PidLock::acquire(path.to_str().unwrap());
+        assert!(second.is_err(), "second acquire must fail");
+        let msg = second.err().unwrap().to_string();
+        assert!(msg.contains("another rbctl-dsl instance"), "got: {msg}");
+
+        // Releasing (drop) frees the lock for the next acquirer.
+        drop(first);
+        assert!(PidLock::acquire(path.to_str().unwrap()).is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn link_status_events() {

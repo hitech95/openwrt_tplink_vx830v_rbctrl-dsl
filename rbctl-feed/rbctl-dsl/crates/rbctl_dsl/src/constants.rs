@@ -115,6 +115,9 @@ pub const BUF_UBUS_RX_CAPACITY: usize = 1024;
 
 // ── DAEMON: daemon lifecycle ────────────────────────────────────────────
 
+/// Single-instance lock file (flock'd for the daemon's lifetime).
+pub const DAEMON_LOCK_PATH: &str = "/var/run/rbctl-dsl.lock";
+
 /// How long the main thread waits for the board worker to finish its
 /// best-effort shutdown before abandoning it.
 pub const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
