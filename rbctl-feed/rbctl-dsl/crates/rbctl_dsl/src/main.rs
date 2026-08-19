@@ -5,9 +5,8 @@ mod cli;
 mod config;
 mod constants;
 mod daemon;
+mod diag;
 mod logging;
-mod pcap;
-mod selftest;
 mod utils;
 
 use clap::{Parser, Subcommand};
@@ -219,12 +218,12 @@ fn main() {
             }
         }
         Command::Selftest(args) => {
-            let code = selftest::Selftest::run(&args.config_iface);
+            let code = diag::selftest::Selftest::run(&args.config_iface);
             log::info!("selftest exit code: {code}");
             std::process::exit(code);
         }
         Command::Sniff(args) => {
-            selftest::sniff(&args.common.config_iface, args.dump.as_deref());
+            diag::sniff::sniff(&args.common.config_iface, args.dump.as_deref());
         }
     }
 }
