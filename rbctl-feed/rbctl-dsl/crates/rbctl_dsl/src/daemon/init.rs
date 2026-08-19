@@ -13,8 +13,6 @@ use crate::uci_cfg::{CliOverrides, DslConfig, XferMode};
 pub(crate) struct Init {
     pub board: Board,
     pub cfg: DslConfig,
-    /// Transport VLAN id = base + 2000 (requested; board may assign another).
-    pub transport_vlan: u16,
     /// Parent interface of the config iface (host-side VLAN anchor).
     pub parent: String,
 }
@@ -67,9 +65,6 @@ pub(crate) fn startup(
         log::warn!("xfer_mode=atm but no atm-bridge section found — using defaults (vpi=8 vci=35 llc bridged)");
     }
 
-    // Compute transport VLAN id from base index
-    let transport_vlan = cfg.transport_vlan_base as u16 + constants::VLAN_TRANSPORT_BASE_OFFSET;
-
     // 2. Verify management interface — read-only carrier check via
     //    MgmtLinkStatus. The daemon never alters management interfaces;
     //    if they're down, dsl_control / netifd is responsible.
@@ -105,5 +100,5 @@ pub(crate) fn startup(
         .unwrap_or(config_iface)
         .to_string();
 
-    Ok(Init { board, cfg, transport_vlan, parent })
+    Ok(Init { board, cfg, parent })
 }

@@ -35,8 +35,9 @@ const WORKER_TICK: Duration = constants::POLL_TICK;
 pub enum WorkerCmd {
     /// op1 — apply `cfg` line config to the board.
     ApplyLineConfig,
-    /// op5/op15 — provision the data-plane link for `xfer`.
-    ProvisionLink { xfer: XferMode },
+    /// op5/op15 — provision the data-plane link. The daemon computed `xfer`
+    /// and `vlan`; the worker only executes the matching board opcode.
+    ProvisionLink { xfer: XferMode, vlan: u16 },
     /// op3 + delay + op1 — bounce the line.
     RestartLine,
     /// op3 — best-effort teardown (zero retries).
@@ -146,9 +147,7 @@ impl BoardWorker {
                     Err(e) => log::warn!("line_config_up: {e} (daemon will retry)"),
                 }
             }
-            WorkerCmd::ProvisionLink { xfer } => {
-                let vlan = self.cfg.transport_vlan_base as u16
-                    + constants::VLAN_TRANSPORT_BASE_OFFSET;
+            WorkerCmd::ProvisionLink { xfer, vlan } => {
                 let result = match xfer {
                     XferMode::Ptm => self.board.ptm_link_add(0, 0, 0, vlan),
                     XferMode::Atm => {
