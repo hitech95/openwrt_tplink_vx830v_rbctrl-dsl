@@ -7,7 +7,7 @@ use rbctl_proto::oem::validate;
 use crate::board::Board;
 use crate::constants;
 use crate::utils::mgmt_link;
-use crate::uci_cfg::{CliOverrides, DslConfig, XferMode};
+use crate::config::{CliOverrides, DslConfig, XferMode};
 
 /// Result of a successful startup — the ingredients the control loop needs.
 pub(crate) struct Init {

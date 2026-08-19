@@ -6,15 +6,15 @@ mod constants;
 mod daemon;
 mod hotplug;
 mod ipc;
-mod log_init;
+mod logging;
 mod pcap;
 mod selftest;
 mod ubus_obj;
-mod uci_cfg;
+mod config;
 mod utils;
 
 use clap::{Parser, Subcommand};
-use uci_cfg::CliOverrides;
+use config::CliOverrides;
 
 #[derive(Parser)]
 #[command(
@@ -162,12 +162,12 @@ fn main() {
     match &cli.command {
         Command::Daemon(args) => {
             if args.syslog {
-                log_init::init_syslog();
+                logging::init_syslog();
             } else {
-                log_init::init_stderr();
+                logging::init_stderr();
             }
         }
-        _ => log_init::init_stderr(),
+        _ => logging::init_stderr(),
     }
 
     match cli.command {

@@ -24,9 +24,9 @@ use rbctl_proto::oem::unpack::{DataPath, LinkStatus};
 use crate::board::{Board, BoardError, FwProgress, FwUpgradeResult};
 use crate::constants;
 use crate::daemon::signals::SHOULD_EXIT;
-use crate::uci_cfg::{DslConfig, XferMode};
+use crate::config::{DslConfig, XferMode};
 use crate::ubus_obj::SharedState;
-use crate::uci_cfg;
+use crate::config;
 
 /// Worker tick — bounds how long a command waits before being acted upon.
 const WORKER_TICK: Duration = constants::POLL_TICK;
@@ -151,7 +151,7 @@ impl BoardWorker {
                 let result = match xfer {
                     XferMode::Ptm => self.board.ptm_link_add(0, 0, 0, vlan),
                     XferMode::Atm => {
-                        let params = uci_cfg::atm_params(self.cfg.atm.as_ref(), vlan);
+                        let params = config::atm_params(self.cfg.atm.as_ref(), vlan);
                         self.board.atm_link_add(&params)
                     }
                     XferMode::Auto => {

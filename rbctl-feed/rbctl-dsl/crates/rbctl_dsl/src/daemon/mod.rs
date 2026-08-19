@@ -36,7 +36,7 @@ use crate::board_worker::{BoardWorker, WorkerCmd, WorkerEvent};
 use crate::constants;
 use crate::hotplug::{self, LineEvent};
 use crate::ipc::{IpcAction, IpcListener, StatusSnapshot};
-use crate::uci_cfg::{CliOverrides, DslConfig, XferMode};
+use crate::config::{CliOverrides, DslConfig, XferMode};
 use crate::ubus_obj;
 use crate::utils::{mapping, ubus as ubus_util, vlan};
 

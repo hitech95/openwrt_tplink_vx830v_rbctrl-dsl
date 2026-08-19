@@ -16,7 +16,7 @@ use ubus::server::UbusObject;
 use ubus::blobmsg::{BlobBuilder, BlobMsgTable};
 use ubus::error::UbusError;
 
-use crate::uci_cfg::XferMode;
+use crate::config::XferMode;
 use crate::utils::mapping;
 
 // ── shared state ─────────────────────────────────────────────────────────

@@ -8,7 +8,7 @@
 
 use std::process::Command;
 
-use crate::uci_cfg::XferMode;
+use crate::config::XferMode;
 
 /// Line-state events mapped to hotplug `DSL_INTERFACE_STATUS` values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
