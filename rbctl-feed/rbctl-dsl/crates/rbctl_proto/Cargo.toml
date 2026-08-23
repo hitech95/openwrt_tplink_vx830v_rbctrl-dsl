@@ -14,6 +14,9 @@ publish = false
 # When disabled, the crate is no_std and contains only the OEM core.
 default = []
 protobuf = ["dep:prost", "dep:prost-build", "dep:protox"]
+# Exposes `oem::board_sim` — a model of the real firmware's opcode handlers
+# (ported from the disassembled remote_board binary) for downstream tests.
+test-sim = []
 
 [lib]
 name = "rbctl_proto"

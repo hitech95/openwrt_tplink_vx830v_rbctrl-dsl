@@ -18,6 +18,11 @@ pub mod pack;
 pub mod unpack;
 pub mod validate;
 
+// Board firmware simulator — test/feature-gated so it never ships in
+// release binaries (see board_sim.rs docs).
+#[cfg(any(test, feature = "test-sim"))]
+pub mod board_sim;
+
 // Re-export commonly used types at the oem:: level.
 pub use firmware::{
     announce_payload, complete_payload, parse_header, validate_image, verify_payload,
