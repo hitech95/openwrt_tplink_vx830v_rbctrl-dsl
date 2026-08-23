@@ -155,55 +155,50 @@ impl<T: Transport> Board<T> {
 
     // ── opcodes ────────────────────────────────────────────────────────
 
-    /// **Opcode 1** — DSL line config up.
+    /// **Opcode 1** — apply DSL line config. A config that **differs** from
+    /// the board's cache (`l_lastDslCfg`) takes the full apply path, which
+    /// ends in `wan adsl open` — the only host-reachable way to start
+    /// training. An identical config is deduplicated: status 0, no side
+    /// effects, **no open**.
+    ///
+    /// Payload: the 12-byte descriptor directly (modulation at byte 0) —
+    /// the opcode travels in the frame header, never in the payload.
     pub fn line_config_up(
         &mut self, modulation: Modulation, annex: Annex, profiles: Vdsl2Profiles,
         bitswap: bool, sra: bool,
     ) -> Result<(), BoardError> {
         let line = pack::pack_dsl_line(modulation, annex, bitswap, sra, profiles);
-        let mut pl = vec![0x01];
-        pl.extend_from_slice(&line);
-        let r = self.request(1, &pl)?;
-        let data = strip_echo(&r, 0x01);
-        if !data.is_empty() && data[0] != 0 {
-            return Err(BoardError::BadResponse("status != 0"));
-        }
-        Ok(())
+        let r = self.request(1, &line)?;
+        ack_status(&r, false)
     }
 
-    /// **Opcode 3** — force a DSL retrain (`wan adsl reset` on the board).
+    /// **Opcode 3** — close the DSL line (`wan adsl close` on the board).
     ///
-    /// Drops the line and re-negotiates with the board's **cached** config.
-    /// This is NOT a board reboot (that is opcode 7). Note: op1 with a
-    /// config identical to the board's cache is deduplicated by `dslCfgSet`
-    /// (no retrain) — op3 is the only reliable way to revive a reset line.
+    /// This is a deliberate line-down: the modem **stops** training. It is
+    /// NOT a retrain — re-opening requires an op1 whose config differs from
+    /// the board cache (see [`line_config_up`]). Used by the shutdown path
+    /// ("daemon stopped ⇒ line down") and user-initiated line bounces.
     pub fn line_retrain(&mut self) -> Result<(), BoardError> {
-        let r = self.request(3, &[0x03])?;
-        let data = strip_echo(&r, 0x03);
-        if !data.is_empty() && data[0] != 0 {
-            return Err(BoardError::BadResponse("status != 0"));
-        }
-        Ok(())
+        let r = self.request(3, &[])?;
+        ack_status(&r, false)
     }
 
     /// **Opcode 2** — get line object.
     pub fn get_line_obj(&mut self) -> Result<LineObj, BoardError> {
-        let r = self.request(2, &[0x02])?;
-        let data = strip_echo(&r, 0x02);
-        if data.len() < 63 {
+        let r = self.request(2, &[])?;
+        if r.len() < 63 {
             return Err(BoardError::BadResponse("line obj reply too short"));
         }
-        unpack::parse_line_obj(data).map_err(BoardError::BadResponse)
+        unpack::parse_line_obj(&r).map_err(BoardError::BadResponse)
     }
 
     /// **Opcode 4** — get channel stats.
     pub fn get_channel_stats(&mut self) -> Result<ChannelStats, BoardError> {
-        let r = self.request(4, &[0x04])?;
-        let data = strip_echo(&r, 0x04);
-        if data.len() < 28 {
+        let r = self.request(4, &[])?;
+        if r.len() < 28 {
             return Err(BoardError::BadResponse("channel stats reply too short"));
         }
-        unpack::parse_channel_stats(data).map_err(BoardError::BadResponse)
+        unpack::parse_channel_stats(&r).map_err(BoardError::BadResponse)
     }
 
     /// **Opcode 5** — ATM link add (init / VLAN discovery).
@@ -213,23 +208,19 @@ impl<T: Transport> Board<T> {
     /// replies are a status word — see [`link_add_short_status`].
     pub fn atm_link_add(&mut self, params: &AtmLinkParams<'_>) -> Result<u16, BoardError> {
         let atm = pack::pack_atm_link(params);
-        let mut pl = vec![0x05];
-        pl.extend_from_slice(&atm);
-        let r = self.request(5, &pl)?;
-        let data = strip_echo(&r, 0x05);
-        if data.len() >= 0x14 {
-            return Ok(u16::from_be_bytes([data[0x12], data[0x13]]));
+        let r = self.request(5, &atm)?;
+        if r.len() >= 0x14 {
+            return Ok(u16::from_be_bytes([r[0x12], r[0x13]]));
         }
-        link_add_short_status(data).map(|_| params.vlan_id)
+        link_add_short_status(&r).map(|_| params.vlan_id)
     }
 
-    /// **Opcode 6** — ATM link delete.
+    /// **Opcode 6** — ATM link delete. Status 1 (not present) is tolerated:
+    /// teardown is best-effort and the link may already be gone.
     pub fn atm_link_del(&mut self, vlan_id: u16) -> Result<(), BoardError> {
         let del = pack::pack_link_del(vlan_id, crate::constants::BOARD_LINK_DEL_TYPE_DELETE);
-        let mut pl = vec![0x06];
-        pl.extend_from_slice(&del);
-        self.request(6, &pl)?;
-        Ok(())
+        let r = self.request(6, &del)?;
+        ack_status(&r, true)
     }
 
     /// **Opcode 15** — PTM/VDSL link add.
@@ -241,23 +232,19 @@ impl<T: Transport> Board<T> {
         &mut self, tag_enable: u8, tag_vid: u16, tag_pri: u16, vlan_id: u16,
     ) -> Result<u16, BoardError> {
         let ptm = pack::pack_ptm_link(tag_enable, tag_vid, tag_pri, vlan_id);
-        let mut pl = vec![0x0F];
-        pl.extend_from_slice(&ptm);
-        let r = self.request(15, &pl)?;
-        let data = strip_echo(&r, 0x0F);
-        if data.len() >= 8 {
-            return Ok(u16::from_be_bytes([data[6], data[7]]));
+        let r = self.request(15, &ptm)?;
+        if r.len() >= 8 {
+            return Ok(u16::from_be_bytes([r[6], r[7]]));
         }
-        link_add_short_status(data).map(|_| vlan_id)
+        link_add_short_status(&r).map(|_| vlan_id)
     }
 
-    /// **Opcode 16** — PTM/VDSL link delete.
+    /// **Opcode 16** — PTM/VDSL link delete. Status 1 (not present) is
+    /// tolerated: teardown is best-effort and the link may already be gone.
     pub fn ptm_link_del(&mut self, vlan_id: u16) -> Result<(), BoardError> {
         let del = pack::pack_link_del(vlan_id, crate::constants::BOARD_LINK_DEL_TYPE_DELETE);
-        let mut pl = vec![0x10];
-        pl.extend_from_slice(&del);
-        self.request(16, &pl)?;
-        Ok(())
+        let r = self.request(16, &del)?;
+        ack_status(&r, true)
     }
 
     // ── opcode 8: firmware upgrade ─────────────────────────────────────
@@ -288,8 +275,9 @@ impl<T: Transport> Board<T> {
         log::info!("fw: announce size={}", image.len());
         let pl = firmware::announce_payload(image.len() as u32);
         let resp = self.request(8, &pl)?;
-        let data = strip_echo(&resp, 0x08);
-        // Response: [stage=0, status(u32 BE), ...]
+        // Response per firmware-upgrade.md: [stage=0, status(u32 BE), ...]
+        // (op8 response layout is doc-derived; not yet hardware-verified)
+        let data = resp.as_slice();
         if data.len() >= 5 {
             let status = u32::from_be_bytes(data[1..5].try_into().unwrap());
             if status != 0 {
@@ -319,7 +307,7 @@ impl<T: Transport> Board<T> {
             payload.extend_from_slice(chunk);
 
             let resp = self.request(8, &payload)?;
-            let data = strip_echo(&resp, 0x08);
+            let data = resp.as_slice();
 
             // ACK: [stage=1, last_good_index(u32 BE), ...]
             if data.len() >= 5 {
@@ -343,7 +331,7 @@ impl<T: Transport> Board<T> {
         log::info!("fw: verify");
         let pl = firmware::verify_payload();
         let resp = self.request(8, &pl)?;
-        let data = strip_echo(&resp, 0x08);
+        let data = resp.as_slice();
         if data.len() >= 5 {
             let status = u32::from_be_bytes(data[1..5].try_into().unwrap());
             if status != 0 {
@@ -360,7 +348,7 @@ impl<T: Transport> Board<T> {
         log::info!("fw: complete");
         let pl = firmware::complete_payload();
         let resp = self.request(8, &pl)?;
-        let data = strip_echo(&resp, 0x08);
+        let data = resp.as_slice();
         // Response: [stage=3, version(u32 BE), status(u8), ...]
         let mut version = 0u32;
         let mut status = 0u8;
@@ -410,18 +398,30 @@ pub struct FwUpgradeResult {
 
 // ── response helpers ─────────────────────────────────────────────────────
 
-/// Strip the echoed opcode byte if present.
+/// Read the status word of an ACK-style response (op1/op3/op6/op16 …).
 ///
-/// The board inconsistently echoes the opcode as the first payload byte:
-/// op2 includes it (confirmed), op4/op5 do not (observed shorter responses).
-/// This helper detects the echo by checking if the first byte matches the
-/// opcode — if so, skip it. Otherwise treat the payload as raw data.
-fn strip_echo<'a>(payload: &'a [u8], opcode: u8) -> &'a [u8] {
-    if payload.first() == Some(&opcode) {
-        &payload[1..]
+/// The board's short replies carry a raw u32 status at payload offset 0 —
+/// there is **no** opcode echo byte in any response (hardware capture,
+/// 2026-08-07; reconfirmed in the field pcaps 2026-08-22).
+///
+/// `soft = true` tolerates status 1 (generic failure, e.g. "entry not
+/// present") — for best-effort teardown, where "already gone" is success.
+/// Any other nonzero status is an error either way.
+fn ack_status(data: &[u8], soft: bool) -> Result<(), BoardError> {
+    let status = if data.len() >= 4 {
+        u32::from_be_bytes(data[0..4].try_into().unwrap())
     } else {
-        payload
+        data.first().copied().map(u32::from).unwrap_or(0)
+    };
+    let tolerated = soft && status == 1;
+    if status != 0 && !tolerated {
+        return Err(BoardError::BadResponse(if soft {
+            "board rejected delete"
+        } else {
+            "status != 0"
+        }));
     }
+    Ok(())
 }
 
 /// Decode the short (4-byte) link-add status reply shared by op5/op15.
@@ -511,42 +511,35 @@ mod tests {
             buf
         }
 
-        /// Generate a default mock response payload for the given subtype.
+        /// Generate a default mock response payload for the given subtype,
+        /// mirroring the real board's response format (no opcode echo —
+        /// `msg_sendResponse` writes the handler buffer directly at +0x18).
         fn default_response_payload(subtype: u8) -> Vec<u8> {
             match subtype {
-                1 | 3 => vec![subtype, 0x00], // status = 0
+                // 4-byte big-endian status word, status = 0.
+                1 | 3 | 6 | 16 => vec![0x00, 0x00, 0x00, 0x00],
                 2 => {
-                    // payload_type + 63 bytes of line obj data
-                    let mut p = vec![0x02];
-                    p.resize(1 + 63, 0);
-                    // Set link_status = Up (0x05) at offset 5 (payload[1+4])
-                    p[5] = 0x05;
-                    // Set down_rate at offset 0x08 (4 bytes BE)
-                    p[1 + 0x08..1 + 0x0c].copy_from_slice(&40000u32.to_be_bytes());
+                    // Raw 63-byte status struct: status(u32) at 0x00,
+                    // link(u8) at 0x04, rates from 0x08.
+                    let mut p = vec![0u8; 63];
+                    p[0x04] = 0x01; // link = Up
+                    p[0x08..0x0c].copy_from_slice(&40000u32.to_be_bytes()); // down_rate
                     p
                 }
-                4 => {
-                    let mut p = vec![0x04];
-                    p.resize(1 + 28, 0);
-                    p
-                }
+                4 => vec![0u8; 28], // raw 7 × u32 counters
                 5 => {
-                    // payload_type + ATM link descriptor with VLAN id at 0x12
-                    let atm = pack::pack_atm_link(&AtmLinkParams::default());
-                    let mut p = vec![0x05];
-                    p.extend_from_slice(&atm);
-                    // Override VLAN id at offset 0x12 to 2001
-                    p[1 + 0x12..1 + 0x14].copy_from_slice(&2001u16.to_be_bytes());
+                    // Long reply: the 24-byte ATM descriptor echoed back
+                    // with the assigned VLAN at [0x12].
+                    let mut p = pack::pack_atm_link(&AtmLinkParams::default()).to_vec();
+                    p[0x12..0x14].copy_from_slice(&2001u16.to_be_bytes());
                     p
                 }
-                6 | 16 => vec![subtype, 0x00],
                 15 => {
-                    let ptm = pack::pack_ptm_link(0, 0, 0, 2001);
-                    let mut p = vec![0x0F];
-                    p.extend_from_slice(&ptm);
-                    p
+                    // Long reply: the 8-byte PTM descriptor echoed back
+                    // with the assigned VLAN at [6..8].
+                    pack::pack_ptm_link(0, 0, 0, 2001).to_vec()
                 }
-                _ => vec![subtype],
+                _ => vec![0x00, 0x00, 0x00, 0x00],
             }
         }
     }
@@ -719,10 +712,9 @@ mod tests {
     #[test]
     fn custom_response_override() {
         let mut board = make_board();
-        // Override response with NoSignal status
-        let mut payload = vec![0x02];
-        payload.resize(1 + 63, 0);
-        payload[5] = 0x00; // NoSignal
+        // Override with a NoSignal status reply (raw 63 B, link byte at 0x04)
+        let mut payload = vec![0u8; 63];
+        payload[0x04] = 0x00; // NoSignal
         board.sock.set_response(2, payload);
 
         let obj = board.get_line_obj().unwrap();
@@ -732,10 +724,9 @@ mod tests {
     #[test]
     fn bad_checksum_rejected() {
         let mut board = make_board();
-        // Override with a response that has a corrupted payload
-        let mut payload = vec![0x02];
-        payload.resize(1 + 63, 0);
-        payload[5] = 0x05;
+        // Override with a well-formed Up reply
+        let mut payload = vec![0u8; 63];
+        payload[0x04] = 0x01; // Up
         board.sock.set_response(2, payload);
 
         // The mock builds the response with correct checksum, but let's test
@@ -747,7 +738,7 @@ mod tests {
     // ── no-echo response tests (op4/op5 without payload_type prefix) ──
 
     #[test]
-    fn op4_response_without_echo() {
+    fn op4_raw_response() {
         let mut board = make_board();
         // 28 bytes raw data, no opcode echo byte
         let payload = vec![0u8; 28];
@@ -821,17 +812,90 @@ mod tests {
     }
 
     #[test]
-    fn op1_ack_without_echo() {
+    fn op1_ack_status_word() {
         let mut board = make_board();
-        // Just status=0, no opcode echo
-        board.sock.set_response(1, vec![0x00]);
+        // 4-byte big-endian status word, status = 0
+        board.sock.set_response(1, vec![0x00, 0x00, 0x00, 0x00]);
         assert!(board.line_config_up(Modulation::Vdsl2, Annex::B, Vdsl2Profiles::THIRTY_A, true, true).is_ok());
     }
 
     #[test]
-    fn strip_echo_logic() {
-        assert_eq!(strip_echo(&[0x04, 0xAA], 0x04), &[0xAA]);
-        assert_eq!(strip_echo(&[0x00, 0xAA], 0x04), &[0x00, 0xAA]);
-        assert_eq!(strip_echo(&[], 0x04), &[] as &[u8]);
+    fn op1_nack_status_word_is_error() {
+        let mut board = make_board();
+        // status = 2 (invalid argument) must surface as an error
+        board.sock.set_response(1, vec![0x00, 0x00, 0x00, 0x02]);
+        assert!(board.line_config_up(Modulation::Vdsl2, Annex::B, Vdsl2Profiles::THIRTY_A, true, true).is_err());
+    }
+
+    // ── wire-format tests (session-2 regression: no opcode echo byte) ──
+
+    #[test]
+    fn op1_tx_payload_is_bare_descriptor() {
+        let mut board = make_board();
+        board.line_config_up(Modulation::Vdsl2, Annex::B, Vdsl2Profiles::THIRTY_A, true, true).unwrap();
+        let tx = board.sock.last_tx.borrow().clone();
+        let f = Frame::parse(&tx).unwrap();
+        assert_eq!(f.subtype(), 1, "opcode travels in the header");
+        assert_eq!(f.payload_len(), 12, "payload is the bare 12-B descriptor");
+        assert_eq!(f.payload()[0], Modulation::Vdsl2 as u8, "modulation at byte 0");
+        assert_eq!(f.payload()[1], Annex::B as u8);
+    }
+
+    #[test]
+    fn poll_and_retrain_tx_payloads_are_empty() {
+        let mut board = make_board();
+        board.get_line_obj().unwrap();
+        let tx = board.sock.last_tx.borrow().clone();
+        let f = Frame::parse(&tx).unwrap();
+        assert_eq!(f.subtype(), 2);
+        assert_eq!(f.payload_len(), 0, "op2 sends no payload");
+
+        board.line_retrain().unwrap();
+        let tx = board.sock.last_tx.borrow().clone();
+        let f = Frame::parse(&tx).unwrap();
+        assert_eq!(f.subtype(), 3);
+        assert_eq!(f.payload_len(), 0, "op3 sends no payload");
+    }
+
+    #[test]
+    fn link_del_tx_payload_is_bare_3byte_descriptor() {
+        let mut board = make_board();
+        board.ptm_link_del(2000).unwrap();
+        let tx = board.sock.last_tx.borrow().clone();
+        let f = Frame::parse(&tx).unwrap();
+        assert_eq!(f.subtype(), 16);
+        assert_eq!(f.payload_len(), 3);
+        assert_eq!(f.payload(), &[0x07, 0xd0, 0x03], "vlan 2000 BE + cmd 3");
+
+        board.atm_link_del(2000).unwrap();
+        let tx = board.sock.last_tx.borrow().clone();
+        let f = Frame::parse(&tx).unwrap();
+        assert_eq!(f.subtype(), 6);
+        assert_eq!(f.payload_len(), 3);
+        assert_eq!(f.payload(), &[0x07, 0xd0, 0x03]);
+    }
+
+    #[test]
+    fn ptm_link_add_tx_payload_is_bare_8byte_descriptor() {
+        let mut board = make_board();
+        board.ptm_link_add(0, 0, 0, 2000).unwrap();
+        let tx = board.sock.last_tx.borrow().clone();
+        let f = Frame::parse(&tx).unwrap();
+        assert_eq!(f.subtype(), 15);
+        assert_eq!(f.payload_len(), 8);
+        // vlanId at [6..8] BE; tagEnable/tagVid/tagPri zero
+        assert_eq!(&f.payload()[6..8], &[0x07, 0xd0]);
+        assert_eq!(&f.payload()[0..6], &[0; 6]);
+    }
+
+    #[test]
+    fn link_delete_tolerates_not_present_status() {
+        let mut board = make_board();
+        // status = 1 (entry not present) is fine during teardown
+        board.sock.set_response(16, vec![0x00, 0x00, 0x00, 0x01]);
+        assert!(board.ptm_link_del(2000).is_ok());
+        // status = 2 (rejected) surfaces
+        board.sock.set_response(16, vec![0x00, 0x00, 0x00, 0x02]);
+        assert!(board.ptm_link_del(2000).is_err());
     }
 }

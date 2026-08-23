@@ -33,20 +33,33 @@ const WORKER_TICK: Duration = constants::POLL_TICK;
 
 /// Commands sent from the daemon (the gate) to the worker.
 pub enum WorkerCmd {
-    /// op1 — apply `cfg` line config to the board.
+    /// op1 — apply `cfg` line config to the board. For paths where the
+    /// config **changed** since the last apply (reload): a changed config
+    /// differs from the board's cache by construction, so the board
+    /// executes the full apply path. The board dedups an *identical*
+    /// config (no side effects, no open) — paths that must guarantee an
+    /// open line use [`WorkerCmd::OpenLine`] instead.
     ApplyLineConfig,
+    /// Open the line deterministically: two op1 applies differing in
+    /// exactly the bitswap byte. The board dedups an op1 identical to its
+    /// config cache (`l_lastDslCfg`, unreadable over the wire), and its
+    /// only start-training path is a changed-config op1 (finalize writes
+    /// `wan adsl open`). After the first apply the cache holds the
+    /// bitswap-flipped config, so the second apply can never be deduped —
+    /// it always ends in `wan adsl open` with the intended config active,
+    /// whatever the cache held before (fresh boot, previous daemon's
+    /// config, a line closed by shutdown op3, a foreign writer).
+    OpenLine,
     /// op5/op15 — provision the data-plane link. The daemon computed `xfer`
     /// and `vlan`; the worker only executes the matching board opcode.
     ProvisionLink { xfer: XferMode, vlan: u16 },
     /// op6/op16 — deprovision the data-plane link on the board (the host
     /// VLAN is deleted by the daemon).
     RemoveLink { xfer: XferMode, vlan: u16 },
-    /// op3 + delay + op1 — bounce the line (user-initiated restart).
+    /// op3 + delay + OpenLine — bounce the line (user-initiated restart:
+    /// close, then bring back up).
     RestartLine,
-    /// op3 only — force a retrain with the board's cached config. Used at
-    /// startup (right after op1) and by the NoSignal watchdog.
-    RetrainLine,
-    /// op3 — best-effort teardown (zero retries).
+    /// op3 — best-effort deliberate line-down (`wan adsl close`).
     LineDown,
     /// Replace the worker's config copy (display fields + command params).
     UpdateConfig(Box<DslConfig>),
@@ -137,25 +150,62 @@ impl BoardWorker {
 
     // ── command execution (no decisions — the daemon already decided) ──
 
+    /// Send op1 with the current config. Logs the TX parameters.
+    fn apply_line_config(&mut self) -> Result<(), BoardError> {
+        log::info!(
+            "line_config_up: mod={:?} annex={:?} profiles=0x{:x} bitswap={} sra={}",
+            self.cfg.modulation, self.cfg.annex,
+            self.cfg.profiles.bitmask(), self.cfg.bitswap, self.cfg.sra
+        );
+        self.board.line_config_up(
+            self.cfg.modulation,
+            self.cfg.annex,
+            self.cfg.profiles,
+            self.cfg.bitswap,
+            self.cfg.sra,
+        )
+    }
+
     fn handle_cmd(&mut self, cmd: WorkerCmd) {
         match cmd {
-            WorkerCmd::ApplyLineConfig => {
+            WorkerCmd::ApplyLineConfig => match self.apply_line_config() {
+                Ok(()) => {
+                    let _ = self.event_tx.send(WorkerEvent::LineConfigApplied);
+                }
+                Err(e) => log::warn!("line_config_up: {e} (daemon will retry)"),
+            },
+            WorkerCmd::OpenLine => {
+                // The board dedups an op1 identical to its `l_lastDslCfg`
+                // cache (no apply, no `wan adsl open`), and the cache is
+                // unreadable over the wire. Applying the intended config
+                // with bitswap flipped first guarantees the second apply
+                // differs from the post-first-apply cache for *any* prior
+                // cache state — the final op1 always ends in
+                // `wan adsl open` with the intended config active.
+                // Bitswap is an OLR knob: it never changes which standard
+                // or annex is negotiated, so even a fully-executed first
+                // apply is harmless to the intended train.
+                log::info!("open-line: guaranteed double apply (op1 ×2)");
                 log::info!(
                     "line_config_up: mod={:?} annex={:?} profiles=0x{:x} bitswap={} sra={}",
                     self.cfg.modulation, self.cfg.annex,
-                    self.cfg.profiles.bitmask(), self.cfg.bitswap, self.cfg.sra
+                    self.cfg.profiles.bitmask(), !self.cfg.bitswap, self.cfg.sra
                 );
-                match self.board.line_config_up(
+                if let Err(e) = self.board.line_config_up(
                     self.cfg.modulation,
                     self.cfg.annex,
                     self.cfg.profiles,
-                    self.cfg.bitswap,
+                    !self.cfg.bitswap,
                     self.cfg.sra,
                 ) {
+                    log::warn!("open-line (first apply): {e} (daemon will retry)");
+                    return;
+                }
+                match self.apply_line_config() {
                     Ok(()) => {
                         let _ = self.event_tx.send(WorkerEvent::LineConfigApplied);
                     }
-                    Err(e) => log::warn!("line_config_up: {e} (daemon will retry)"),
+                    Err(e) => log::warn!("open-line (second apply): {e} (daemon will retry)"),
                 }
             }
             WorkerCmd::ProvisionLink { xfer, vlan } => {
@@ -202,28 +252,16 @@ impl BoardWorker {
             }
             WorkerCmd::RestartLine => {
                 log::info!("restart-line — bouncing DSL line");
+                // op3 = deliberate close (`wan adsl close`), then the
+                // guaranteed open brings it back deterministically.
                 let _ = self.board.line_retrain();
                 std::thread::sleep(constants::POLL_RESTART_DELAY);
-                if let Err(e) = self.board.line_config_up(
-                    self.cfg.modulation,
-                    self.cfg.annex,
-                    self.cfg.profiles,
-                    self.cfg.bitswap,
-                    self.cfg.sra,
-                ) {
-                    log::warn!("line_config_up after restart: {e}");
-                }
-            }
-            WorkerCmd::RetrainLine => {
-                // Pure retrain kick — the board re-negotiates with its
-                // cached config (which op1 has already brought up to date).
-                log::info!("retrain — forcing DSL retrain (op3)");
-                if let Err(e) = self.board.line_retrain() {
-                    log::warn!("line_retrain: {e}");
-                }
+                self.handle_cmd(WorkerCmd::OpenLine);
             }
             WorkerCmd::LineDown => {
+                // Deliberate line-down: "daemon stopped ⇒ line down".
                 self.board.set_retries(constants::BOARD_SHUTDOWN_RETRIES);
+                log::info!("line-down — closing DSL line (wan adsl close)");
                 let _ = self.board.line_retrain();
             }
             WorkerCmd::UpdateConfig(cfg) => {

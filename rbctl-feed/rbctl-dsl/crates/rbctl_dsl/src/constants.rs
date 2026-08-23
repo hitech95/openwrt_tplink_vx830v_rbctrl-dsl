@@ -21,7 +21,7 @@ pub const BOARD_DEFAULT_TIMEOUT: Duration = Duration::from_millis(2000);
 /// Default retransmit count for board requests.
 pub const BOARD_DEFAULT_RETRIES: u8 = 3;
 
-/// Retry budget dropped to this at shutdown for best-effort line_config_down.
+/// Retry budget dropped to this at shutdown for best-effort line-down (op3).
 pub const BOARD_SHUTDOWN_RETRIES: u8 = 0;
 
 /// Management ethertype for local-command board protocol (0x88B5).
@@ -45,12 +45,13 @@ pub const POLL_TICK: Duration = Duration::from_millis(50);
 /// considered unreachable (line_obj cleared, status shows error).
 pub const POLL_STALE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Delay between line_config_down and line_config_up during restart-line.
+/// Delay between the op3 close and the re-apply during restart-line.
 pub const POLL_RESTART_DELAY: Duration = Duration::from_secs(1);
 
-/// With config applied, a line sitting in NoSignal for this long gets an
-/// op3 retrain kick from the daemon watchdog ( Initializing/Handshake do
-/// not count — training in progress).
+/// Continuous NoSignal after this long logs a single "line silent"
+/// diagnostic (detection only — the watchdog never acts: an open modem
+/// auto-retries on its own, and a closed/no-cable line is outside the
+/// daemon's authority; Initializing/Handshake never count).
 pub const NOSIGNAL_WATCHDOG: Duration = Duration::from_secs(30);
 
 // ── VLAN: VLAN configuration ────────────────────────────────────────────

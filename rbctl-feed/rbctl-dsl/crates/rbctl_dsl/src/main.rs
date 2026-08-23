@@ -8,6 +8,7 @@ mod daemon;
 mod diag;
 mod logging;
 mod utils;
+mod version;
 
 use clap::{Parser, Subcommand};
 use config::CliOverrides;
@@ -168,6 +169,7 @@ fn main() {
 
     match cli.command {
         Command::Daemon(args) => {
+            version::log_banner();
             let overrides = args.to_overrides();
             let code = daemon::run(
                 &args.config_iface,
@@ -218,6 +220,7 @@ fn main() {
             }
         }
         Command::Selftest(args) => {
+            version::log_banner();
             let code = diag::selftest::Selftest::run(&args.config_iface);
             log::info!("selftest exit code: {code}");
             std::process::exit(code);

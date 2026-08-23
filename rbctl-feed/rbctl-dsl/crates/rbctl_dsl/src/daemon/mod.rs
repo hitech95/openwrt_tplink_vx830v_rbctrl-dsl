@@ -9,8 +9,9 @@
 //!   cfg / config_applied /                 does: op2 poll → WorkerEvent
 //!   link_provisioned / vlan_owned …        does: execute WorkerCmd verbatim
 //! gate: ALL board-operation decisions
-//!   WorkerCmd  ─────────────────────────►  ApplyLineConfig / ProvisionLink /
-//!   WorkerEvent ◄───────────────────────── RestartLine / LineDown / …
+//!   WorkerCmd  ─────────────────────────►  OpenLine / ApplyLineConfig /
+//!   WorkerEvent ◄───────────────────────── ProvisionLink / RestartLine /
+//!                                           LineDown / …
 //! ```
 //!
 //! The worker makes no autonomous decisions. Monitor mode (`--monitor`) is
@@ -191,6 +192,9 @@ pub(crate) struct Daemon {
     tc_emitted: bool,
     /// When the line has been continuously in NoSignal (watchdog dwell).
     nosignal_since: Option<Instant>,
+    /// Whether the current silent episode already logged its warning
+    /// (one warning per episode; any non-NoSignal state resets both).
+    nosignal_warned: bool,
 }
 
 impl Daemon {
@@ -284,20 +288,20 @@ impl Daemon {
             last_apply: None,
             tc_emitted: false,
             nosignal_since: None,
+            nosignal_warned: false,
         };
 
         // Initial configuration — the only place startup config is decided.
         if daemon.monitor {
             log::info!("monitor mode: observing the board, no configuration will be sent");
         } else {
-            let _ = daemon.cmd_tx.send(WorkerCmd::ApplyLineConfig);
-            // op3 retrain right after op1: the board's dslCfgSet dedups a
-            // config identical to its cache (no retrain, no `wan adsl
-            // open`), so op1 alone cannot revive a line that a previous
-            // daemon instance left reset via shutdown-op3. The kick makes
-            // "daemon start ⇒ line trains" deterministic. (A daemon crash
-            // while the line was Up costs one extra retrain here.)
-            let _ = daemon.cmd_tx.send(WorkerCmd::RetrainLine);
+            // Guaranteed line open: the board dedups an op1 identical to
+            // its config cache and the cache is unreadable, so a single
+            // op1 cannot reliably (re)open a line — e.g. one left closed
+            // by a previous daemon's shutdown op3 with an unchanged
+            // config. OpenLine's double apply guarantees the final op1
+            // executes the full path ending in `wan adsl open`.
+            let _ = daemon.cmd_tx.send(WorkerCmd::OpenLine);
             // Data-plane provisioning is NOT queued here — it follows from
             // the LineConfigApplied (fixed mode) / line-Up (auto) events,
             // which keeps exactly one provisioning path.
@@ -405,17 +409,29 @@ impl Daemon {
 
     // ── event handlers (the gate) ────────────────────────────────────────
 
-    /// NoSignal watchdog: with config applied and the board reachable, a
-    /// line sitting in NoSignal for [`constants::NOSIGNAL_WATCHDOG`] gets an
-    /// op3 retrain kick. This recovers zombie states (e.g. a line left
-    /// reset by an older daemon whose op1 was deduplicated by the board's
-    /// config cache). Initializing/Handshake states mean training is in
-    /// progress — those never trigger the watchdog. No carrier plugged in
-    /// also shows NoSignal; the periodic kick is harmless there (resetting
-    /// an idle line) and keeps recovering once the line returns.
+    /// NoSignal watchdog — detection and diagnostics only, never action.
+    ///
+    /// An *open* modem retries training on its own (field pcaps show
+    /// minutes of NoSignal↔Initializing cycling with zero host traffic),
+    /// so re-applying the config while the modem is handshaking is pure
+    /// noise, and op3 (`wan adsl close`) would kill the auto-retry.
+    /// Recovery paths elsewhere already cover the actionable cases:
+    ///
+    /// - board unreachable → reachable: `BoardReachable` re-opens the
+    ///   line automatically (and a rebooted board has self-opened);
+    /// - line closed by a foreign tool or an old daemon: the operator
+    ///   bounces it explicitly.
+    ///
+    /// So after [`constants::NOSIGNAL_WATCHDOG`] (30 s) of *continuous*
+    /// NoSignal with config applied and the board reachable, log exactly
+    /// one warning per silent episode — continuous NoSignal with no
+    /// cycling is the signature of a closed modem or no cable, both
+    /// outside the daemon's authority. `Initializing`/`EstablishingLink`
+    /// mean training is in progress and reset the dwell.
     fn watchdog_tick(&mut self) {
         if self.monitor || !self.config_applied || self.flashing() {
             self.nosignal_since = None;
+            self.nosignal_warned = false;
             return;
         }
         let status = self
@@ -426,37 +442,42 @@ impl Daemon {
             .as_ref()
             .map(|l| l.link_status);
         match status {
-            Some(LinkStatus::NoSignal) => {
+            Some(LinkStatus::NoSignal) if !self.nosignal_warned => {
                 let since = *self.nosignal_since.get_or_insert_with(Instant::now);
                 if since.elapsed() >= constants::NOSIGNAL_WATCHDOG {
                     log::warn!(
-                        "line in NoSignal for {:?} — forcing retrain",
+                        "line silent (NoSignal) for {:?} with no training attempts — \
+                         modem closed or no cable; manual bounce: rbctl-dsl restart-line",
                         since.elapsed()
                     );
-                    let _ = self.cmd_tx.send(WorkerCmd::RetrainLine);
-                    // Restart the dwell so kicks stay throttled.
-                    self.nosignal_since = Some(Instant::now());
+                    self.nosignal_warned = true;
                 }
             }
-            // Training in progress, Up, or no fresh poll — nothing to do.
-            _ => self.nosignal_since = None,
+            // Training in progress, Up, or no fresh poll — reset the episode.
+            _ => {
+                self.nosignal_since = None;
+                self.nosignal_warned = false;
+            }
         }
     }
 
     fn on_worker_event(&mut self, ev: WorkerEvent) {
         match ev {
             WorkerEvent::BoardReachable => {
-                // Deferred config: op1 failed at startup because the board
-                // was unreachable — retry now (throttled to the poll cadence
-                // so a failing link_add doesn't re-run op1 every tick).
+                // Deferred open: the startup open failed because the board
+                // was unreachable — retry now (throttled to the poll
+                // cadence so a failing link_add doesn't re-run op1 every
+                // tick). OpenLine, not ApplyLineConfig: the board may have
+                // rebooted while unreachable, so its cache state is
+                // unknown and the open must be guaranteed.
                 if !self.monitor && !self.config_applied {
                     let due = self
                         .last_apply
                         .map_or(true, |t| t.elapsed() >= constants::POLL_INTERVAL);
                     if due {
                         self.last_apply = Some(Instant::now());
-                        log::info!("board reachable — applying deferred config");
-                        let _ = self.cmd_tx.send(WorkerCmd::ApplyLineConfig);
+                        log::info!("board reachable — opening line (deferred)");
+                        let _ = self.cmd_tx.send(WorkerCmd::OpenLine);
                     }
                 }
             }
@@ -561,7 +582,7 @@ impl Daemon {
         }
         if changed {
             log::info!("line params changed — reconfiguring");
-            // Deprovision the old link on the board before retraining.
+            // Deprovision the old link on the board before reconfiguring.
             if self.link_provisioned {
                 if let Some(vlan) = self.provisioned_vlan {
                     let xfer = self
@@ -577,7 +598,10 @@ impl Daemon {
             self.link_provisioned = false;
             self.vlan_owned = false;
             self.tc_emitted = false;
-            let _ = self.cmd_tx.send(WorkerCmd::LineDown);
+            // A changed config differs from the board cache by
+            // construction, so a plain op1 always takes the full apply
+            // path (setters + `wan adsl reset` inside them + final
+            // `wan adsl open`) — no deliberate line-down needed.
             let _ = self.cmd_tx.send(WorkerCmd::ApplyLineConfig);
             if let XferMode::Ptm | XferMode::Atm = self.cfg.xfer_mode {
                 let _ = self.cmd_tx.send(WorkerCmd::ProvisionLink {
@@ -657,8 +681,8 @@ impl Daemon {
             }
             let _ = self.cmd_tx.send(WorkerCmd::LineDown);
             // Deliberate final state: daemon stopped ⇒ line is DOWN (op3
-            // retrain was issued). Starting the daemon again brings it back
-            // (startup op1 + retrain kick).
+            // `wan adsl close`). Starting the daemon again re-opens it via
+            // the guaranteed double apply at startup.
             log::info!("line left DOWN by request — daemon stopped");
         }
         let _ = self.cmd_tx.send(WorkerCmd::Shutdown);
