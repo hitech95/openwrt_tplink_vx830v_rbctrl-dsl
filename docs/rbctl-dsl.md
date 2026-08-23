@@ -248,20 +248,21 @@ ordered so each step can fail fast and leave the system in a sane state.
 
 ```mermaid
 flowchart TD
-    A["1. install signal handlers<br/>SIGTERM/SIGINT/SIGHUP → AtomicBool"]
-    B["2. DslConfig::load<br/>UCI + CLI overrides"]
+    A["0. version banner<br/>rbctl-dsl <ver> (git <sha>, built <date>)"]
+    A1["1. install signal handlers<br/>SIGTERM/SIGINT/SIGHUP → AtomicBool"]
+    B["2. DslConfig::load<br/>UCI + CLI overrides<br/>(bad explicit value → fatal)"]
     C["3. validate_line_config + validate_xfer_mode"]
     D["4. mgmt-link probe<br/>(carrier check, read-only)"]
     E["5. RawSocket::open(iface, 0x88B5)<br/>BPF filter installed"]
     F["6. IpcListener::bind<br/>/var/run/rbctl-dsl.sock"]
     G["7. connect_ubus + register 'dsl'<br/>(best-effort)"]
     H["8. spawn BoardWorker thread"]
-    I["9. queue ApplyLineConfig + RetrainLine<br/>(monitor mode: queue nothing)"]
+    I["9. queue OpenLine<br/>(monitor mode: queue nothing)"]
     J["10. control loop (50 ms tick)<br/>events + IPC + ubus + watchdog"]
 
-    A --> B --> C --> D --> E --> F --> G --> H --> I --> J
+    A --> A1 --> B --> C --> D --> E --> F --> G --> H --> I --> J
 
-    style A fill:#16213e,color:#fff
+    style A fill:#5a1a1a,color:#fff
     style E fill:#1b4332,color:#fff
     style I fill:#3a1a5a,color:#fff
     style J fill:#3a1a5a,color:#fff
@@ -273,12 +274,34 @@ daemon only sends `WorkerCmd`s and consumes `WorkerEvent`s.
 
 ### Line bring-up (the important part)
 
-The board's `dslCfgSet` (op1 handler) keeps a **config cache** and
-early-returns when the incoming config is identical — no chipset writes, no
-`wan adsl open`, **no retrain**. A daemon restart therefore cannot rely on
-op1 alone: the previous instance's shutdown-retrain left the line reset, and
-an identical op1 is deduplicated. The startup sequence thus always pairs
-op1 with an **op3 retrain kick**:
+Two board behaviors shape the whole sequence (both verified against the
+board binary and field pcaps, 2026-08-22):
+
+1. The board's `dslCfgSet` (op1 handler) keeps a **config cache**
+   (`l_lastDslCfg`) and early-returns when the incoming config is
+   identical — no chipset writes, **no `wan adsl open`**. The cache is
+   unreadable over the wire.
+2. **op3 is `wan adsl close`** — a deliberate line-down, *not* a retrain.
+   The only host-reachable way to start training is a **changed-config
+   op1**, whose finalize step writes `wan adsl open`.
+
+A daemon restart therefore cannot rely on a single op1: the previous
+instance's shutdown op3 closed the line, and an identical op1 is
+deduplicated. (`ApplyLineConfig` — a single op1 — remains the command
+for reloads where the config *changed*: it differs from the cache by
+construction and executes the full path on its own.) The startup `OpenLine` command uses a **guaranteed-differing double apply** —
+two op1s differing in exactly the bitswap byte. Whatever the cache holds
+before, the second apply always differs from the post-first-apply cache
+and therefore always executes the full path ending in `wan adsl open`:
+
+| cache before | 1st apply (bitswap flipped) | 2nd apply (intended) |
+|---|---|---|
+| == intended | dedup (no-op) | **full apply + open** |
+| == flipped | dedup (no-op) | **full apply + open** |
+| anything else | full apply (cache := flipped) | **full apply + open** |
+
+Bitswap is an OLR knob — flipping it never changes which standard or
+annex is negotiated, so even a fully-executed first apply is harmless.
 
 ```mermaid
 sequenceDiagram
@@ -287,16 +310,15 @@ sequenceDiagram
     participant B as Board firmware
     participant T as Board status thread (2 s poll)
 
-    Note over D,W: startup queues [ApplyLineConfig, RetrainLine]
-    D->>W: WorkerCmd::ApplyLineConfig
-    W->>B: op1 dsl_config_up<br/>(mod, annex, bitswap, sra, profiles)
-    B->>B: dslCfgSet: diff vs cache
-    Note right of B: identical → dedup (no retrain)<br/>different → apply + wan adsl open
+    Note over D,W: startup queues [OpenLine]
+    D->>W: WorkerCmd::OpenLine
+    W->>B: op1 line config (bitswap flipped)
+    Note right of B: identical to cache → dedup<br/>different → apply + wan adsl open
+    B-->>W: ack (status 0)
+    W->>B: op1 line config (intended)
+    Note right of B: differs from cache by construction<br/>→ full apply + wan adsl open
     B-->>W: ack (status 0)
     W-->>D: WorkerEvent::LineConfigApplied
-    W->>B: op3 wan adsl reset (queued at startup)
-    B-->>W: ack
-    Note right of B: line drops, re-negotiates<br/>with cached config
 
     D->>W: WorkerCmd::ProvisionLink (fixed ptm/atm)
     Note over D: fired by LineConfigApplied
@@ -326,22 +348,32 @@ Three properties fall out of this sequence:
   thread materializes them at showtime and re-materializes them after every
   drop (DOWN resets nodes to *pending*, config preserved). The daemon never
   needs to re-send op5/op15 after a resync.
-- **`wan adsl reset` (op3) ≠ reboot.** Op3 retrains with the *cached* config;
-  op7 is the board reboot. The startup kick makes "daemon start ⇒ line
-  trains" deterministic even when op1 is deduplicated. Cost: one extra
-  retrain when the previous shutdown left the line Up.
+- **`wan adsl close` (op3) is the shutdown lever.** The daemon owns line
+  state: stopping it deliberately closes the line (`LineDown`, zero-retry
+  op3), and starting it re-opens deterministically via the double apply.
+  op7, not op3, is the board reboot.
 - **Auto mode** skips the startup `ProvisionLink` (the TC mode is unknown
   until showtime). The `LineState{Up}` event carries the observed
   `data_path`, and the daemon provisions with the *observed* mode then.
 
-### NoSignal watchdog
+### NoSignal watchdog — warn-only
 
-With config applied and the board reachable, a line that sits in `NoSignal`
-for 30 s (`NOSIGNAL_WATCHDOG`) gets an op3 retrain kick, repeated every 30 s.
-`Initializing`/`Handshake` mean training is in progress and never trigger
-the watchdog. This recovers zombie lines (e.g. one left reset by an older
-daemon version whose op1 was deduplicated) and self-heals after a carrier
-outage ends.
+The watchdog never acts on the line. An *open* modem retries training on
+its own (field pcaps show minutes of `NoSignal ↔ Initializing` with zero
+host traffic), so re-applying config while it handshakes is noise, and
+op3 would kill the auto-retry. The actionable cases are covered
+elsewhere:
+
+| Situation | Recovery path |
+|---|---|
+| board unreachable → reachable | `BoardReachable` event → automatic `OpenLine` |
+| line closed by a foreign tool / old daemon | operator runs `rbctl-dsl restart-line` |
+| training in progress (`Initializing`/`Handshake`) | nothing — dwell resets, auto-retry continues |
+
+After 30 s (`NOSIGNAL_WATCHDOG`) of *continuous* `NoSignal` with config
+applied and the board reachable, the daemon logs **one** warning per
+silent episode (continuous NoSignal without cycling = closed modem or no
+cable), pointing at `rbctl-dsl restart-line` for a manual bounce.
 
 ### Two threads, one shared state
 
@@ -390,9 +422,10 @@ On `SIGTERM` / `SIGINT` / `Stop` IPC command:
 1. `SHOULD_EXIT` is set (deferred while a firmware flash is in flight).
 2. Control loop exits, emits a final `Down` hotplug event.
 3. Daemon gates teardown through the worker: `RemoveLink` (op6/op16, board
-   side) then `LineDown` — a **zero-retry op3 retrain**. The line is left
-   deliberately DOWN: "daemon stopped ⇒ line down" is a defined state, and
-   the next daemon start brings it back (op1 + retrain kick).
+   side) then `LineDown` — a **zero-retry op3 `wan adsl close`**. The line
+   is left deliberately DOWN: "daemon stopped ⇒ line down" is a defined
+   state, and the next daemon start re-opens it via the guaranteed
+   double apply (`OpenLine`).
 4. Main thread waits up to `SHUTDOWN_DEADLINE` (3 s) for the worker; a
    silent board is abandoned (process exit reaps the thread).
 5. The host transport VLAN is deleted **only if this daemon instance
