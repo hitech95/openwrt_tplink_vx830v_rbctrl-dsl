@@ -92,44 +92,48 @@ pub struct DslConfig {
 
 /// Map UCI `line_mode` + `xfer_mode` → board [`Modulation`].
 ///
-/// `line_mode=vdsl` → `Vdsl2`; `line_mode=adsl` → `Adsl2Plus`;
-/// `line_mode=auto` → `Multimode` (board auto-negotiates).
-/// When `line_mode` is absent, `xfer_mode=ptm` implies VDSL2.
+/// Case-insensitive. Aliases: `vdsl`/`vdsl2`; `adsl`/`adsl2`/`adsl2+`/
+/// `adsl2plus`; `auto`/`multi`/`multimode`. When `line_mode` is absent,
+/// `xfer_mode=ptm` implies VDSL2 (resolved by the caller's defaults).
 pub fn parse_modulation(line_mode: &str, _xfer_mode: &str) -> Result<Modulation, ConfigError> {
-    match line_mode {
-        "vdsl" | "" => Ok(Modulation::Vdsl2),
-        "adsl" => Ok(Modulation::Adsl2Plus),
-        "auto" | "multi" => Ok(Modulation::Multimode),
-        other => Err(ConfigError(format!("bad line_mode '{other}'"))),
+    match line_mode.trim().to_ascii_lowercase().as_str() {
+        "vdsl" | "vdsl2" | "" => Ok(Modulation::Vdsl2),
+        "adsl" | "adsl2" | "adsl2+" | "adsl2plus" => Ok(Modulation::Adsl2Plus),
+        "auto" | "multi" | "multimode" => Ok(Modulation::Multimode),
+        other => Err(ConfigError(format!(
+            "bad line_mode '{other}' (valid: vdsl|vdsl2, adsl|adsl2|adsl2plus, auto|multi|multimode)"
+        ))),
     }
 }
 
-/// Map UCI `annex` letter → board [`Annex`].
+/// Map UCI `annex` letter → board [`Annex`]. Case-insensitive.
 pub fn parse_annex(s: &str) -> Result<Annex, ConfigError> {
-    match s.trim() {
-        "a" | "A" => Ok(Annex::A),
-        "b" | "B" => Ok(Annex::B),
-        "i" | "I" => Ok(Annex::I),
-        "j" | "J" => Ok(Annex::J),
-        "m" | "M" => Ok(Annex::M),
-        "auto" | "Auto" | "AUTO" => Ok(Annex::Auto),
-        other => Err(ConfigError(format!("bad annex '{other}'"))),
+    match s.trim().to_ascii_lowercase().as_str() {
+        "a" => Ok(Annex::A),
+        "b" => Ok(Annex::B),
+        "i" => Ok(Annex::I),
+        "j" => Ok(Annex::J),
+        "m" => Ok(Annex::M),
+        "auto" => Ok(Annex::Auto),
+        other => Err(ConfigError(format!(
+            "bad annex '{other}' (valid: a, b, i, j, m, auto)"
+        ))),
     }
 }
 
-/// Map UCI `tone` → [`Vdsl2Profiles`] bitmask.
+/// Map UCI `tone` → [`Vdsl2Profiles`] bitmask. Case-insensitive.
 ///
 /// Supported values:
-/// - `"av"` → all VDSL2 profiles
-/// - Space-separated profile names: `"8a 17a 30a"`
+/// - `"av"` / `"auto"` / `"all"` → all VDSL2 profiles
+/// - Space- or comma-separated profile names: `"8a 17a 30a"`, `"17a,30a"`
 /// - Single profile: `"35b"`
 /// - `"a"` (ADSL tone group) → empty bitmask (no VDSL2 profiles)
 pub fn parse_tone(s: &str) -> Result<Vdsl2Profiles, ConfigError> {
-    let s = s.trim();
+    let s = s.trim().to_ascii_lowercase();
     if s.is_empty() || s == "a" {
         return Ok(Vdsl2Profiles::default());
     }
-    if s == "av" {
+    if s == "av" || s == "auto" || s == "all" {
         return Ok(Vdsl2Profiles::EIGHT_A
             | Vdsl2Profiles::EIGHT_B
             | Vdsl2Profiles::EIGHT_C
@@ -141,7 +145,11 @@ pub fn parse_tone(s: &str) -> Result<Vdsl2Profiles, ConfigError> {
             | Vdsl2Profiles::THIRTYFIVE_B);
     }
     let mut profiles = Vdsl2Profiles::default();
-    for tok in s.split_whitespace() {
+    for tok in s.split(|c: char| c.is_whitespace() || c == ',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
         let p = match tok {
             "8a" => Vdsl2Profiles::EIGHT_A,
             "8b" => Vdsl2Profiles::EIGHT_B,
@@ -152,39 +160,49 @@ pub fn parse_tone(s: &str) -> Result<Vdsl2Profiles, ConfigError> {
             "17a" => Vdsl2Profiles::SEVENTEEN_A,
             "30a" => Vdsl2Profiles::THIRTY_A,
             "35b" => Vdsl2Profiles::THIRTYFIVE_B,
-            other => return Err(ConfigError(format!("bad tone profile '{other}'"))),
+            other => {
+                return Err(ConfigError(format!(
+                    "bad tone profile '{other}' (valid: av|auto|all, or 8a 8b 8c 8d 12a 12b 17a 30a 35b)"
+                )))
+            }
         };
         profiles = profiles | p;
     }
     Ok(profiles)
 }
 
-/// Map UCI `xfer_mode` → [`XferMode`].
+/// Map UCI `xfer_mode` → [`XferMode`]. Case-insensitive.
 pub fn parse_xfer_mode(s: &str) -> Result<XferMode, ConfigError> {
-    match s.trim() {
+    match s.trim().to_ascii_lowercase().as_str() {
         "ptm" | "" => Ok(XferMode::Ptm),
         "atm" => Ok(XferMode::Atm),
         "auto" => Ok(XferMode::Auto),
-        other => Err(ConfigError(format!("bad xfer_mode '{other}'"))),
+        other => Err(ConfigError(format!(
+            "bad xfer_mode '{other}' (valid: ptm, atm, auto)"
+        ))),
     }
 }
 
-/// Map UCI `encaps` → [`AtmEncap`].
+/// Map UCI `encaps` → [`AtmEncap`]. Case-insensitive.
 pub fn parse_encaps(s: &str) -> Result<AtmEncap, ConfigError> {
-    match s.trim() {
+    match s.trim().to_ascii_lowercase().as_str() {
         "llc" => Ok(AtmEncap::Llc),
         "vcmux" => Ok(AtmEncap::Vcmux),
-        other => Err(ConfigError(format!("bad encaps '{other}'"))),
+        other => Err(ConfigError(format!(
+            "bad encaps '{other}' (valid: llc, vcmux)"
+        ))),
     }
 }
 
-/// Map UCI `payload` → [`AtmLinkType`].
+/// Map UCI `payload` → [`AtmLinkType`]. Case-insensitive.
 pub fn parse_payload(s: &str) -> Result<AtmLinkType, ConfigError> {
-    match s.trim() {
+    match s.trim().to_ascii_lowercase().as_str() {
         "bridged" => Ok(AtmLinkType::Eoa),
         "routed" => Ok(AtmLinkType::Ipoa),
         "pppoa" => Ok(AtmLinkType::Pppoa),
-        other => Err(ConfigError(format!("bad payload '{other}'"))),
+        other => Err(ConfigError(format!(
+            "bad payload '{other}' (valid: bridged, routed, pppoa)"
+        ))),
     }
 }
 
@@ -249,7 +267,7 @@ impl DslConfig {
                 // Infer from explicit xfer_mode override/UCI
                 let xfer = nonempty(&ov.xfer_mode)
                     .or_else(|| { let v = uci_get(uci, "network.dsl.xfer_mode"); (!v.is_empty()).then_some(v) })?;
-                match xfer.as_str() {
+                match xfer.trim().to_ascii_lowercase().as_str() {
                     "atm" => Some("adsl".into()),
                     "ptm" => Some("vdsl".into()),
                     _ => None,
@@ -257,10 +275,10 @@ impl DslConfig {
             })
             .unwrap_or_else(|| "vdsl".into());
 
-        // ── Smart defaults derived from line_mode ──
-        let (default_xfer, default_tone, default_annex) = match line_mode.as_str() {
-            "adsl" => ("atm", "", "a"),
-            "auto" | "multi" => ("auto", "av", "auto"),
+        // ── Smart defaults derived from line_mode (case-insensitive) ──
+        let (default_xfer, default_tone, default_annex) = match line_mode.trim().to_ascii_lowercase().as_str() {
+            "adsl" | "adsl2" | "adsl2+" | "adsl2plus" => ("atm", "", "a"),
+            "auto" | "multi" | "multimode" => ("auto", "av", "auto"),
             _ => ("ptm", "av", "b"),
         };
 
@@ -313,7 +331,10 @@ impl DslConfig {
 
         // Bitswap / SRA (opcode 1 bytes 0x02/0x03)
         // Auto mode defaults sra=false to match the board's own boot defaults.
-        let default_sra = !matches!(line_mode.as_str(), "auto" | "multi");
+        let default_sra = !matches!(
+            line_mode.trim().to_ascii_lowercase().as_str(),
+            "auto" | "multi" | "multimode"
+        );
         let bitswap = ov.bitswap
             .unwrap_or_else(|| {
                 uci_get(uci, "network.dsl.bitswap").parse::<u32>().map(|v| v != 0).unwrap_or(true)
@@ -440,6 +461,56 @@ mod tests {
     fn modulation_auto() {
         assert_eq!(parse_modulation("auto", "auto").unwrap(), Modulation::Multimode);
         assert_eq!(parse_modulation("multi", "auto").unwrap(), Modulation::Multimode);
+    }
+
+    // ── case-insensitivity / aliases (session-2: 'Vdsl2' and
+    //    --tone=auto silently voided the tester's whole matrix) ──
+
+    #[test]
+    fn modulation_case_insensitive_and_aliases() {
+        assert_eq!(parse_modulation("Vdsl2", "ptm").unwrap(), Modulation::Vdsl2);
+        assert_eq!(parse_modulation("VDSL", "ptm").unwrap(), Modulation::Vdsl2);
+        assert_eq!(parse_modulation("ADSL2Plus", "atm").unwrap(), Modulation::Adsl2Plus);
+        assert_eq!(parse_modulation("adsl2+", "atm").unwrap(), Modulation::Adsl2Plus);
+        assert_eq!(parse_modulation("Multimode", "auto").unwrap(), Modulation::Multimode);
+        assert_eq!(parse_modulation("AUTO", "auto").unwrap(), Modulation::Multimode);
+        assert!(parse_modulation("Vdsl3", "ptm").is_err());
+    }
+
+    #[test]
+    fn tone_case_insensitive_and_aliases() {
+        assert_eq!(parse_tone("AUTO").unwrap().bitmask(), 0x1ff);
+        assert_eq!(parse_tone("All").unwrap().bitmask(), 0x1ff);
+        assert_eq!(parse_tone("17A").unwrap(), Vdsl2Profiles::SEVENTEEN_A);
+        // comma-separated lists
+        assert_eq!(
+            parse_tone("17a,30a").unwrap(),
+            Vdsl2Profiles::SEVENTEEN_A | Vdsl2Profiles::THIRTY_A
+        );
+        assert_eq!(
+            parse_tone(" 8a , 35b ").unwrap(),
+            Vdsl2Profiles::EIGHT_A | Vdsl2Profiles::THIRTYFIVE_B
+        );
+    }
+
+    #[test]
+    fn annex_and_xfer_case_insensitive() {
+        assert_eq!(parse_annex("B").unwrap(), Annex::B);
+        assert_eq!(parse_annex("Auto").unwrap(), Annex::Auto);
+        assert_eq!(parse_xfer_mode("PTM").unwrap(), XferMode::Ptm);
+        assert_eq!(parse_xfer_mode("Atm").unwrap(), XferMode::Atm);
+        assert_eq!(parse_encaps("LLC").unwrap(), AtmEncap::Llc);
+        assert_eq!(parse_payload("Bridged").unwrap(), AtmLinkType::Eoa);
+    }
+
+    #[test]
+    fn parse_errors_name_the_option() {
+        let e = parse_modulation("g.fast", "ptm").unwrap_err().0;
+        assert!(e.contains("line_mode"), "got: {e}");
+        let e = parse_tone("17x").unwrap_err().0;
+        assert!(e.contains("tone"), "got: {e}");
+        let e = parse_annex("q").unwrap_err().0;
+        assert!(e.contains("annex"), "got: {e}");
     }
 
     #[test]

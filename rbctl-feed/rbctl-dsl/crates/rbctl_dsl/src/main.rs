@@ -26,15 +26,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Start the daemon
+    /// Start the daemon (board config, polling, IPC, ubus)
     Daemon(DaemonArgs),
-    /// Print live line state and metrics
+    /// Print live line state and metrics from the running daemon
     Status,
     /// Reload UCI config in the running daemon
     Reload,
-    /// Bounce the DSL line (down then up)
+    /// Bounce the DSL line (close, then reopen with the current config)
     RestartLine,
-    /// Shut down the running daemon
+    /// Shut down the running daemon (leaves the line DOWN)
     Stop,
     /// Upload firmware to the remote board
     FirmwareUpgrade {
@@ -71,59 +71,73 @@ struct SniffArgs {
 /// Arguments for daemon mode.
 #[derive(clap::Args)]
 struct DaemonArgs {
-    /// Management VLAN interface
+    /// Management VLAN interface the board socket binds to
+    /// [default: lan0.500]
     #[arg(short = 'i', long, default_value = "lan0.500")]
     config_iface: String,
 
-    /// Hotplug notify script path
-    #[arg(short, long)]
+    /// Path to a shell script executed on line-state changes (hotplug
+    /// notify): receives the transition as environment variables. Must be
+    /// an executable .sh file path.
+    #[arg(short, long, value_name = "SCRIPT")]
     notify: Option<String>,
 
     /// Log to syslog instead of stdout (used by procd)
     #[arg(long)]
     syslog: bool,
 
-    /// Override UCI annex (a, b, j, m)
+    /// Override UCI annex
+    /// [possible values: a, b, i, j, m, auto]
     #[arg(long)]
     annex: Option<String>,
 
-    /// Override UCI line_mode (adsl, vdsl)
+    /// Override UCI line mode (DSL standard family)
+    /// [possible values: vdsl, vdsl2, adsl, adsl2, adsl2+, adsl2plus,
+    ///  auto, multi, multimode]
     #[arg(long)]
     line_mode: Option<String>,
 
-    /// Override UCI tone (av, 8a, 17a, ...)
+    /// Override UCI tone (VDSL2 profiles): "av"/"all" for all, or a
+    /// space/comma-separated list of profile names
+    /// [possible values: av, all, 8a, 8b, 8c, 8d, 12a, 12b, 17a, 30a, 35b]
     #[arg(long)]
     tone: Option<String>,
 
-    /// Override UCI xfer_mode (ptm, atm)
+    /// Override UCI transfer mode (data-path encapsulation)
+    /// [possible values: ptm, atm, auto]
     #[arg(long)]
     xfer_mode: Option<String>,
 
-    /// Override ATM VPI
+    /// Override ATM VPI (0–255) [default: from atm-bridge UCI or 8]
     #[arg(long)]
     vpi: Option<String>,
 
-    /// Override ATM VCI
+    /// Override ATM VCI (0–65535) [default: from atm-bridge UCI or 35]
     #[arg(long)]
     vci: Option<String>,
 
-    /// Override ATM encapsulation (llc, vcmux)
+    /// Override ATM encapsulation
+    /// [possible values: llc, vcmux]
     #[arg(long)]
     encaps: Option<String>,
 
-    /// Override ATM payload type (bridged, routed, pppoa)
+    /// Override ATM payload type
+    /// [possible values: bridged, routed, pppoa]
     #[arg(long)]
     payload: Option<String>,
 
-    /// Override bitswap enable (0 or 1)
+    /// Override bitswap enable
+    /// [possible values: 0, 1] (or true/false)
     #[arg(long)]
     bitswap: Option<bool>,
 
-    /// Override SRA enable (0 or 1)
+    /// Override SRA enable
+    /// [possible values: 0, 1] (or true/false)
     #[arg(long)]
     sra: Option<bool>,
 
-    /// Override transport VLAN base index (0–7, VLAN id = base + 2000)
+    /// Override transport VLAN base index; the board data VLAN is
+    /// base + 2000 [possible values: 0-7 → VLANs 2000-2007]
     #[arg(short = 't', long)]
     transport_vlan: Option<u8>,
 

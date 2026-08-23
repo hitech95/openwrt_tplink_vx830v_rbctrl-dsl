@@ -22,7 +22,10 @@ pub(crate) fn startup(
     config_iface: &str,
     overrides: &CliOverrides,
 ) -> Result<Init, i32> {
-    // 1. Load config (UCI + CLI overrides)
+    // 1. Load config (UCI + CLI overrides). A bad *explicit* value (CLI
+    //    flag or UCI option) is fatal — silently substituting defaults
+    //    voided an entire field-test matrix once (session 2: every
+    //    `--line-mode=Vdsl2` run silently fell back to defaults).
     let cfg = match DslConfig::load(overrides) {
         Ok(c) => {
             log::info!(
@@ -33,8 +36,9 @@ pub(crate) fn startup(
             c
         }
         Err(e) => {
-            log::warn!("config load failed ({e}), using defaults");
-            DslConfig::default()
+            log::error!("config load failed: {e}");
+            log::error!("  fix the offending option (values are case-insensitive) and retry");
+            return Err(1);
         }
     };
 
