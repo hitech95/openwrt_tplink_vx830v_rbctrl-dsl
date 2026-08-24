@@ -23,7 +23,7 @@ import proto
 ECONET = os.environ["ECONET_ROOTFS"]
 AROOT = os.environ["AROOT"]
 LOGDIR = os.environ["LOGDIR"]
-SCENARIOS = os.environ.get("SCENARIOS", "E1 E2 E3 E5 E6 E7 E8").split()
+SCENARIOS = os.environ.get("SCENARIOS", "E1 E2 E3 E5 E6 E7 E8 E9").split()
 
 BOARD_MAC = bytes.fromhex("00aabb012348")
 HOST_MAC = bytes.fromhex("020000000099")   # harness raw client
@@ -267,6 +267,12 @@ def e2_bringup(board):
     acks = [f for f in wire() if f["dir"] == "h_RESP" and f["op"] == 1
             and f["seq"] in (op1s[0]["seq"], op1s[1]["seq"])]
     assert all(a["payload"] == b"\x00\x00\x00\x00" for a in acks), "op1 ack != 0"
+    # Provisioning must NOT run before showtime: the link type is only
+    # known once the line trains (derived from the trained modulation).
+    # The startup cleanup (op16+op6 dels) is allowed — only link-ADD
+    # opcodes (15/5) must be absent while the line is down.
+    adds = [f for f in wire() if f["dir"] == "b_REQ" and f["op"] in (15, 5)]
+    assert not adds, f"link provisioning before showtime: {[f['op'] for f in adds]}"
     # board-side: two apply bursts; second ends with open
     wait_file_contains("board_tcci.log", "wan adsl opencmd vdsl2", 10)
     log("E2 PASS (daemon left running for E3)")
@@ -276,12 +282,20 @@ def e2_bringup(board):
 def e3_restart(d):
     """Warm-cache restart: shutdown closes the line, re-start re-opens it."""
     log("E3: daemon restart with warm cache (the session-1 killer)")
-    # stop: op16 ack 0 + op3 close
+    # Bring the line up first: provisioning runs at line-Up with the type
+    # derived from the trained modulation (mod=6 VDSL2 → PTM link).
+    set_line_state("showtime_ptm")
+    wait_file_contains("daemon_e2.log", "board assigned transport vlan", 15)
+    # stop: op16 ack 0 + op3 close (scoped to frames sent from here on —
+    # earlier op16s are startup cleanups of absent links, ack status 1)
+    n_before = len(wire())
     stop_daemon(d, "e2")
     wait_file_contains("board_tcci.log", "wan adsl close", 10)
-    stop_frames = [f for f in wire() if f["dir"] == "b_REQ" and f["op"] in (16, 3)]
+    stop_frames = [f for f in wire()[n_before:] if f["dir"] == "b_REQ" and f["op"] in (16, 3)]
     stop_acks = {f["seq"]: f for f in wire()
                  if f["dir"] == "h_RESP" and f["op"] in (16, 3)}
+    assert any(f["op"] == 16 for f in stop_frames), \
+        "shutdown must tear down the provisioned link (op16)"
     for f in stop_frames:
         if f["op"] == 16:
             assert f["plen"] == 3, f"op16 payload_len {f['plen']} != 3"
@@ -294,6 +308,7 @@ def e3_restart(d):
     n_open = open(path("board_tcci.log")).read().count("wan adsl open")
     d = start_daemon("e3")
     wait_file_contains("daemon_e3.log", "line_config_up: mod=Vdsl2", 15)
+    # line is still in showtime → provisioning re-runs at line-Up
     wait_file_contains("daemon_e3.log", "board assigned transport vlan", 15)
     # the second apply of the double-apply must re-open the line
     wait_file_contains("board_tcci.log", "wan adsl open", 10)
@@ -307,8 +322,9 @@ def e3_restart(d):
 
 
 def e5_showtime(board, d):
-    """Inject showtime: board status thread materializes the queued op15,
-    daemon observes Up with real parsed rates."""
+    """Showtime metrics: op2 replies carry the injected rates/SNR and the
+    client renders them (showtime was injected in E3; provisioning ran
+    there at line-Up with the PTM link derived from mod=6)."""
     log("E5: injected showtime -> line Up + link materialization")
     sys_before = open(path("board_sys.log")).read() if os.path.exists(path("board_sys.log")) else ""
     set_line_state("showtime_ptm")
@@ -372,8 +388,13 @@ def e6_delete_after_materialization(board, d, sys_before):
     sys_after = open(path("board_sys.log")).read() if os.path.exists(path("board_sys.log")) else ""
     assert "nas8" in sys_after, "board did not materialize the PTM link " \
         "(expected nas8 ifconfig/smuxctl commands):\n" + sys_after
+    # scoped to the teardown: startup-cleanup op16s (absent link → ack
+    # status 1) are legitimate earlier in the log
+    n_before = len(wire())
     stop_daemon(d, "e3")
-    frames = wire()
+    frames = wire()[n_before:]
+    assert any(f["dir"] == "b_REQ" and f["op"] == 16 for f in frames), \
+        "teardown must remove the provisioned link (op16)"
     for i, f in enumerate(frames):
         if f["dir"] == "b_REQ" and f["op"] == 16:
             ack = next((a for a in frames if a["dir"] == "h_RESP" and a["op"] == 16
@@ -391,9 +412,15 @@ def e7_watchdog(board):
     set_line_state("down")  # a fresh silent line (earlier scenarios may leave showtime)
     time.sleep(3)           # let the board's status thread observe the drop
     d = start_daemon("e7")
-    wait_file_contains("daemon_e7.log", "board assigned transport vlan", 20)
-    n_open = open(path("board_tcci.log")).read().count("wan adsl open")
-    n_close = open(path("board_tcci.log")).read().count("wan adsl close")
+    # Silent line: no showtime → NO provisioning (the link type is
+    # unknowable); sync instead on the FULL double apply (second apply
+    # logs bitswap=true) — both of its opens must be inside the baseline.
+    wait_file_contains(
+        "daemon_e7.log",
+        "line_config_up: mod=Vdsl2 annex=B profiles=0x1ff bitswap=true", 20)
+    time.sleep(2)  # settle: board-side open strings land in the tcci log
+    tcci = open(path("board_tcci.log")).read()
+    n_open, n_close = tcci.count("wan adsl open"), tcci.count("wan adsl close")
     wait_file_contains("daemon_e7.log", "line silent (NoSignal)", 60)
     time.sleep(5)  # a full dwell past the warning — must stay quiet
     tcci = open(path("board_tcci.log")).read()
@@ -433,6 +460,27 @@ def e8_fixture_replay(board):
         f"echo op16 fixture must be rejected with status 2, got {ack.hex()}"
     log("E8 PASS: fixtures misdecode exactly as analyzed")
     return board
+
+
+def e9_bad_config():
+    """Static config validation through the shipped binary: a fixed ADSL
+    line mode with forced PTM is physically impossible (ADSL standards
+    are ATM-only) and must abort startup with a clear error. Injected
+    via CLI overrides (the daemon's UCI context reads the target's
+    /etc/config, not the host's). Legal overrides (ATM on VDSL2) are
+    covered by unit tests."""
+    log("E9: impossible transport combo (adsl+ptm) rejected at load")
+    out = open(path("daemon_e9.log"), "w")
+    p = subprocess.Popen(
+        ["qemu-aarch64", "-L", AROOT, f"{AROOT}/usr/sbin/rbctl-dsl",
+         "daemon", "-i", "lan0.1.500",
+         "--line-mode", "adsl", "--xfer-mode", "ptm"],
+        stdout=out, stderr=subprocess.STDOUT)
+    code = p.wait(timeout=30)
+    text = open(path("daemon_e9.log")).read()
+    assert code != 0, f"impossible combo must abort startup:\n{text}"
+    assert "ATM-only" in text, f"error must name the rule:\n{text}"
+    log("E9 PASS")
 
 
 def main():
@@ -488,6 +536,8 @@ def main():
             stop_daemon(d, "last")
             d = None
         board = e8_fixture_replay(board)
+    if "E9" in SCENARIOS:
+        e9_bad_config()
     peers["board"] = board
 
     for s in sniffers:

@@ -9,7 +9,7 @@ use crate::constants;
 use super::ipc::StatusSnapshot;
 use super::Daemon;
 use super::state::SharedState;
-use crate::utils::{mapping, mgmt_link};
+use crate::utils::mgmt_link;
 use rbctl_proto::oem::pack::Modulation;
 use rbctl_proto::oem::unpack::LineState;
 

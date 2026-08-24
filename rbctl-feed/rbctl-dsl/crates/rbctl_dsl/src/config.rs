@@ -34,9 +34,10 @@ impl std::error::Error for ConfigError {}
 pub enum XferMode {
     Atm,
     Ptm,
-    /// Auto-detect from op2 response after the line trains.
-    /// The worker reads `data_path` (offset 0x06) and provisions
-    /// the matching PTM (op15) or ATM (op5) link.
+    /// Decide from the trained modulation (see [`Self::for_modulation`]).
+    /// The op2 `data_path` field is NOT trustworthy for this: it is a
+    /// power-on default that does not follow training (verified
+    /// on-target — it read `Atm` while a VDSL2 line was in showtime).
     Auto,
 }
 
@@ -49,6 +50,62 @@ impl XferMode {
             Self::Auto => "Auto",
         }
     }
+
+    /// TC layer implied by a trained modulation: VDSL2 → PTM, ADSL
+    /// family → ATM. Used to resolve `Auto` (and the selftest) — the
+    /// board does not derive the data-link type from the connection by
+    /// itself, and the op2 `data_path` field does not follow training.
+    pub fn for_modulation(m: Modulation) -> Self {
+        match m {
+            Modulation::Vdsl2 | Modulation::Multimode => Self::Ptm,
+            _ => Self::Atm,
+        }
+    }
+
+    /// Whether this transport can carry a line trained in `m`.
+    ///
+    /// This is a *physical* compatibility check, not a preference: an
+    /// explicitly configured transport is honored as an operator
+    /// override even when unusual (e.g. ATM on VDSL2 is spec-legal) —
+    /// only combinations the standards cannot carry are rejected.
+    ///
+    /// - ADSL standards (G.992.x) are **ATM-only** — PTM is impossible.
+    /// - VDSL2 (G.993.2) carries **both**; PTM is the norm, ATM is the
+    ///   legal override.
+    /// - Multimode resolves at train time to a concrete standard, so
+    ///   both are accepted here and the final check runs against the
+    ///   *trained* modulation.
+    /// - Future modes slot in here, e.g. G.fast (G.9701) is PTM-only.
+    pub fn compatible_with(self, m: Modulation) -> bool {
+        match m {
+            Modulation::Vdsl2 | Modulation::Multimode => true,
+            // ADSL family: ANSI T1.413, G.dmt, G.lite, G.dmt.bis, ADSL2+,
+            // ADSL-multimode.
+            _ => self == Self::Atm,
+        }
+    }
+}
+
+/// Static config validation of the modulation × transport pair.
+///
+/// Blocks only what can never work even before the line trains: a
+/// **fixed** ADSL line mode with forced PTM. `Multimode` is accepted
+/// with any transport (the concrete standard appears at train time and
+/// is then checked dynamically against the trained modulation); ATM on
+/// VDSL2 is a spec-legal operator override and passes.
+fn validate_xfer(modulation: Modulation, xfer: XferMode) -> Result<(), ConfigError> {
+    if xfer == XferMode::Ptm
+        && !matches!(
+            modulation,
+            Modulation::Vdsl2 | Modulation::Multimode
+        )
+    {
+        return Err(ConfigError(format!(
+            "xfer_mode 'ptm' is impossible for line_mode {modulation:?} \
+             (ADSL standards are ATM-only)"
+        )));
+    }
+    Ok(())
 }
 
 impl std::str::FromStr for XferMode {
@@ -320,6 +377,7 @@ impl DslConfig {
         let annex = parse_annex(&annex_str)?;
         let mut profiles = parse_tone(&tone)?;
         let xfer_mode = parse_xfer_mode(&xfer_str)?;
+        validate_xfer(modulation, xfer_mode)?;
 
         // VDSL2 profiles are meaningless for ADSL modulations — zero them
         // (matching pack_dsl_line and the original firmware behavior).
@@ -449,8 +507,7 @@ mod tests {
 
     #[test]
     fn xfer_mode_parsing() {
-        assert_eq!(parse_xfer_mode("ptm").unwrap(), XferMode::Ptm);
-        assert_eq!(parse_xfer_mode("atm").unwrap(), XferMode::Atm);
+        assert_eq!(parse_xfer_mode("ptm").unwrap(), XferMode::Ptm);        assert_eq!(parse_xfer_mode("atm").unwrap(), XferMode::Atm);
         assert_eq!(parse_xfer_mode("auto").unwrap(), XferMode::Auto);
         assert_eq!(parse_xfer_mode("").unwrap(), XferMode::Ptm);
         assert!(parse_xfer_mode("xyz").is_err());
@@ -460,6 +517,48 @@ mod tests {
     fn encaps_parsing() {
         assert_eq!(parse_encaps("llc").unwrap(), AtmEncap::Llc);
         assert_eq!(parse_encaps("vcmux").unwrap(), AtmEncap::Vcmux);
+    }
+
+    #[test]
+    fn xfer_mode_follows_modulation() {
+        use XferMode::*;
+        assert_eq!(XferMode::for_modulation(Modulation::Vdsl2), Ptm);
+        assert_eq!(XferMode::for_modulation(Modulation::Multimode), Ptm);
+        assert_eq!(XferMode::for_modulation(Modulation::Adsl2Plus), Atm);
+        assert_eq!(XferMode::for_modulation(Modulation::AdslGdmt), Atm);
+        assert_eq!(XferMode::for_modulation(Modulation::AdslMultimode), Atm);
+    }
+
+    #[test]
+    fn xfer_compatibility_rules() {
+        use XferMode::*;
+        // ADSL standards are ATM-only: PTM is physically impossible.
+        for m in [
+            Modulation::AdslAnsiT1413, Modulation::AdslGdmt, Modulation::AdslGlite,
+            Modulation::AdslGdmtBis, Modulation::Adsl2Plus, Modulation::AdslMultimode,
+        ] {
+            assert!(Atm.compatible_with(m), "ATM on {m:?}");
+            assert!(!Ptm.compatible_with(m), "PTM on {m:?} must be blocked");
+        }
+        // VDSL2 carries both: PTM the norm, ATM a spec-legal override.
+        assert!(Ptm.compatible_with(Modulation::Vdsl2));
+        assert!(Atm.compatible_with(Modulation::Vdsl2));
+        // Multimode resolves at train time — both accepted statically.
+        assert!(Ptm.compatible_with(Modulation::Multimode));
+        assert!(Atm.compatible_with(Modulation::Multimode));
+    }
+
+    #[test]
+    fn static_config_validation() {
+        // Fixed ADSL + forced PTM is rejected at load.
+        let e = validate_xfer(Modulation::Adsl2Plus, XferMode::Ptm).unwrap_err().0;
+        assert!(e.contains("ATM-only"), "got: {e}");
+        // Legal combos pass, including the unusual VDSL2+ATM override.
+        assert!(validate_xfer(Modulation::Adsl2Plus, XferMode::Atm).is_ok());
+        assert!(validate_xfer(Modulation::Vdsl2, XferMode::Ptm).is_ok());
+        assert!(validate_xfer(Modulation::Vdsl2, XferMode::Atm).is_ok());
+        assert!(validate_xfer(Modulation::Multimode, XferMode::Ptm).is_ok());
+        assert!(validate_xfer(Modulation::Multimode, XferMode::Auto).is_ok());
     }
 
     #[test]

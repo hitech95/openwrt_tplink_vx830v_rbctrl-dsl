@@ -40,6 +40,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
 
+use rbctl_proto::oem::pack::Modulation;
 use rbctl_proto::oem::unpack::{DataPath, LineState};
 
 use crate::config::{CliOverrides, DslConfig, XferMode};
@@ -302,10 +303,19 @@ impl Daemon {
             // by a previous daemon's shutdown op3 with an unchanged
             // config. OpenLine's double apply guarantees the final op1
             // executes the full path ending in `wan adsl open`.
+            //
+            // First, startup hygiene: a previous daemon (crash) or the
+            // selftest may have left a data link on the transport VLAN —
+            // possibly of the wrong type for the line about to train.
+            // Clear it before opening; provisioning re-runs at line-Up
+            // with the type derived from the trained modulation.
+            let _ = daemon.cmd_tx.send(WorkerCmd::CleanupLink {
+                vlan: daemon.transport_vlan(),
+            });
             let _ = daemon.cmd_tx.send(WorkerCmd::OpenLine);
             // Data-plane provisioning is NOT queued here — it follows from
-            // the LineConfigApplied (fixed mode) / line-Up (auto) events,
-            // which keeps exactly one provisioning path.
+            // the line-Up event (link type derived from the trained
+            // modulation), which keeps exactly one provisioning path.
             // Emit initial TC-layer status (monitor mode has no configured
             // mode to report; it emits on Up transitions instead).
             if let Some(script) = daemon.notify_script.as_deref() {
@@ -488,27 +498,22 @@ impl Daemon {
                 self.link_provisioned = false;
                 self.vlan_owned = false;
             }
-            WorkerEvent::LineState { status, data_path } => {
+            WorkerEvent::LineState { status, data_path, modulation } => {
                 let event = link_status_to_event(status);
                 log::info!("line state: {status:?} → {event:?}");
                 if let Some(script) = self.notify_script.as_deref() {
                     hotplug::emit_status(script, event);
                 }
                 if status.is_up() {
-                    self.on_line_up(data_path);
+                    self.on_line_up(data_path, modulation);
                 }
             }
             WorkerEvent::LineConfigApplied => {
                 self.config_applied = true;
-                // Fixed-mode deferred retry: provisioning follows config.
-                if !self.monitor && !self.link_provisioned {
-                    if let XferMode::Ptm | XferMode::Atm = self.cfg.xfer_mode {
-                        let _ = self.cmd_tx.send(WorkerCmd::ProvisionLink {
-                            xfer: self.cfg.xfer_mode,
-                            vlan: self.transport_vlan(),
-                        });
-                    }
-                }
+                // Data-plane provisioning deliberately does NOT run here:
+                // the link type is only known once the line trains, so it
+                // is derived from the trained modulation at line-Up
+                // (on_line_up) for every mode — fixed and Auto alike.
             }
             WorkerEvent::LinkProvisioned { vlan } => {
                 self.link_provisioned = true;
@@ -531,38 +536,85 @@ impl Daemon {
         }
     }
 
-    /// Line reached Up — record the observed TC mode, emit hotplug, and
-    /// trigger auto provisioning when appropriate.
-    fn on_line_up(&mut self, data_path: DataPath) {
-        // Observed mode from op2 — authoritative for monitor display and
-        // auto provisioning.
-        let observed = match data_path {
-            DataPath::Ptm => XferMode::Ptm,
-            DataPath::Atm => XferMode::Atm,
-            DataPath::Unknown(_) => self.cfg.xfer_mode,
+    /// Line reached Up — resolve the data-link type and provision.
+    ///
+    /// Resolution order:
+    ///
+    /// 1. **Explicit `xfer_mode`** (operator override) is honored
+    ///    as-is — including unusual-but-legal combos like ATM on VDSL2.
+    ///    Only physically impossible combinations are blocked (PTM on a
+    ///    trained ADSL standard; see [`XferMode::compatible_with`] —
+    ///    future G.fast would be PTM-only). A block is an error + no
+    ///    provisioning.
+    /// 2. **Auto** derives from the **trained modulation**
+    ///    (VDSL2→PTM, ADSL→ATM). The op2 `data_path` field is NOT
+    ///    authoritative — it is a power-on default that does not follow
+    ///    training (verified on-target: read `Atm` while a VDSL2 line
+    ///    was in showtime); it serves only as the fallback for an
+    ///    unknown modulation code, and a disagreement is logged.
+    fn on_line_up(&mut self, data_path: DataPath, modulation: Option<Modulation>) {
+        let effective = match self.cfg.xfer_mode {
+            forced @ (XferMode::Ptm | XferMode::Atm) => Some(forced),
+            XferMode::Auto => modulation.map(|m| {
+                let derived = XferMode::for_modulation(m);
+                let field = match data_path {
+                    DataPath::Ptm => Some(XferMode::Ptm),
+                    DataPath::Atm => Some(XferMode::Atm),
+                    DataPath::Unknown(_) => None,
+                };
+                if field.is_some_and(|f| f != derived) {
+                    log::warn!(
+                        "op2 data_path field says {data_path:?} but trained modulation \
+                         is {m:?} — using {derived:?} (field does not follow training)"
+                    );
+                }
+                derived
+            }).or_else(|| match data_path {
+                DataPath::Ptm => Some(XferMode::Ptm),
+                DataPath::Atm => Some(XferMode::Atm),
+                DataPath::Unknown(code) => {
+                    log::warn!(
+                        "line up with unknown modulation and data_path code {code} \
+                         — cannot resolve the link type, not provisioning"
+                    );
+                    None
+                }
+            }),
         };
-        if self.monitor || self.cfg.xfer_mode == XferMode::Auto {
+
+        // Physical compatibility of the resolved transport with the
+        // trained modulation (only blocks what the standards cannot
+        // carry, e.g. PTM on ADSL — a Multimode line that trained ADSL
+        // despite a forced/configured PTM).
+        let blocked = matches!((modulation, effective),
+            (Some(m), Some(x)) if !x.compatible_with(m));
+        if blocked {
+            let (m, x) = (modulation.unwrap(), effective.unwrap());
+            log::error!(
+                "transport {x:?} cannot carry a trained {m:?} line — \
+                 not provisioning (fix xfer_mode/line_mode in config)"
+            );
+        }
+
+        if let Some(xfer) = effective {
             let mut st = self.state.lock().unwrap();
-            st.xfer_mode = Some(observed);
+            st.xfer_mode = Some(xfer);
         }
-        if !self.tc_emitted {
-            let emit_mode = if self.monitor || self.cfg.xfer_mode == XferMode::Auto {
-                observed
-            } else {
-                self.cfg.xfer_mode
-            };
-            if let Some(script) = self.notify_script.as_deref() {
-                hotplug::emit_tc_layer(script, emit_mode);
+        if let (Some(xfer), false) = (effective, blocked) {
+            if !self.tc_emitted {
+                if let Some(script) = self.notify_script.as_deref() {
+                    hotplug::emit_tc_layer(script, xfer);
+                }
+                self.tc_emitted = true;
             }
-            self.tc_emitted = true;
-        }
-        // Auto mode: provision the link now that the actual TC mode is
-        // known.
-        if !self.monitor && self.cfg.xfer_mode == XferMode::Auto && !self.link_provisioned {
-            let _ = self.cmd_tx.send(WorkerCmd::ProvisionLink {
-                xfer: observed,
-                vlan: self.transport_vlan(),
-            });
+            // Provision now that the link type is known — the single
+            // provisioning path for every mode (forced and Auto alike).
+            if !self.monitor && !self.link_provisioned {
+                let _ = self.cmd_tx.send(WorkerCmd::ProvisionLink {
+                    xfer,
+                    vlan: self.transport_vlan(),
+                });
+            }
         }
     }
 
@@ -602,14 +654,10 @@ impl Daemon {
             // A changed config differs from the board cache by
             // construction, so a plain op1 always takes the full apply
             // path (setters + `wan adsl reset` inside them + final
-            // `wan adsl open`) — no deliberate line-down needed.
+            // `wan adsl open`) — no deliberate line-down needed. The line
+            // retrains, and provisioning re-runs at line-Up with the link
+            // type re-derived from the (possibly new) trained modulation.
             let _ = self.cmd_tx.send(WorkerCmd::ApplyLineConfig);
-            if let XferMode::Ptm | XferMode::Atm = self.cfg.xfer_mode {
-                let _ = self.cmd_tx.send(WorkerCmd::ProvisionLink {
-                    xfer: self.cfg.xfer_mode,
-                    vlan: self.transport_vlan(),
-                });
-            }
         } else {
             log::info!("no line-param changes");
         }

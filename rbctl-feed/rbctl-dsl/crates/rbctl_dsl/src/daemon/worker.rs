@@ -19,6 +19,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use rbctl_proto::oem::pack::Modulation;
 use rbctl_proto::oem::unpack::{DataPath, LineState};
 
 use crate::board::{Board, BoardError, FwProgress, FwUpgradeResult};
@@ -56,6 +57,11 @@ pub enum WorkerCmd {
     /// op6/op16 — deprovision the data-plane link on the board (the host
     /// VLAN is deleted by the daemon).
     RemoveLink { xfer: XferMode, vlan: u16 },
+    /// Startup hygiene: best-effort removal of a stale data link on
+    /// `vlan` (left by a crashed daemon or the selftest). Both del
+    /// opcodes tolerate "not present", so one round each of op16 + op6
+    /// clears whichever type may be lingering without side effects.
+    CleanupLink { vlan: u16 },
     /// op3 + delay + OpenLine — bounce the line (user-initiated restart:
     /// close, then bring back up).
     RestartLine,
@@ -79,9 +85,15 @@ pub enum WorkerEvent {
     BoardReachable,
     /// The board stopped responding to op2.
     BoardUnreachable,
-    /// Line state transition. `data_path` is the op2-observed TC mode,
-    /// meaningful when `status` is `Up` (drives auto provisioning).
-    LineState { status: LineState, data_path: DataPath },
+    /// Line state transition. `data_path` is the op2-observed TC field
+    /// (a power-on default that does NOT follow training) and
+    /// `modulation` the trained modulation — the latter is the
+    /// authority for link provisioning (see `XferMode::for_modulation`).
+    LineState {
+        status: LineState,
+        data_path: DataPath,
+        modulation: Option<Modulation>,
+    },
     /// op1 acknowledged by the board.
     LineConfigApplied,
     /// op5/op15 acknowledged; `vlan` is the board-assigned transport VLAN.
@@ -250,6 +262,20 @@ impl BoardWorker {
                     log::warn!("link teardown ({xfer:?} vlan={vlan}): {e}");
                 }
             }
+            WorkerCmd::CleanupLink { vlan } => {
+                // Best-effort, quiet: "not present" (status 1) is the
+                // expected outcome on a clean board. A crashed previous
+                // daemon or the selftest may have left a link of either
+                // type, so both del opcodes run once with no retries.
+                self.board.set_retries(1);
+                log::debug!("startup cleanup: clearing stale data link on vlan {vlan} (if any)");
+                if let Err(e) = self.board.ptm_link_del(vlan) {
+                    log::debug!("startup cleanup: ptm_link_del: {e}");
+                }
+                if let Err(e) = self.board.atm_link_del(vlan) {
+                    log::debug!("startup cleanup: atm_link_del: {e}");
+                }
+            }
             WorkerCmd::RestartLine => {
                 log::info!("restart-line — bouncing DSL line");
                 // op3 = deliberate close (`wan adsl close`), then the
@@ -335,6 +361,7 @@ impl BoardWorker {
             Ok(line) => {
                 let status = line.link_status;
                 let data_path = line.data_path;
+                let modulation = line.modulation();
 
                 if !self.board_reachable {
                     self.board_reachable = true;
@@ -357,12 +384,21 @@ impl BoardWorker {
 
                 if Some(status) != self.last_status {
                     self.last_status = Some(status);
-                    let _ = self.event_tx.send(WorkerEvent::LineState { status, data_path });
+                    let _ = self
+                        .event_tx
+                        .send(WorkerEvent::LineState { status, data_path, modulation });
                 }
             }
             Err(BoardError::Timeout) => {
                 if self.board_reachable {
                     self.board_reachable = false;
+                    // Forget the last reported state so the next
+                    // successful poll re-reports it as a transition —
+                    // the daemon resets its provisioning flags on
+                    // unreachability and must re-derive the link type
+                    // when the board answers again (a still-trained
+                    // line re-fires line-Up → re-provisioning).
+                    self.last_status = None;
                     let _ = self.event_tx.send(WorkerEvent::BoardUnreachable);
                 }
                 let mut st = self.state.lock().unwrap();

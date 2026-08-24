@@ -10,6 +10,7 @@ use rbctl_proto::oem::unpack::DataPath;
 use tinyln_rs::rtnl::RtnlLink;
 
 use crate::board::Board;
+use crate::config::XferMode;
 use crate::constants;
 use crate::utils::mgmt_link;
 
@@ -197,7 +198,12 @@ impl Selftest {
         }
 
         // ── Step 3: detect modulation + provision link ──────────────────
+        // The link type is DERIVED from the trained modulation
+        // (VDSL2→PTM, ADSL→ATM): the op2 `data_path` field is a
+        // power-on default that does not follow training (observed
+        // on-target reporting Atm while a VDSL2 line was in showtime).
         let mut detected = String::new();
+        let mut provisioned: Option<XferMode> = None;
 
         if let Some(ref o) = line_obj {
             let dp = o.data_path;
@@ -213,17 +219,51 @@ impl Selftest {
             );
             log::info!("line up: {detected}");
 
-            match dp {
-                DataPath::Ptm => {
-                    log::info!("detected: VDSL2/PTM — provisioning PTM link (vlan={ST_TEST_VLAN})");
+            // Trained modulation wins; fall back to the field only if
+            // the modulation code is unknown.
+            let xfer = match o.modulation() {
+                Some(m) => {
+                    let derived = XferMode::for_modulation(m);
+                    let field = match dp {
+                        DataPath::Ptm => Some(XferMode::Ptm),
+                        DataPath::Atm => Some(XferMode::Atm),
+                        DataPath::Unknown(_) => None,
+                    };
+                    if field.is_some_and(|f| f != derived) {
+                        log::warn!(
+                            "op2 data_path field says {dp:?} but trained modulation \
+                             is {m:?} — using {derived:?} (field does not follow training)"
+                        );
+                    }
+                    derived
+                }
+                None => match dp {
+                    DataPath::Ptm => XferMode::Ptm,
+                    DataPath::Atm => XferMode::Atm,
+                    DataPath::Unknown(code) => {
+                        log::warn!(
+                            "unknown modulation {mode} and data_path code {code} \
+                             — skipping link provisioning"
+                        );
+                        XferMode::Auto
+                    }
+                },
+            };
+
+            match xfer {
+                XferMode::Ptm => {
+                    log::info!("link type: PTM (VDSL) — provisioning PTM link (vlan={ST_TEST_VLAN})");
                     match board.ptm_link_add(0, 0, 0, ST_TEST_VLAN) {
-                        Ok(vlan) => log::info!("op15: ACK vlan={vlan}"),
+                        Ok(vlan) => {
+                            log::info!("op15: ACK vlan={vlan}");
+                            provisioned = Some(XferMode::Ptm);
+                        }
                         Err(crate::board::BoardError::Timeout) => log::info!("op15: no response"),
                         Err(e) => log::error!("op15: ERROR {e}"),
                     }
                 }
-                DataPath::Atm => {
-                    log::info!("detected: ADSL/ATM — provisioning ATM link (vlan={ST_TEST_VLAN})");
+                XferMode::Atm => {
+                    log::info!("link type: ATM (ADSL) — provisioning ATM link (vlan={ST_TEST_VLAN})");
                     let mut p = AtmLinkParams::default();
                     p.vpi = constants::ATM_DEFAULT_VPI;
                     p.vci = constants::ATM_DEFAULT_VCI;
@@ -233,14 +273,16 @@ impl Selftest {
                     p.pcr = 1000;
                     p.vlan_id = ST_TEST_VLAN;
                     match board.atm_link_add(&p) {
-                        Ok(vlan) => log::info!("op5: ACK vlan={vlan}"),
+                        Ok(vlan) => {
+                            log::info!("op5: ACK vlan={vlan}");
+                            provisioned = Some(XferMode::Atm);
+                        }
                         Err(crate::board::BoardError::Timeout) => log::info!("op5: no response"),
                         Err(e) => log::error!("op5: ERROR {e}"),
                     }
                 }
-                DataPath::Unknown(code) => {
-                    log::warn!("unknown data_path code {code} — skipping link provisioning");
-                }
+                // Unreachable: resolved to Ptm/Atm above.
+                XferMode::Auto => {}
             }
         } else {
             log::info!("line did not train within {}s timeout", ST_TRAIN_TIMEOUT.as_secs());
@@ -254,6 +296,25 @@ impl Selftest {
             }
             Err(crate::board::BoardError::Timeout) => log::info!("op4: no response"),
             Err(e) => log::error!("op4: ERROR {e}"),
+        }
+
+        // ── Step 5: teardown the provisioned data link ─────────────────
+        // The selftest must leave the board CLEAN: a data link left
+        // behind (e.g. an ATM link next to a later daemon's PTM link)
+        // breaks the board data plane. The line itself stays trained.
+        if let Some(xfer) = provisioned {
+            let r = match xfer {
+                XferMode::Ptm => board.ptm_link_del(ST_TEST_VLAN),
+                XferMode::Atm => board.atm_link_del(ST_TEST_VLAN),
+                XferMode::Auto => Ok(()),
+            };
+            match r {
+                Ok(()) => log::info!("cleanup: data link removed (vlan={ST_TEST_VLAN}, {xfer:?})"),
+                Err(crate::board::BoardError::Timeout) => {
+                    log::warn!("cleanup: link_del vlan={ST_TEST_VLAN} — no response")
+                }
+                Err(e) => log::warn!("cleanup: link_del vlan={ST_TEST_VLAN}: {e}"),
+            }
         }
 
         // ── Step 5: summary ────────────────────────────────────────────
