@@ -460,7 +460,7 @@ mod tests {
     use super::*;
     use rbctl_proto::checksum::set_checksum;
     use rbctl_proto::oem::MAGIC_OEM_COMMAND as MAGIC_COMMAND;
-    use rbctl_proto::oem::unpack::LinkStatus;
+    use rbctl_proto::oem::unpack::LineState;
     use std::cell::RefCell;
 
     /// Mock transport that auto-generates valid responses.
@@ -614,7 +614,7 @@ mod tests {
     fn get_line_obj_roundtrip() {
         let mut board = make_board();
         let obj = board.get_line_obj().unwrap();
-        assert_eq!(obj.link_status, LinkStatus::Up);
+        assert_eq!(obj.link_status, LineState::ShowtimeTcSync);
         assert_eq!(obj.metrics.down_rate, 40000);
     }
 
@@ -656,7 +656,7 @@ mod tests {
     fn line_status_via_get_line_obj() {
         let mut board = make_board();
         let obj = board.get_line_obj().unwrap();
-        assert_eq!(obj.link_status, LinkStatus::Up);
+        assert_eq!(obj.link_status, LineState::ShowtimeTcSync);
     }
 
     // ── error / edge case tests ───────────────────────────────────────
@@ -718,7 +718,7 @@ mod tests {
         board.sock.set_response(2, payload);
 
         let obj = board.get_line_obj().unwrap();
-        assert_eq!(obj.link_status, LinkStatus::NoSignal);
+        assert_eq!(obj.link_status, LineState::Silent);
     }
 
     #[test]

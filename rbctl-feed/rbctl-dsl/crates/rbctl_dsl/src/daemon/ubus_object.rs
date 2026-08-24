@@ -137,13 +137,13 @@ fn add_direction(bb: &mut BlobBuilder, name: &str, m: &LineMetrics, upstream: bo
 mod tests {
     use super::*;
     use crate::config::XferMode;
-    use rbctl_proto::oem::unpack::{DataPath, LinkStatus};
+    use rbctl_proto::oem::unpack::{DataPath, LineState};
 
     use super::super::state::new_shared_state;
 
     #[test]
     fn map_status_up() {
-        let (s, n, up) = mapping::map_link_status(LinkStatus::Up);
+        let (s, n, up) = mapping::map_link_status(LineState::ShowtimeTcSync);
         assert_eq!(s, "Showtime with TC-Layer sync");
         assert!(up);
         assert_eq!(n, mapping::lstate::SHOWTIME_TC_SYNC);
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn map_status_nosignal() {
-        let (s, n, up) = mapping::map_link_status(LinkStatus::NoSignal);
+        let (s, n, up) = mapping::map_link_status(LineState::Silent);
         assert_eq!(s, "Silent");
         assert!(!up);
         assert_eq!(n, mapping::lstate::SILENT);
@@ -161,14 +161,14 @@ mod tests {
 
     #[test]
     fn map_status_handshake() {
-        let (s, n, _) = mapping::map_link_status(LinkStatus::EstablishingLink);
+        let (s, n, _) = mapping::map_link_status(LineState::Handshake);
         assert_eq!(s, "Handshake");
         assert_eq!(n, mapping::lstate::HANDSHAKE);
     }
 
     #[test]
     fn map_status_training() {
-        let (s, n, _) = mapping::map_link_status(LinkStatus::Initializing);
+        let (s, n, _) = mapping::map_link_status(LineState::FullInit);
         assert_eq!(s, "Full init");
         assert_eq!(n, mapping::lstate::FULL_INIT);
     }
@@ -192,7 +192,7 @@ mod tests {
         let st = DslState {
             line_obj: Some(LineObj {
                 status: 0,
-                link_status: LinkStatus::Up,
+                link_status: LineState::ShowtimeTcSync,
                 modulation_code: 6,
                 data_path: DataPath::Ptm,
                 annex_code: 1,

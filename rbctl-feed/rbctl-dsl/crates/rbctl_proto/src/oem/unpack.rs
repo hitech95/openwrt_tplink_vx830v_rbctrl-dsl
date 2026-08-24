@@ -8,27 +8,88 @@ use super::pack::{Annex, Modulation, Vdsl2Profiles};
 
 // ─── Link status ────────────────────────────────────────────────────────
 
-/// Board-reported link state (`linkStatus` field at reply offset `0x04`).
+/// Canonical line state — the shared vocabulary of the board protocol
+/// (op2 `linkStatus` byte), the daemon IPC wire, and the Lantiq/LuCI
+/// ubus ABI.
 ///
-/// Codes 0 and 2 both mean `NoSignal` (duplicate in the original firmware).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinkStatus {
-    NoSignal,
-    Up,
-    Initializing,
-    EstablishingLink,
+/// Board codes map onto the training/showtime states (see [`Self::from_code`]);
+/// the remaining variants (`NotInitialized`, `Idle`, `ShowtimeNoSync`) are
+/// lifecycle states the board never reports but the daemon/ubus ABI define
+/// (e.g. `NotInitialized` before the first successful poll, `ShowtimeNoSync`
+/// reserved by the Lantiq state machine).
+///
+/// Serialized like [`Annex`](super::pack::Annex)/[`Modulation`](super::pack::Modulation):
+/// the wire token is the exact variant name, parsed back via `FromStr`.
+/// `Unknown` keeps its board code: `Unknown(9)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineState {
+    #[default]
+    NotInitialized,
+    Idle,
+    Silent,
+    Handshake,
+    FullInit,
+    ShowtimeNoSync,
+    ShowtimeTcSync,
     Unknown(u8),
 }
 
-impl LinkStatus {
+impl LineState {
+    /// Decode the op2 `linkStatus` byte (reply offset `0x04`).
+    ///
+    /// Codes 0 and 2 both mean NoSignal (duplicate in the original firmware)
+    /// → [`Self::Silent`]; board code 1 trains with TC-layer sync.
     pub fn from_code(code: u8) -> Self {
         match code {
-            0 | 2 => Self::NoSignal,
-            1 => Self::Up,
-            3 => Self::Initializing,
-            4 => Self::EstablishingLink,
+            0 | 2 => Self::Silent,
+            1 => Self::ShowtimeTcSync,
+            3 => Self::FullInit,
+            4 => Self::Handshake,
             other => Self::Unknown(other),
         }
+    }
+
+    /// True for the showtime states (line trained and passing data).
+    pub fn is_up(self) -> bool {
+        matches!(self, Self::ShowtimeNoSync | Self::ShowtimeTcSync)
+    }
+}
+
+impl core::fmt::Display for LineState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotInitialized => f.write_str("NotInitialized"),
+            Self::Idle => f.write_str("Idle"),
+            Self::Silent => f.write_str("Silent"),
+            Self::Handshake => f.write_str("Handshake"),
+            Self::FullInit => f.write_str("FullInit"),
+            Self::ShowtimeNoSync => f.write_str("ShowtimeNoSync"),
+            Self::ShowtimeTcSync => f.write_str("ShowtimeTcSync"),
+            Self::Unknown(code) => write!(f, "Unknown({code})"),
+        }
+    }
+}
+
+impl core::str::FromStr for LineState {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "NotInitialized" => Self::NotInitialized,
+            "Idle" => Self::Idle,
+            "Silent" => Self::Silent,
+            "Handshake" => Self::Handshake,
+            "FullInit" => Self::FullInit,
+            "ShowtimeNoSync" => Self::ShowtimeNoSync,
+            "ShowtimeTcSync" => Self::ShowtimeTcSync,
+            other => {
+                let code = other
+                    .strip_prefix("Unknown(")
+                    .ok_or(())?
+                    .strip_suffix(')')
+                    .ok_or(())?;
+                Self::Unknown(code.parse().map_err(|_| ())?)
+            }
+        })
     }
 }
 
@@ -83,7 +144,7 @@ pub struct LineMetrics {
 #[derive(Debug, Clone)]
 pub struct LineObj {
     pub status: u32,
-    pub link_status: LinkStatus,
+    pub link_status: LineState,
     pub modulation_code: u8,
     pub data_path: DataPath,
     pub annex_code: u8,
@@ -123,7 +184,7 @@ pub fn parse_line_obj(data: &[u8]) -> Result<LineObj, &'static str> {
     };
     Ok(LineObj {
         status: u32_at(0x00),
-        link_status: LinkStatus::from_code(data[0x04]),
+        link_status: LineState::from_code(data[0x04]),
         modulation_code: data[0x05],
         data_path: DataPath::from_code(data[0x06]),
         annex_code: data[0x07],
@@ -246,7 +307,7 @@ mod tests {
     fn parse_line_obj_up_vdsl2() {
         let data = build_line_reply();
         let line = parse_line_obj(&data).unwrap();
-        assert_eq!(line.link_status, LinkStatus::Up);
+        assert_eq!(line.link_status, LineState::ShowtimeTcSync);
         assert_eq!(line.modulation(), Some(Modulation::Vdsl2));
         assert_eq!(line.annex(), Some(Annex::B));
         assert_eq!(line.data_path, DataPath::Ptm);
@@ -273,7 +334,45 @@ mod tests {
         let mut data = build_line_reply();
         data[0x04] = 0; // NoSignal
         let line = parse_line_obj(&data).unwrap();
-        assert_eq!(line.link_status, LinkStatus::NoSignal);
+        assert_eq!(line.link_status, LineState::Silent);
+        // code 2 is the duplicate NoSignal
+        data[0x04] = 2;
+        assert_eq!(parse_line_obj(&data).unwrap().link_status, LineState::Silent);
+    }
+
+    #[test]
+    fn line_state_codes() {
+        assert_eq!(LineState::from_code(0), LineState::Silent);
+        assert_eq!(LineState::from_code(1), LineState::ShowtimeTcSync);
+        assert_eq!(LineState::from_code(3), LineState::FullInit);
+        assert_eq!(LineState::from_code(4), LineState::Handshake);
+        assert_eq!(LineState::from_code(9), LineState::Unknown(9));
+        assert!(LineState::ShowtimeTcSync.is_up());
+        assert!(LineState::ShowtimeNoSync.is_up());
+        assert!(!LineState::FullInit.is_up());
+        assert!(!LineState::Silent.is_up());
+    }
+
+    #[test]
+    fn line_state_token_roundtrip() {
+        use core::str::FromStr;
+        for ls in [
+            LineState::NotInitialized,
+            LineState::Idle,
+            LineState::Silent,
+            LineState::Handshake,
+            LineState::FullInit,
+            LineState::ShowtimeNoSync,
+            LineState::ShowtimeTcSync,
+            LineState::Unknown(9),
+        ] {
+            let token = ls.to_string();
+            assert_eq!(LineState::from_str(&token), Ok(ls), "{token}");
+        }
+        assert_eq!(LineState::Unknown(9).to_string(), "Unknown(9)");
+        assert!(LineState::from_str("NoSignal").is_err()); // old board name
+        assert!(LineState::from_str("Up").is_err());
+        assert!(LineState::from_str("Unknown(x)").is_err());
     }
 
     #[test]

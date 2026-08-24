@@ -40,7 +40,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use rbctl_proto::oem::unpack::{DataPath, LinkStatus};
+use rbctl_proto::oem::unpack::{DataPath, LineState};
 
 use crate::config::{CliOverrides, DslConfig, XferMode};
 use crate::constants;
@@ -138,12 +138,13 @@ impl PidLock {
 
 // ── free helpers ─────────────────────────────────────────────────────────
 
-fn link_status_to_event(status: LinkStatus) -> LineEvent {
+fn link_status_to_event(status: LineState) -> LineEvent {
     match status {
-        LinkStatus::Up => LineEvent::Up,
-        LinkStatus::Initializing => LineEvent::Training,
-        LinkStatus::EstablishingLink => LineEvent::Handshake,
-        LinkStatus::NoSignal | LinkStatus::Unknown(_) => LineEvent::Down,
+        LineState::ShowtimeTcSync | LineState::ShowtimeNoSync => LineEvent::Up,
+        LineState::FullInit => LineEvent::Training,
+        LineState::Handshake => LineEvent::Handshake,
+        LineState::Silent | LineState::Unknown(_) => LineEvent::Down,
+        LineState::NotInitialized | LineState::Idle => LineEvent::Down,
     }
 }
 
@@ -442,7 +443,7 @@ impl Daemon {
             .as_ref()
             .map(|l| l.link_status);
         match status {
-            Some(LinkStatus::NoSignal) if !self.nosignal_warned => {
+            Some(LineState::Silent) if !self.nosignal_warned => {
                 let since = *self.nosignal_since.get_or_insert_with(Instant::now);
                 if since.elapsed() >= constants::NOSIGNAL_WATCHDOG {
                     log::warn!(
@@ -493,7 +494,7 @@ impl Daemon {
                 if let Some(script) = self.notify_script.as_deref() {
                     hotplug::emit_status(script, event);
                 }
-                if status == LinkStatus::Up {
+                if status.is_up() {
                     self.on_line_up(data_path);
                 }
             }
@@ -748,14 +749,14 @@ mod tests {
 
     #[test]
     fn link_status_events() {
-        assert_eq!(link_status_to_event(LinkStatus::Up), LineEvent::Up);
-        assert_eq!(link_status_to_event(LinkStatus::NoSignal), LineEvent::Down);
+        assert_eq!(link_status_to_event(LineState::ShowtimeTcSync), LineEvent::Up);
+        assert_eq!(link_status_to_event(LineState::Silent), LineEvent::Down);
         assert_eq!(
-            link_status_to_event(LinkStatus::Initializing),
+            link_status_to_event(LineState::FullInit),
             LineEvent::Training
         );
         assert_eq!(
-            link_status_to_event(LinkStatus::EstablishingLink),
+            link_status_to_event(LineState::Handshake),
             LineEvent::Handshake
         );
     }

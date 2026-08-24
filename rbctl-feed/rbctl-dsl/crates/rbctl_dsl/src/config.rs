@@ -40,6 +40,29 @@ pub enum XferMode {
     Auto,
 }
 
+impl XferMode {
+    /// Stable wire token.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Atm => "Atm",
+            Self::Ptm => "Ptm",
+            Self::Auto => "Auto",
+        }
+    }
+}
+
+impl std::str::FromStr for XferMode {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "Atm" => Self::Atm,
+            "Ptm" => Self::Ptm,
+            "Auto" => Self::Auto,
+            _ => return Err(()),
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AtmConfig {
     pub vpi: u8,

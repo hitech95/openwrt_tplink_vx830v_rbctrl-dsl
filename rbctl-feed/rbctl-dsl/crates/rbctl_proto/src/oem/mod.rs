@@ -30,7 +30,7 @@ pub use firmware::{
     STAGE_STREAM, STAGE_VERIFY, CHUNK_SIZE,
 };
 pub use pack::{Annex, Modulation, Vdsl2Profiles};
-pub use unpack::{DataPath, LinkStatus};
+pub use unpack::{DataPath, LineState};
 
 /// Magic byte: OEM command/request frame (host → board).
 pub const MAGIC_OEM_COMMAND: u8 = 0x11;

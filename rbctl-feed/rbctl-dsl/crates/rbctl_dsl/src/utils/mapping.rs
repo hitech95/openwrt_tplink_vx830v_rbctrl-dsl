@@ -1,10 +1,11 @@
-//! Status mapping helpers — translate board protocol enums to LuCI/IPC
-//! display strings and Lantiq ABI enum values.
+//! Status mapping helpers — LuCI presentation values and Lantiq ABI
+//! numbers for the canonical [`LineState`] (defined in `rbctl_proto`,
+//! shared by the board protocol, the IPC wire, and ubus).
 //!
-//! These were previously in `ubus_obj.rs` but are used by both the IPC
-//! status snapshot (daemon.rs) and the ubus metrics builder.
+//! Both tables key off [`LineState`] directly, so IPC and ubus can never
+//! disagree.
 
-use rbctl_proto::oem::unpack::LinkStatus;
+use rbctl_proto::oem::unpack::LineState;
 
 // ── LSTATE_MAP ABI enum values (from dsl_cpe_ubus.c, do not renumber) ────
 //
@@ -23,15 +24,39 @@ pub mod lstate {
     pub const SHOWTIME_TC_SYNC: i32 = 7;
 }
 
-/// Map board [`LinkStatus`] → (LuCI state string, LSTATE_MAP enum, up bool).
-pub fn map_link_status(status: LinkStatus) -> (&'static str, i32, bool) {
-    match status {
-        LinkStatus::NoSignal => ("Silent", lstate::SILENT, false),
-        LinkStatus::EstablishingLink => ("Handshake", lstate::HANDSHAKE, false),
-        LinkStatus::Initializing => ("Full init", lstate::FULL_INIT, false),
-        LinkStatus::Up => ("Showtime with TC-Layer sync", lstate::SHOWTIME_TC_SYNC, true),
-        LinkStatus::Unknown(_) => ("Unknown", lstate::UNKNOWN, false),
+/// [`LineState`] → LuCI display label (ubus ABI strings, shared
+/// with the status client).
+pub fn state_label(state: LineState) -> &'static str {
+    match state {
+        LineState::NotInitialized => "Not initialized",
+        LineState::Idle => "Idle",
+        LineState::Silent => "Silent",
+        LineState::Handshake => "Handshake",
+        LineState::FullInit => "Full init",
+        LineState::ShowtimeNoSync => "Showtime without TC-Layer sync",
+        LineState::ShowtimeTcSync => "Showtime with TC-Layer sync",
+        LineState::Unknown(_) => "Unknown",
     }
+}
+
+/// [`LineState`] → LSTATE_MAP ABI number (ubus `state_num`).
+pub fn lstate_num(state: LineState) -> i32 {
+    match state {
+        LineState::NotInitialized => lstate::NOT_INITIALIZED,
+        LineState::Idle => lstate::IDLE,
+        LineState::Silent => lstate::SILENT,
+        LineState::Handshake => lstate::HANDSHAKE,
+        LineState::FullInit => lstate::FULL_INIT,
+        LineState::ShowtimeNoSync => lstate::SHOWTIME_NO_SYNC,
+        LineState::ShowtimeTcSync => lstate::SHOWTIME_TC_SYNC,
+        LineState::Unknown(_) => lstate::UNKNOWN,
+    }
+}
+
+/// [`LineState`] → (LuCI state string, LSTATE_MAP enum, up bool).
+/// Composite for the ubus object.
+pub fn map_link_status(status: LineState) -> (&'static str, i32, bool) {
+    (state_label(status), lstate_num(status), status.is_up())
 }
 
 /// Map board annex code → single-letter string for display.

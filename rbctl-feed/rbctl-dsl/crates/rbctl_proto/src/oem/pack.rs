@@ -27,6 +27,39 @@ pub enum Modulation {
     Multimode = 7,
 }
 
+impl Modulation {
+    /// Stable wire token (also the canonical display name).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AdslAnsiT1413 => "AdslAnsiT1413",
+            Self::AdslGdmt => "AdslGdmt",
+            Self::AdslGlite => "AdslGlite",
+            Self::AdslGdmtBis => "AdslGdmtBis",
+            Self::Adsl2Plus => "Adsl2Plus",
+            Self::AdslMultimode => "AdslMultimode",
+            Self::Vdsl2 => "Vdsl2",
+            Self::Multimode => "Multimode",
+        }
+    }
+}
+
+impl core::str::FromStr for Modulation {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "AdslAnsiT1413" => Self::AdslAnsiT1413,
+            "AdslGdmt" => Self::AdslGdmt,
+            "AdslGlite" => Self::AdslGlite,
+            "AdslGdmtBis" => Self::AdslGdmtBis,
+            "Adsl2Plus" => Self::Adsl2Plus,
+            "AdslMultimode" => Self::AdslMultimode,
+            "Vdsl2" => Self::Vdsl2,
+            "Multimode" => Self::Multimode,
+            _ => return Err(()),
+        })
+    }
+}
+
 /// DSL annex type (`annexTypes` @ `0x3edd20`).
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +73,41 @@ pub enum Annex {
     J = 6,
     BJ = 7,
     Auto = 8,
+}
+
+impl Annex {
+    /// Stable wire token (single letter, "Auto" for auto-negotiation).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::A => "A",
+            Self::B => "B",
+            Self::I => "I",
+            Self::M => "M",
+            Self::AL => "AL",
+            Self::ALM => "ALM",
+            Self::J => "J",
+            Self::BJ => "BJ",
+            Self::Auto => "Auto",
+        }
+    }
+}
+
+impl core::str::FromStr for Annex {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "A" => Self::A,
+            "B" => Self::B,
+            "I" => Self::I,
+            "M" => Self::M,
+            "AL" => Self::AL,
+            "ALM" => Self::ALM,
+            "J" => Self::J,
+            "BJ" => Self::BJ,
+            "Auto" => Self::Auto,
+            _ => return Err(()),
+        })
+    }
 }
 
 /// VDSL2 profile bitmask (`profiles` @ `0x3eddb0`).

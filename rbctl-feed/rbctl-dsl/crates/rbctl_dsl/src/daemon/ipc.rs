@@ -25,6 +25,14 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::str::FromStr;
+
+use rbctl_proto::oem::pack::{Annex, Modulation};
+use rbctl_proto::oem::unpack::LineState;
+
+use crate::config::XferMode;
+
+use super::state::FwStatus;
 
 pub const SOCK_PATH: &str = crate::constants::IPC_SOCK_PATH;
 
@@ -67,29 +75,56 @@ impl IpcCmd {
 ///
 /// Fields that only have a meaning once the line trained (modulation,
 /// annex, uptime, rates, SNR margins) are `Option`s: `None` until the line
-/// reaches `Up`. `Default::default()` therefore yields exactly the valid
-/// "untrained line" snapshot — builders only fill what they truly know.
+/// reaches showtime. `Default::default()` therefore yields exactly the
+/// valid "untrained line" snapshot — builders only fill what they truly
+/// know.
+///
+/// # Wire contract: typed values, fixed units, no pre-formatted strings
+///
+/// Every field crosses the wire as a typed value — enums as stable
+/// identifier tokens (parsed back via `FromStr`/`mapping::parse_*`),
+/// measurements as integers with a fixed unit — so clients can render any
+/// display format (`1h 35m`, dB, dBm, Mbps…) themselves:
+///
+/// | field         | type      | unit / domain                          |
+/// |---------------|-----------|----------------------------------------|
+/// | `state`       | `LineState` | shared enum token (`ShowtimeTcSync`, `Silent`, `Unknown(9)`; `NotInitialized` = no successful poll yet) |
+/// | `uptime`      | u64       | seconds                                |
+/// | `modulation`  | [`Modulation`](rbctl_proto::oem::pack::Modulation) | enum token, e.g. `Vdsl2` |
+/// | `annex`       | [`Annex`](rbctl_proto::oem::pack::Annex) | enum token (`A`, `B`, …)  |
+/// | `xfer_mode`   | [`XferMode`](crate::config::XferMode) | enum token (`Ptm`, `Atm`, `Auto`) |
+/// | `fw_status`   | [`FwStatus`](super::state::FwStatus) | enum token + data, see its wire grammar |
+/// | `down_rate` / `up_rate` | u32 | kbps                        |
+/// | `down_snr` / `up_snr`   | u32 | dB × 10 (63 = 6.3 dB)       |
+///
+/// The `status` CLI renders these for humans (`cli::format_status_body`);
+/// machine consumers parse the tokens/numbers directly.
 #[derive(Debug, Clone, Default)]
 pub struct StatusSnapshot {
-    pub state: String,
-    pub state_num: i32,
+    /// Latest line state — the shared [`LineState`] enum, `NotInitialized`
+    /// until the first successful op2 poll. The LuCI label and Lantiq
+    /// number mappings are presentation, applied by ubus and the client.
+    pub state: LineState,
+    /// Convenience: true while the line is up (showtime).
     pub up: bool,
-    /// None until the line is Up.
+    /// None until showtime. Seconds since the line came up.
     pub uptime_secs: Option<u64>,
-    /// Active (trained) modulation — None until the line is Up.
-    pub modulation: Option<String>,
-    /// Active (trained) annex — None until the line is Up.
-    pub annex: Option<String>,
-    pub xfer_mode: String,
-    /// None until the line is Up.
+    /// Active (trained) modulation — None until showtime.
+    pub modulation: Option<Modulation>,
+    /// Active (trained) annex — None until showtime.
+    pub annex: Option<Annex>,
+    /// Configured transfer mode (None only before the first config load).
+    pub xfer_mode: Option<XferMode>,
+    /// None until showtime. kbps.
     pub down_rate: Option<u32>,
-    /// None until the line is Up.
+    /// None until showtime. kbps.
     pub up_rate: Option<u32>,
-    /// None until the line is Up.
+    /// None until showtime. dB×10 tenths (63 = 6.3 dB) —
+    /// unit rendering is the client's job (see `cli::format_status_body`).
     pub down_snr: Option<u32>,
-    /// None until the line is Up.
+    /// None until showtime. dB×10 tenths.
     pub up_snr: Option<u32>,
-    pub fw_status: String,
+    pub fw_status: FwStatus,
     pub board_reachable: bool,
     pub mgmt_iface: String,
     pub mgmt_carrier: bool,
@@ -105,17 +140,12 @@ fn opt<T: std::fmt::Display>(v: &Option<T>) -> String {
     }
 }
 
-/// Render an optional dB×10 field as dB with one decimal (63 → "6.3").
-fn opt_db(tenths: &Option<u32>) -> String {
-    match tenths {
-        Some(t) => format!("{:.1}", *t as f32 / 10.0),
+/// `opt` for Copy enums serialized via `as_str` (no `Display` dependency).
+fn opt_map<T: Copy, F: Fn(T) -> &'static str>(v: &Option<T>, f: F) -> String {
+    match v {
+        Some(x) => f(*x).to_string(),
         None => "null".to_string(),
     }
-}
-
-/// Parse a dB value back into dB×10 tenths (round-trip of [`opt_db`]).
-fn un_db(s: &str) -> Option<u32> {
-    s.parse::<f32>().ok().map(|db| (db * 10.0).round() as u32)
 }
 
 /// Parse a wire value back into an Option (`null` → None).
@@ -125,38 +155,44 @@ fn unopt<T, F: Fn(&str) -> Option<T>>(s: &str, f: F) -> Option<T> {
 
 impl StatusSnapshot {
     /// Render as `key: value` lines (without the leading `OK` or trailing `.`).
+    ///
+    /// Values are typed tokens/integers in fixed units (see the struct's
+    /// wire contract table) — this is a machine-facing wire; human unit
+    /// rendering happens in the client (`cli::format_status_body`).
     pub fn to_lines(&self) -> String {
         format!(
-            "state: {}\nstate_num: {}\nup: {}\nuptime: {}\nmodulation: {}\nannex: {}\n\
+            "state: {}\nup: {}\nuptime: {}\nmodulation: {}\nannex: {}\n\
              xfer_mode: {}\ndown_rate: {}\nup_rate: {}\ndown_snr: {}\nup_snr: {}\n\
              fw_status: {}\nmonitor: {}",
-            self.state, self.state_num, self.up, opt(&self.uptime_secs),
-            opt(&self.modulation), opt(&self.annex), self.xfer_mode,
-            opt(&self.down_rate), opt(&self.up_rate), opt_db(&self.down_snr), opt_db(&self.up_snr),
-            self.fw_status, self.monitor,
+            self.state, self.up, opt(&self.uptime_secs),
+            opt_map(&self.modulation, Modulation::as_str),
+            opt_map(&self.annex, Annex::as_str),
+            opt_map(&self.xfer_mode, XferMode::as_str),
+            opt(&self.down_rate), opt(&self.up_rate), opt(&self.down_snr), opt(&self.up_snr),
+            self.fw_status.to_wire(), self.monitor,
         )
     }
 
     /// Parse `key: value` lines back into a snapshot. Round-trip helper
     /// for the wire format (used by tests; kept for future consumers).
+    /// Unparseable enum tokens / numbers fall back to their field default.
     #[allow(dead_code)]
     pub fn from_lines(body: &str) -> Self {
         let mut s = Self::default();
         for line in body.lines() {
             if let Some((k, v)) = line.split_once(": ") {
                 match k.trim() {
-                    "state" => s.state = v.trim().to_string(),
-                    "state_num" => s.state_num = v.trim().parse().unwrap_or(0),
+                    "state" => s.state = v.trim().parse().unwrap_or_default(),
                     "up" => s.up = v.trim() == "true",
                     "uptime" => s.uptime_secs = unopt(v.trim(), |x| x.parse().ok()),
-                    "modulation" => s.modulation = unopt(v.trim(), |x| Some(x.to_string())),
-                    "annex" => s.annex = unopt(v.trim(), |x| Some(x.to_string())),
-                    "xfer_mode" => s.xfer_mode = v.trim().to_string(),
+                    "modulation" => s.modulation = unopt(v.trim(), |x| Modulation::from_str(x).ok()),
+                    "annex" => s.annex = unopt(v.trim(), |x| Annex::from_str(x).ok()),
+                    "xfer_mode" => s.xfer_mode = unopt(v.trim(), |x| XferMode::from_str(x).ok()),
                     "down_rate" => s.down_rate = unopt(v.trim(), |x| x.parse().ok()),
                     "up_rate" => s.up_rate = unopt(v.trim(), |x| x.parse().ok()),
-                    "down_snr" => s.down_snr = unopt(v.trim(), un_db),
-                    "up_snr" => s.up_snr = unopt(v.trim(), un_db),
-                    "fw_status" => s.fw_status = v.trim().to_string(),
+                    "down_snr" => s.down_snr = unopt(v.trim(), |x| x.parse().ok()),
+                    "up_snr" => s.up_snr = unopt(v.trim(), |x| x.parse().ok()),
+                    "fw_status" => s.fw_status = FwStatus::from_wire(v.trim()).unwrap_or_default(),
                     "monitor" => s.monitor = v.trim() == "true",
                     _ => {}
                 }
@@ -339,49 +375,73 @@ mod tests {
     #[test]
     fn status_roundtrip() {
         let s = StatusSnapshot {
-            state: "Up".into(),
-            state_num: 7,
+            state: LineState::ShowtimeTcSync,
             up: true,
             uptime_secs: Some(300),
-            modulation: Some("Vdsl2".into()),
-            annex: Some("B".into()),
-            xfer_mode: "Ptm".into(),
+            modulation: Some(Modulation::Vdsl2),
+            annex: Some(Annex::B),
+            xfer_mode: Some(XferMode::Ptm),
             down_rate: Some(50000),
             up_rate: Some(10000),
             down_snr: Some(150),
             up_snr: Some(120),
-            fw_status: "idle".into(),
+            fw_status: FwStatus::UpgradingProgress { stage: 2, pct: 45 },
             board_reachable: true,
             mgmt_iface: "lan0.500".into(),
             mgmt_carrier: true,
             monitor: false,
         };
         let text = s.to_lines();
-        assert!(text.contains("down_snr: 15.0"));
-        assert!(text.contains("up_snr: 12.0"));
+        // IPC wire carries TYPED tokens/values: the board's own enums as
+        // identifier tokens, SNR in dB×10 tenths — clients do the rendering.
+        assert!(text.contains("state: ShowtimeTcSync"));
+        assert!(text.contains("modulation: Vdsl2"));
+        assert!(text.contains("annex: B"));
+        assert!(text.contains("xfer_mode: Ptm"));
+        assert!(text.contains("down_snr: 150"));
+        assert!(text.contains("up_snr: 120"));
+        assert!(text.contains("fw_status: UpgradingProgress stage=2 pct=45"));
         let parsed = StatusSnapshot::from_lines(&text);
-        assert_eq!(parsed.state, "Up");
-        assert_eq!(parsed.state_num, 7);
+        assert_eq!(parsed.state, LineState::ShowtimeTcSync);
         assert!(parsed.up);
         assert_eq!(parsed.uptime_secs, Some(300));
-        assert_eq!(parsed.modulation.as_deref(), Some("Vdsl2"));
+        assert_eq!(parsed.modulation, Some(Modulation::Vdsl2));
+        assert_eq!(parsed.annex, Some(Annex::B));
+        assert_eq!(parsed.xfer_mode, Some(XferMode::Ptm));
         assert_eq!(parsed.down_rate, Some(50000));
         assert_eq!(parsed.up_snr, Some(120));
-        assert_eq!(parsed.fw_status, "idle");
+        assert_eq!(parsed.fw_status, FwStatus::UpgradingProgress { stage: 2, pct: 45 });
+    }
+
+    #[test]
+    fn unknown_state_keeps_board_code_on_wire() {
+        let s = StatusSnapshot {
+            state: LineState::Unknown(9),
+            ..Default::default()
+        };
+        let text = s.to_lines();
+        assert!(text.contains("state: Unknown(9)"));
+        assert_eq!(StatusSnapshot::from_lines(&text).state, LineState::Unknown(9));
     }
 
     #[test]
     fn untrained_snapshot_renders_null() {
         let s = StatusSnapshot::default();
+        assert_eq!(s.state, LineState::NotInitialized);
         let text = s.to_lines();
+        assert!(text.contains("state: NotInitialized"));
         assert!(text.contains("modulation: null"));
         assert!(text.contains("annex: null"));
+        assert!(text.contains("xfer_mode: null"));
         assert!(text.contains("uptime: null"));
         assert!(text.contains("down_rate: null"));
         assert!(text.contains("up_snr: null"));
+        assert!(text.contains("fw_status: Idle"));
         // Round-trip keeps them None.
         let parsed = StatusSnapshot::from_lines(&text);
         assert_eq!(parsed.modulation, None);
+        assert_eq!(parsed.xfer_mode, None);
+        assert_eq!(parsed.fw_status, FwStatus::Idle);
         assert_eq!(parsed.down_rate, None);
     }
 }

@@ -185,7 +185,7 @@ impl Selftest {
                         o.link_status, elapsed, o.modulation_code, o.data_path, o.annex_code
                     );
 
-                    if o.link_status == rbctl_proto::oem::unpack::LinkStatus::Up {
+                    if o.link_status.is_up() {
                         line_obj = Some(o);
                         break;
                     }

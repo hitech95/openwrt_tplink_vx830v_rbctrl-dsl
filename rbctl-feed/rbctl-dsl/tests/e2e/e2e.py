@@ -312,7 +312,7 @@ def e5_showtime(board, d):
     log("E5: injected showtime -> line Up + link materialization")
     sys_before = open(path("board_sys.log")).read() if os.path.exists(path("board_sys.log")) else ""
     set_line_state("showtime_ptm")
-    wait_file_contains("daemon_e3.log", "line state: Up", 15)
+    wait_file_contains("daemon_e3.log", "line state: ShowtimeTcSync", 15)
     time.sleep(2)   # let a poll cycle publish metrics
 
     # The op2 replies after showtime must carry the injected metrics:
@@ -333,8 +333,35 @@ def e5_showtime(board, d):
     assert (ds, us) == (40000, 12000), f"rates DS/US: {ds}/{us}"
     assert (snr_d, snr_u) == (63, 61), f"snr DS/US (dB×10): {snr_d}/{snr_u}"
     assert mod == 6, f"modulation: {mod}"
+
+    # Client-side rendering: the IPC wire carries RAW dB×10 (63/61);
+    # the `status` client must display dB (6.3/6.1). Retry — the daemon
+    # snapshot refreshes on its poll cycle.
+    rendered = None
+    for _ in range(5):
+        r = subprocess.run(
+            ["qemu-aarch64", "-L", AROOT, f"{AROOT}/usr/sbin/rbctl-dsl", "status"],
+            capture_output=True, text=True, timeout=20)
+        assert r.returncode == 0, f"status client failed: {r.stdout}{r.stderr}"
+        if "down_snr: 6.3" in r.stdout and "up_snr: 6.1" in r.stdout:
+            rendered = r.stdout
+            break
+        if "down_snr: null" in r.stdout:
+            time.sleep(2)   # snapshot not yet refreshed
+            continue
+        rendered = r.stdout   # got values but wrong rendering — fail below
+        break
+    assert rendered and "down_snr: 6.3" in rendered and "up_snr: 6.1" in rendered, \
+        f"status client rendering (expected 6.3/6.1 dB):\n{rendered}"
+    assert "down_rate: 40000" in rendered and "up_rate: 12000" in rendered, \
+        f"status rates:\n{rendered}"
+    # wire carries typed enum tokens, client renders names/labels
+    assert "state: ShowtimeTcSync" not in rendered, "state token must be labelled client-side"
+    assert "state: Showtime with TC-Layer sync" in rendered, f"status state:\n{rendered}"
+    assert "modulation: VDSL2" in rendered, f"status modulation:\n{rendered}"
+    assert "fw_status: idle" in rendered, f"status fw_status:\n{rendered}"
     log("E5 PASS: daemon saw Up with correctly-ordered metrics "
-        f"(DS {ds} kbps @ {snr_d/10:.1f} dB)")
+        f"(DS {ds} kbps @ {snr_d/10:.1f} dB), status renders enums client-side")
     return sys_before
 
 

@@ -19,7 +19,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use rbctl_proto::oem::unpack::{DataPath, LinkStatus};
+use rbctl_proto::oem::unpack::{DataPath, LineState};
 
 use crate::board::{Board, BoardError, FwProgress, FwUpgradeResult};
 use crate::config::{self, DslConfig, XferMode};
@@ -81,7 +81,7 @@ pub enum WorkerEvent {
     BoardUnreachable,
     /// Line state transition. `data_path` is the op2-observed TC mode,
     /// meaningful when `status` is `Up` (drives auto provisioning).
-    LineState { status: LinkStatus, data_path: DataPath },
+    LineState { status: LineState, data_path: DataPath },
     /// op1 acknowledged by the board.
     LineConfigApplied,
     /// op5/op15 acknowledged; `vlan` is the board-assigned transport VLAN.
@@ -102,7 +102,7 @@ pub struct BoardWorker {
     event_tx: mpsc::Sender<WorkerEvent>,
     poll_interval: Duration,
     last_poll: Option<Instant>,
-    last_status: Option<LinkStatus>,
+    last_status: Option<LineState>,
     up_since: Option<Instant>,
     board_reachable: bool,
 }
@@ -341,9 +341,9 @@ impl BoardWorker {
                     let _ = self.event_tx.send(WorkerEvent::BoardReachable);
                 }
 
-                if status == LinkStatus::Up && self.up_since.is_none() {
+                if status.is_up() && self.up_since.is_none() {
                     self.up_since = Some(Instant::now());
-                } else if status != LinkStatus::Up {
+                } else if !status.is_up() {
                     self.up_since = None;
                 }
 

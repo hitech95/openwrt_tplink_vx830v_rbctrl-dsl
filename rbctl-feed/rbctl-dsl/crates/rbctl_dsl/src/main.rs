@@ -248,7 +248,10 @@ fn main() {
 fn ipc_exit(cmd: daemon::ipc::IpcCmd) {
     match cli::send_command(daemon::SOCK_PATH, cmd) {
         Ok(response) => {
-            print!("{response}");
+            // Human-facing unit rendering (dB, …) happens client-side;
+            // the IPC wire carries raw values. No-op for non-status
+            // replies, which carry no unit-bearing keys.
+            print!("{}", cli::format_status_body(&response));
             std::process::exit(if response.contains("ERR") { 1 } else { 0 });
         }
         Err(e) => {
