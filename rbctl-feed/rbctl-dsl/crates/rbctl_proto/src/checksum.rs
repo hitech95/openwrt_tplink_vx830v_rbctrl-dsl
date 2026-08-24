@@ -35,7 +35,7 @@ fn read_payload_len(frame: &[u8]) -> usize {
 ///
 /// We split the CRC feed into two slices — before and after the checksum field —
 /// so we never need to mutate the frame (no allocation, `no_std`-safe).
-fn crc_covered_region(frame: &[u8]) -> u16 {
+pub fn crc_covered_region(frame: &[u8]) -> u16 {
     let payload_len = read_payload_len(frame);
     let cover_end = OFF_MAGIC + payload_len + COVER_HEADER_BYTES;
     assert!(

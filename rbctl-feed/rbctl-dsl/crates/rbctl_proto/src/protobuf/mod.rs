@@ -9,10 +9,9 @@
 //! The generated Rust types live in [`rbctl`] (compiled from `proto/rbctl.proto`
 //! via `prost-build` + `protox`).
 
-/// Magic byte: protobuf frame (ASCII 'P' for Protobuf).
-///
-/// Distinguishes from OEM magic `0x11` (command) / `0x10` (response).
-pub const MAGIC_PROTOBUF: u8 = 0x50;
+pub mod framing;
+
+pub use framing::{FRAG_FLAG, MAGIC_PROTOBUF};
 
 pub mod rbctl {
     include!(concat!(env!("OUT_DIR"), "/rbctl.rs"));
