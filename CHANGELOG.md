@@ -4,6 +4,34 @@ Public-facing changes to the `rbctl-dsl` OpenWrt package. Dates are in
 YYYY-MM-DD format. Internal refactors and documentation-only changes are
 summarized, not itemized.
 
+## 0.4.2 — 2026-08-24
+
+### Fixed
+
+- **Data-link provisioning keyed off the wrong source.** The op2
+  `data_path` field is a power-on default that does NOT follow training
+  (read `Atm` while a VDSL2 line was in showtime), and the daemon
+  provisioned its configured link type while the line was still down —
+  before the actual connection type was knowable. Now: an explicit
+  `xfer_mode` is honored as an operator override even when unusual
+  (ATM on VDSL2 is spec-legal); the default/auto resolution derives
+  PTM (VDSL) / ATM (ADSL) from the **trained** modulation, and
+  provisioning runs only once the line reaches showtime. Only
+  physically impossible combinations are rejected — PTM on ADSL
+  standards is blocked (at config load for fixed modes, at line-up for
+  a Multimode line that trained ADSL) with an error; future
+  PTM-only/ATM-only modes (e.g. G.fast) slot into the same rules
+  table. A stale op2 `data_path` field disagreeing with the trained
+  modulation is logged in auto mode.
+- **Stale data links are no longer left on the board.** `selftest`
+  provisioned a data link for its link-op test and never removed it;
+  a follow-up daemon then stacked a second (differently-typed) link
+  next to it — the likely cause of the one-way (TX-only) data path
+  observed on-target. `selftest` now tears its link down before
+  exiting, and the daemon clears any leftover link of either type on
+  its transport VLAN at startup (crashed previous daemon, selftest
+  residue), so exactly one correctly-typed link exists at any time.
+
 ## 0.4.1 — 2026-08-24
 
 ### Fixed
