@@ -15,6 +15,18 @@ engineered but limited:
   the DSL driver (`/proc/tc3162/*`) never reach the host
 - No remote shell — the board runs Linux but there is no SSH/telnet path from
   the host (the board has no IP stack reachable from the host)
+- Control quirks — opcode 1 doubles as the **only** way to open the line (its
+  apply path ends in `wan adsl open`) but is silently deduplicated against an
+  **unreadable** board-side config cache (status 0, no side effects, no open),
+  so guaranteeing an open requires the double-apply trick (two op1s differing
+  in exactly the bitswap byte); "retrain" is a client-side close + delay +
+  double-apply sequence rather than a command; the up/down/closed state is
+  not readable back; and neither the cached config nor the requested data
+  links can be queried. The protobuf protocol replaces all of this: an
+  idempotent `line_open` that reports what happened (opened? config
+  applied?), a cache-hit flag on config responses, `CLOSED` as a `LinkState`
+  case, a proper `line_retrain`, and a `get_config` readback (see
+  [Config](#config-replaces-opcodes-1-356-1516)).
 
 This protocol solves all three by using protobuf (self-describing, extensible)
 and adding an optional remote shell channel.
@@ -157,17 +169,50 @@ session. Re-detection only happens on the triggers above, not on every poll.
 
 ### Fragmentation
 
-Protobuf messages that exceed the MTU (~1470 bytes of payload after headers)
-are split into multiple frames:
+Protobuf messages larger than one frame's payload capacity (~1462 B after
+the 24-byte header and the 8-byte sub-header below) are split across
+multiple frames:
 
-```
-Frame header gains a fragment flag:
-  0x0E bit 0x80 = fragmented
-  0x0F bits 0-3 = fragment index (0-15, supports up to 16 frames = ~23 KB)
-```
+* Bit `0x80` of the **message_type byte** marks the frame as
+  fragmented; the type itself lives in bits 0-6 and the magic byte stays
+  a pure constant `0x50`. One read of `0x0F` answers both "what is this"
+  and "is it a fragment" — the quick-parse case — without the draft's
+  collision (the fragment *index* once shared this byte's low nibble
+  with `message_type`, making a REQUEST fragment #3 bit-identical to an
+  EVENT). The index moved into the sub-header below, and only the single
+  flag bit remains in `0x0F`, masked out of the type.
+* Each fragmented frame's payload begins with an 8-byte sub-header:
 
-The reassembler collects all fragments with the same sequence number before
-decoding the protobuf message.
+| Offset | Size | Field |
+|--------|------|-------|
+| `0x00` | 2 | fragment_index (u16 BE, 0-based) |
+| `0x02` | 2 | fragment_count (u16 BE, total frames in the message) |
+| `0x04` | 4 | message_length (u32 BE, reassembled size) |
+
+* All fragments of one message share the frame `sequence` value (the
+  reassembly key, also the retry correlation).
+* **Capacity**: 65535 fragments × ~1462 B ≈ 96 MB. A 35b spectrum
+  (8192 tones ≈ 24 KB) takes 17 frames — the draft's 4-bit index capped
+  at ~23 KB and overflowed on 35b; that limitation is retired.
+
+Reliability (v1 — matching the OEM retry philosophy; the link is a
+private point-to-point Ethernet where loss is rare):
+
+* **Message-level retry.** The receiver reassembles by sequence; if not
+  all `fragment_count` frames arrive within a reassembly timeout
+  (500 ms), partial state is dropped and the sender's normal retry
+  (by sequence, like the OEM protocol) resends the whole message.
+  Re-sending ~24 KB costs ~2 ms of wire time on 100 Mbps — per-fragment
+  acks are not worth their complexity yet. Upgrade path if the link
+  proves lossy: selective fragment acks as a new `message_type`.
+* **TX budget.** A sender (agent or host) emits at most a small quantum
+  of fragments per event-loop turn (e.g. 4) and services incoming
+  traffic between quanta, so a spectrum or shell burst never delays a
+  1 Hz poll reply. Firmware streaming on the host side follows the same
+  rule.
+* The receiver validates `message_length` against a sanity maximum
+  (e.g. 1 MB) before allocating — a malformed sub-header cannot OOM the
+  peer.
 
 ## Message types
 
@@ -190,16 +235,16 @@ enum MessageType {
 message Request {
   uint32 id = 1;                    // correlation ID (host-assigned)
   oneof payload {
-    HelloRequest          hello          = 10;
-    GetLineStatusRequest  line_status    = 11;
-    GetLineStatsRequest   line_stats     = 12;
-    GetChannelStatsRequest channel_stats = 13;
-    ConfigRequest         config         = 14;
-    FirmwareRequest       firmware       = 15;
-    ShellRequest          shell          = 16;
-    GetSpectrumRequest    spectrum       = 17;
-    GetDiagnosticsRequest diagnostics    = 18;
-    GetBoardInfoRequest   board_info     = 19;
+    HelloRequest           hello          = 10;
+    GetLineStatusRequest   line_status    = 11;  // basic — daemon poll
+    GetLineMetricsRequest  line_metrics   = 12;  // full — ubus/IPC
+    LinkRequest            link           = 13;  // data-link CRUD
+    ConfigRequest          config         = 14;  // line config/open/close/retrain
+    FirmwareRequest        firmware       = 15;
+    ShellRequest           shell          = 16;
+    GetSpectrumRequest     spectrum       = 17;  // incl. diagnostics trigger
+    GetBoardInfoRequest    board_info     = 19;
+    GetConfigRequest       get_config     = 20;
   }
 }
 
@@ -211,15 +256,15 @@ message Response {
   string error = 3;                 // human-readable error if !ok
   oneof payload {
     HelloResponse          hello          = 10;
-    LineStatusResponse     line_status    = 11;
-    LineStatsResponse      line_stats     = 12;
-    ChannelStatsResponse   channel_stats  = 13;
+    LineStatusResponse     line_status    = 11;  // basic
+    LineMetricsResponse    line_metrics   = 12;  // full
+    LinkResponse           link           = 13;
     ConfigResponse         config         = 14;
     FirmwareResponse       firmware       = 15;
     ShellResponse          shell          = 16;
     SpectrumResponse       spectrum       = 17;
-    DiagnosticsResponse    diagnostics    = 18;
     BoardInfoResponse      board_info     = 19;
+    ConfigDataResponse     config_data    = 20;
   }
 }
 
@@ -227,8 +272,8 @@ message Response {
 
 message Event {
   oneof payload {
-    LinkStatusEvent   link_status   = 1;
-    FirmwareProgress  fw_progress   = 2;
+    LinkStatusEvent  link_status = 1;
+    FirmwareProgress fw_progress = 2;
   }
 }
 ```
@@ -256,81 +301,49 @@ message MacAddress {
 }
 ```
 
-### Line status (replaces opcode 2)
+### Line status, basic (replaces opcode 2 — the daemon's poll)
+
+The poll tier: just enough for the daemon's state machine at minimal agent
+cost — one cheap `/proc` read, ~30 bytes on the wire, never fragmented.
+The trained `modulation` is here deliberately: it is the authority for the
+data-link type (PTM/ATM) derived at showtime.
 
 ```protobuf
 message GetLineStatusRequest {}
 
 message LineStatusResponse {
-  // ── Basic ──
-  LinkState       link_state    = 1;
-  ModulationType  modulation    = 2;
-  DataPath        data_path     = 3;   // ATM or PTM
-  AnnexType       annex         = 4;
-  uint32          uptime_secs   = 5;   // current session
-
-  // ── Rates (kbps) ──
-  DirectionalU32  current_rate       = 10;
-  DirectionalU32  attainable_rate    = 11;
-  PerChannelRates per_channel_rates  = 12;
-
-  // ── Signal metrics (dB × 10) ──
-  DirectionalU32  noise_margin   = 20;
-  DirectionalU32  attenuation    = 21;
-  DirectionalU32  output_power   = 22;
-  DirectionalU32  snr_margin     = 23;  // alias for noise_margin
-
-  // ── Error counters (cumulative since link-up) ──
-  DirectionalU32  crc_errors     = 30;
-  DirectionalU32  fec_errors     = 31;
-  DirectionalU32  hes_errors     = 32;
-  PerChannelErrors per_channel_errors = 33;
-
-  // ── Error seconds ──
-  DirectionalU32  es   = 40;  // errored seconds
-  DirectionalU32  ses  = 41;  // severely errored seconds
-  DirectionalU32  uas  = 42;  // unavailable seconds
-  DirectionalU32  los  = 43;  // loss of signal seconds
-  DirectionalU32  lof  = 44;  // loss of frame seconds
-  DirectionalU32  lpr  = 45;  // loss of power seconds
-
-  // ── Far-end identification ──
-  FarEndInfo     far_end        = 50;
-
-  // ── Vectoring / G.INP ──
-  VectoringInfo  vectoring      = 60;
-  GinpInfo       ginp           = 61;
-
-  // ── INP / delay ──
-  DirectionalU32  inp_symbols    = 70;  // impulse noise protection
-  DirectionalU32  interleave_delay_us = 71;
-
-  // ── VDSL2 ──
-  uint32          vdsl2_profile_bitmask = 80;
-  BandPlan        band_plan              = 81;
-
-  // ── Raw timestamp ──
-  uint64          stats_timestamp = 90; // when the stats were read
+  LinkState      link_state  = 1;  // incl. CLOSED = administratively down
+  ModulationType modulation  = 2;  // trained modulation (link-type authority)
+  DataPath       data_path   = 3;  // ATM/PTM as reported by the driver
+  AnnexType      annex       = 4;
+  uint32         uptime_secs = 5;  // current showtime session
 }
+```
 
-// ─── Shared types ──
+### Shared enums
 
+```protobuf
 enum LinkState {
-  LINK_STATE_UNSPECIFIED  = 0;
-  NO_SIGNAL               = 1;
-  HANDSHAKE               = 2;
-  TRAINING                = 3;
-  SHOWTIME                = 4;  // = Up
+  LINK_STATE_UNSPECIFIED = 0;
+  NO_SIGNAL              = 1;  // operational down: no DSL signal
+  HANDSHAKE              = 2;
+  TRAINING               = 3;
+  SHOWTIME               = 4;  // operational up
+  CLOSED                 = 5;  // administratively down (line_close / OEM op3):
+                               // not training — distinct from NO_SIGNAL
 }
 
 enum ModulationType {
-  MODULATION_UNSPECIFIED  = 0;
-  ADSL_T1413              = 1;
-  ADSL_GDMT               = 2;
-  ADSL_GLITE              = 3;
-  ADSL2                   = 4;
-  ADSL2PLUS               = 5;
-  VDSL2                   = 6;
+  MODULATION_UNSPECIFIED = 0;
+  ADSL_T1413             = 1;
+  ADSL_GDMT              = 2;
+  ADSL_GLITE             = 3;
+  ADSL2                  = 4;
+  ADSL2PLUS              = 5;
+  VDSL2                  = 6;
+  MULTIMODE              = 7; // config-only: auto-detect across standards
+                              // (OEM code 7). Never appears in line status —
+                              // the trained modulation is always concrete.
 }
 
 enum DataPath {
@@ -345,6 +358,78 @@ enum AnnexType {
   B                 = 2;
   I                 = 3;
   M                 = 4;
+  J                 = 5;   // OEM code 6
+  AUTO              = 6;   // OEM code 8 — auto-negotiate (config-only)
+  AL                = 7;   // OEM code 4 — multi-annex A+L
+  ALM               = 8;   // OEM code 5 — multi-annex A+L+M
+  BJ                = 9;   // OEM code 7 — multi-annex B+J
+}
+```
+
+### Line metrics, full (absorbs opcode 4 — what ubus prints)
+
+A strict superset of the basic status: all signal metrics, error counters,
+per-channel (fast/interleaved, near/far) statistics, channel blocks,
+retransmission (G.INP), far-end identification, vectoring, INP/delay and
+band plan — everything except the per-tone spectrum. Absorbs the former
+`line_stats` and `channel_stats` requests (opcode 4's two flavors):
+parsing the full stats file on every poll would waste agent CPU for data
+the daemon's state machine never looks at, so metrics are fetched when a
+consumer asks (or on a slow background refresh).
+
+```protobuf
+message GetLineMetricsRequest {}
+
+message LineMetricsResponse {
+  // ── Rates (kbps) ──
+  DirectionalU32  current_rate       = 10;
+  DirectionalU32  attainable_rate    = 11;
+  PerChannelRates per_channel_rates  = 12;
+
+  // ── Signal metrics (dB × 10) ──
+  DirectionalU32  noise_margin       = 20;  // SNR margin (down/up)
+  DirectionalU32  attenuation        = 21;
+  DirectionalU32  output_power       = 22;
+
+  // ── Error counters (cumulative since link-up) ──
+  DirectionalU32  crc_errors         = 30;
+  DirectionalU32  fec_errors         = 31;
+  DirectionalU32  hes_errors         = 32;
+  PerChannelErrors per_channel_errors = 33;
+
+  // ── Error seconds ──
+  DirectionalU32  es = 40;  // errored seconds
+  DirectionalU32  ses = 41; // severely errored seconds
+  DirectionalU32  uas = 42; // unavailable seconds
+  DirectionalU32  los = 43; // loss of signal seconds
+  DirectionalU32  lof = 44; // loss of frame seconds
+  DirectionalU32  lpr = 45; // loss of power seconds
+
+  // ── Channel blocks (absorbs the old channel_stats) ──
+  ChannelBlocks   channel_blocks     = 50;
+
+  // ── Session uptime ──
+  uint32          total_act_seconds  = 51;  // cumulative across sessions
+  uint32          current_act_seconds = 52; // current session
+
+  // ── Far-end identification ──
+  FarEndInfo      far_end            = 60;
+
+  // ── Vectoring / G.INP ──
+  VectoringInfo   vectoring          = 61;
+  GinpInfo        ginp               = 62;
+  RetransmissionStats retransmission = 63;
+
+  // ── INP / delay ──
+  DirectionalU32  inp_symbols        = 70;  // impulse noise protection
+  DirectionalU32  interleave_delay_us = 71;
+
+  // ── VDSL2 ──
+  uint32          vdsl2_profile_bitmask = 80;
+  BandPlan        band_plan             = 81;
+
+  // ── Raw timestamp ──
+  uint64          stats_timestamp = 90;  // when the stats were read
 }
 
 message DirectionalU32 {
@@ -353,10 +438,9 @@ message DirectionalU32 {
 }
 
 message PerChannelRates {
-  // Separate fast/interleaved channel rates (both directions)
-  uint32 ds_fast       = 1;
+  uint32 ds_fast        = 1;
   uint32 ds_interleaved = 2;
-  uint32 us_fast       = 3;
+  uint32 us_fast        = 3;
   uint32 us_interleaved = 4;
 }
 
@@ -374,83 +458,36 @@ message PerChannelDirection {
   uint32 hes_interleaved  = 6;
 }
 
+message ChannelBlocks {
+  uint32 rx_blocks   = 1;
+  uint32 rx_errors   = 2;
+  uint32 rx_discards = 3;
+  uint32 tx_blocks   = 4;
+  uint32 tx_errors   = 5;
+  uint32 tx_discards = 6;
+}
+
 message FarEndInfo {
-  uint32 vendor_id       = 1;   // ATU-R vendor ID (EOC)
-  bytes  vendor_id_raw   = 2;   // full 8-byte vendor ID
-  uint32 standard_version = 3;  // ITU-T standard version code
-  string vendor_name     = 4;   // decoded vendor name if known
-  string country_code    = 5;   // if reported
+  uint32 vendor_id        = 1;   // ATU-R vendor ID (EOC)
+  bytes  vendor_id_raw    = 2;   // full 8-byte vendor ID
+  uint32 standard_version = 3;   // ITU-T standard version code
+  string vendor_name      = 4;   // decoded vendor name if known
+  string country_code     = 5;   // if reported
 }
 
 message VectoringInfo {
-  bool   enabled          = 1;
-  bool   active           = 2;
-  uint32 sync_detected    = 3;   // G.vector synchronization
-  string vector_profile   = 4;   // e.g. "R-Vector1_2"
+  bool   enabled       = 1;
+  bool   active        = 2;
+  uint32 sync_detected = 3;   // G.vector synchronization
+  string vector_profile = 4; // e.g. "R-Vector1_2"
 }
 
 message GinpInfo {
-  bool   enabled          = 1;
-  uint32 actual_inp       = 2;   // actual impulse noise protection
-  uint32 dtu_tx_count     = 3;   // transmitted DTUs
-  uint32 dtu_rx_count     = 4;   // received DTUs
-  uint32 dtu_err_count    = 5;   // errored DTUs
-}
-
-message BandPlan {
-  string profile          = 1;   // "17a", "30a", "35b", "12a", "8b", "8d"
-  repeated Band bands     = 2;
-}
-
-message Band {
-  uint32 index            = 1;
-  uint32 start_tone       = 2;
-  uint32 end_tone         = 3;
-  uint32 psd_max          = 4;   // dBm/Hz
-  uint32 tone_count       = 5;
-}
-```
-
-### Line stats (replaces opcode 4, extended)
-
-```protobuf
-message GetLineStatsRequest {
-  bool include_far_end = 1;
-  bool include_retransmission = 2;
-}
-
-message LineStatsResponse {
-  // ── Near-end (this ATU-R) ──
-  NearFarStats near_end = 1;
-  // ── Far-end (ATU-C / DSLAM) ──
-  NearFarStats far_end  = 2;
-
-  // ── Retransmission (G.INP / ARQ) ──
-  RetransmissionStats retransmission = 3;
-
-  // ── Aggregate counters ──
-  uint32 total_act_seconds      = 10;  // cumulative across sessions
-  uint32 current_act_seconds    = 11;  // current session
-}
-
-message NearFarStats {
-  uint32 crc_fast          = 1;
-  uint32 crc_interleaved   = 2;
-  uint32 fec_fast          = 3;
-  uint32 fec_interleaved   = 4;
-  uint32 hes_fast          = 5;
-  uint32 hes_interleaved   = 6;
-  uint32 es                = 7;   // errored seconds
-  uint32 ses               = 8;   // severely errored seconds
-  uint32 uas               = 9;   // unavailable seconds
-  uint32 los               = 10;  // loss of signal seconds
-  uint32 lof               = 11;  // loss of frame seconds
-  uint32 fast_rate         = 12;  // kbps
-  uint32 interleaved_rate  = 13;  // kbps
-  uint32 path0_crc         = 14;
-  uint32 path0_fec         = 15;
-  uint32 path1_crc         = 16;
-  uint32 path1_fec         = 17;
+  bool   enabled        = 1;
+  uint32 actual_inp     = 2;   // actual impulse noise protection
+  uint32 dtu_tx_count   = 3;   // transmitted DTUs
+  uint32 dtu_rx_count   = 4;   // received DTUs
+  uint32 dtu_err_count  = 5;   // errored DTUs
 }
 
 message RetransmissionStats {
@@ -465,25 +502,22 @@ message RetransmissionStats {
   uint32 shine_value       = 9;   // SHINE impulse noise value
   uint32 act_delay_rtx_us  = 10;  // retransmission delay (µs)
 }
-```
 
-### Channel stats (replaces opcode 4 fallback)
+message BandPlan {
+  string        profile = 1;  // "17a", "30a", "35b", "12a", "8b", "8d"
+  repeated Band bands   = 2;
+}
 
-```protobuf
-message GetChannelStatsRequest {}
-
-message ChannelStatsResponse {
-  uint32 status           = 1;
-  uint32 receive_blocks   = 2;
-  uint32 receive_errors   = 3;
-  uint32 receive_discards = 4;
-  uint32 transmit_blocks  = 5;
-  uint32 transmit_errors  = 6;
-  uint32 transmit_discards = 7;
+message Band {
+  uint32 index      = 1;
+  uint32 start_tone = 2;
+  uint32 end_tone   = 3;
+  uint32 psd_max    = 4;  // dBm/Hz
+  uint32 tone_count = 5;
 }
 ```
 
-### Spectrum data (NEW — per-tone graphs)
+### Spectrum data (NEW — per-tone graphs; absorbs diagnostics)
 
 ```protobuf
 message GetSpectrumRequest {
@@ -492,6 +526,7 @@ message GetSpectrumRequest {
   bool bits_per_tone  = 2;
   bool hlog           = 3;   // loop transfer function
   bool qln            = 4;   // quiet line noise
+  bool fresh          = 5;   // trigger a new Hlog/QLN measurement first
 }
 
 message SpectrumResponse {
@@ -500,6 +535,7 @@ message SpectrumResponse {
   ToneData gain  = 3;   // gain per tone
   ToneData hlog  = 4;   // Hlog per tone (dB, ×100)
   ToneData qln   = 5;   // QLN per tone (dBm/Hz, ×100)
+  bool in_progress = 6; // measurement still running — refetch later
 }
 
 message ToneData {
@@ -511,18 +547,48 @@ message ToneData {
 }
 ```
 
-### Config (replaces opcodes 1, 5/6, 15/16)
+Hlog/QLN may require a fresh measurement (the driver caches the last one):
+`fresh=true` triggers it and `in_progress` in the response says refetch
+later. This absorbs the former separate diagnostics request — measurement
+is inherently spectrum work.
+
+> 35b spectra (8192 tones ≈ 24 KB) fit comfortably — fragmentation
+> capacity is ~96 MB (see [Fragmentation](#fragmentation)).
+
+### Line config & control (replaces opcodes 1, 3)
+
+In the OEM protocol, opcode 1 is simultaneously "apply config" and "open the
+line", but it is deduplicated against an unreadable board-side cache: an op1
+identical to the cache returns status 0 with **no side effects and no open**.
+Since the cache cannot be read, the host cannot know whether a given op1 will
+open the line — so the daemon must always send two op1s differing in exactly
+the bitswap byte (the second can never be deduped, so it always executes the
+full apply path ending in `wan adsl open`). Retrain is worse: op3 (close)
+followed by the double-apply, with a client-side delay for timing. And
+nothing can read back whether the line is up, down or administratively
+closed, nor which config and data links are active.
+
+This protocol keeps the concerns separate and adds readback:
+
+- `line_config` — params only, never opens. Reports cache hits
+  (`applied=false`); errors if the line is closed (opening is `line_open`'s
+  job, never an implicit side effect).
+- `line_open` — like send-config, but explicitly intended to open the line
+  if not already opened. One idempotent message replacing the double-apply
+  trick; the response reports what actually happened.
+- `line_close` / `line_retrain` — direct replacements for op3 and for the
+  client-side close+delay+reopen sequence.
+- `CLOSED` in `LinkState` (see line status) — the up/down/closed answer
+  rides the regular status poll.
+- `get_config` — reads back the active config + requested data links.
 
 ```protobuf
 message ConfigRequest {
   oneof action {
-    LineConfig     line_config     = 1;
-    AtmLinkConfig  atm_link_add    = 2;
-    AtmLinkOp      atm_link_del    = 3;
-    PtmLinkConfig  ptm_link_add    = 4;
-    PtmLinkOp      ptm_link_del    = 5;
-    LineOp         line_retrain    = 6;
-    LineOp         line_reset      = 7;
+    LineConfig line_config  = 1;  // params only; never opens
+    LineOpen   line_open    = 2;  // apply config + ensure open
+    LineOp     line_close   = 3;  // close (administratively down)
+    LineOp     line_retrain = 4;  // atomic close + open, current params
   }
 }
 
@@ -552,6 +618,35 @@ message LineConfig {
   uint32         vectoring_mode  = 20;
 }
 
+// Open the line if not already open, applying `config` first (the
+// replacement for the OEM double-apply trick: one idempotent message).
+message LineOpen {
+  LineConfig config = 1;
+}
+
+// No parameters: close acts on the active config; retrain restarts
+// training with the current params. To retrain AND change params, send
+// line_open with the new config (an open line re-trains on apply).
+message LineOp {}
+
+message ConfigResponse {
+  // ── line_config / line_open / line_close / line_retrain ──
+  //
+  // applied=false is the cache-hit report the OEM protocol lacked (its
+  // bare status 0 was indistinguishable from a real apply). line_config
+  // on a closed line is an error (envelope ok=false) — opening is
+  // line_open's job, never an implicit side effect.
+  bool applied = 10;    // params written; false = identical to cache
+  bool opened  = 11;    // this call opened the line; false = already open
+}
+```
+
+Agent-side note: on `line_open`, a cache hit is not an error — if the line
+is closed the agent still opens it (`opened=true, applied=false`); if it is
+already open with the same config nothing happens (`opened=false,
+applied=false`), which is success, not error.
+
+```protobuf
 // AdvancedConfig covers rarely-changed parameters that are not part of the
 // main LineConfig. Accessible via a separate request type so the main config
 // stays simple. The host CLI can expose these as `rbctl advanced set <key>`.
@@ -584,7 +679,89 @@ message TcciRaw {
   string command = 1;   // e.g. "wan vdsl2 set bs_param 60 6 100 10 32 256"
 }
 
-message AtmLinkConfig {
+```
+
+#### Current config readback (NEW — the op1 cache made readable)
+
+```protobuf
+message GetConfigRequest {}
+
+message ConfigDataResponse {
+  LineConfig       config = 1;  // the params the line trains with
+  repeated LinkEntry links = 2; // requested data links (order preserved)
+}
+
+// queued=true: requested but deferred until the line trains (not yet
+// materialized); false: active on the board. The flag is authoritative —
+// "line is up" alone only approximates it, since materialization
+// completes shortly after the showtime transition (LinkActiveEvent).
+message LinkEntry {
+  uint32 vlan_id = 1;  // assigned transport VLAN (the link ID)
+  oneof kind {
+    AtmLinkParams atm = 2;
+    PtmLinkParams ptm = 3;
+  }
+  bool queued = 4;
+}
+```
+
+Host-side mapping (what the daemon's current OEM maneuvers become):
+
+| Daemon action | OEM today | Protobuf |
+|---------------|-----------|----------|
+| OpenLine (guaranteed open) | two op1s differing in bitswap | one `line_open { config }` |
+| ApplyLineConfig (reload) | op1 (dedup risk accepted) | `line_config { …cfg }` + `applied` in reply |
+| RestartLine (user retrain) | op3 + delay + double op1 | `line_retrain {}` |
+| LineDown (shutdown) | op3 | `line_close {}` |
+| "is the line up, down or closed?" | impossible | `LinkState.CLOSED` in line status |
+| "which config / links are active?" | impossible | `get_config` |
+
+On the OEM backend the daemon keeps the double-apply because the cache is
+unreadable — the backends differ in mechanism, not in guarantee.
+
+### Data-link management (replaces opcodes 5/6, 15/16)
+
+Data links are configured separately from the line params (the line first,
+links around showtime) and have their own request type, keyed by the
+assigned VLAN.
+
+**Queueing (matches the current OEM agent):** `link_create` received
+before the line is in showtime is queued by the agent and materialized
+automatically when the line trains — exactly what the OEM board does with
+its provisioning commands. The response reports `queued=true` so the host
+knows the link is deferred, not active. `link_remove` of a
+queued-but-not-materialized link simply dequeues it. Materialization is
+announced asynchronously via `LinkActiveEvent` (see async events) — the
+hook for host-side data-plane notifications.
+
+```protobuf
+message LinkRequest {
+  oneof action {
+    LinkCreate create = 1;
+    LinkRemove remove = 2;
+  }
+}
+
+// `vlan_id` is the desired transport VLAN; the response echoes the
+// board-assigned one.
+message LinkCreate {
+  uint32 vlan_id = 1;  // 2000-2007
+  oneof kind {
+    AtmLinkParams atm = 2;
+    PtmLinkParams ptm = 3;
+  }
+}
+
+message LinkRemove {
+  uint32 vlan_id = 1;  // link ID = assigned VLAN
+}
+
+// Altering a link is deliberately not modeled: remove + re-create (the
+// OEM ops are add/delete only too). If a real alter use case appears
+// (e.g. ATM QoS change), it can be added as a new oneof arm later —
+// proto3 additions are wire-compatible.
+
+message AtmLinkParams {
   uint32 vpi       = 1;
   uint32 vci       = 2;
   uint32 encap     = 3;  // 0=LLC, 1=VCMUX
@@ -593,26 +770,24 @@ message AtmLinkConfig {
   uint32 pcr       = 6;
   uint32 scr       = 7;
   uint32 mbs       = 8;
-  uint32 vlan_id   = 9;  // 2000-2007
 }
 
-message PtmLinkConfig {
+message PtmLinkParams {
   bool   tag_enable = 1;
   uint32 tag_vid    = 2;
   uint32 tag_pri    = 3;
-  uint32 vlan_id    = 4;  // 2000-2007
 }
 
-message AtmLinkOp { uint32 vlan_id = 1; uint32 cmd = 2; }
-message PtmLinkOp { uint32 vlan_id = 1; uint32 cmd = 2; }
-message LineOp    {}  // no parameters
-
-message ConfigResponse {
-  bool   ok      = 1;
-  string error   = 2;
-  uint32 vlan_id = 3;  // board-assigned VLAN for link add operations
+message LinkResponse {
+  uint32 vlan_id = 1;  // assigned (create) / affected (alter, remove)
+  bool   queued  = 2;  // true: deferred until showtime
 }
 ```
+
+Single-link policy for now: `link_create` while another link is configured
+is an error (`link_exists:`, naming the conflicting link). The
+create/remove shape is already multi-link ready — only the agent-side
+capacity check narrows for now.
 
 ### Firmware upgrade (replaces opcode 8)
 
@@ -656,6 +831,7 @@ message ShellRequest {
     ShellData   data  = 2;
     ShellResize resize = 3;
     ShellClose  close = 4;
+    ShellFlow   flow  = 5;  // stdout credit refill (window-exempt control)
   }
 }
 
@@ -676,32 +852,48 @@ message ShellResize {
 
 message ShellClose {}
 
+// Backpressure ack: cumulative stdout bytes received by the host. Sent
+// standalone when there is no stdin to piggyback on; never window-limited.
+message ShellFlow {
+  uint32 session_id   = 1;
+  uint64 stdout_acked = 2;
+}
+
 message ShellResponse {
-  uint32 session_id = 1;  // identifies the shell session
-  bytes  stdout     = 2;  // board → host
-  bool   exited      = 3;
-  int32  exit_code   = 4;
+  uint32 session_id     = 1;  // identifies the shell session
+  bytes  stdout         = 2;  // board → host
+  bool   exited         = 3;
+  int32  exit_code      = 4;
+  uint64 stdin_consumed = 5;  // cumulative stdin credits (board → host)
 }
 ```
 
 The shell is implemented via `forkpty()` + `execve("/bin/sh")` on the board.
 The agent multiplexes shell data with status polling on the same L2 socket.
-A sliding window or simple ACK scheme prevents flooding the board's CPU.
 
-### Diagnostics (NEW — loop diagnostic mode)
+**Backpressure — credit window per session, per direction (start: 8 KB).**
 
-```protobuf
-message GetDiagnosticsRequest {
-  bool run_hlog = 1;   // trigger Hlog measurement
-  bool run_qln  = 2;   // trigger QLN measurement
-}
+The board is a slow MIPS core with small buffers. Without flow control,
+a `dmesg` burst or a pasted megabyte script either blocks the agent's
+entire event loop (starving the DSL poll — the daemon degrades) or
+exhausts board memory. Credits bound both directions:
 
-message DiagnosticsResponse {
-  ToneData hlog        = 1;
-  ToneData qln         = 2;
-  bool     in_progress = 3;  // true if measurement still running
-}
-```
+* **Board → host (stdout):** the agent stops reading the pty once W
+  unacked bytes are outstanding. The kernel pty buffer then applies
+  backpressure to the child process — its `write(2)` blocks, which is
+  exactly how a local terminal paces a fast producer. The agent never
+  buffers unbounded data; memory cost is bounded by one window.
+* **Host → board (stdin):** the host blocks its local input forwarder at
+  W unacked bytes — the user's terminal pauses, the same behavior as
+  SSH on a slow link.
+* **Acks ride the opposite direction.** `ShellResponse.stdin_consumed`
+  (cumulative bytes the shell consumed) refills the host's stdin
+  window; `ShellFlow.stdout_acked` refills the agent's stdout window.
+  `ShellFlow` is a control action and is **exempt from the window** —
+  acks can always flow, so the scheme cannot deadlock.
+* **Fragmentation is transparent**: windows count bytes, not frames.
+* Session limits (existing): max 1 concurrent session, 5-min idle
+  timeout.
 
 ### Board info (NEW — environmental / hardware)
 
@@ -781,14 +973,40 @@ message FirmwareProgress {
   uint32 stage = 1;
   uint32 pct   = 2;
 }
+
+// A queued data link was materialized — dequeued and active on the board
+// (fired when the line reaches showtime, or immediately when a create
+// arrives on an already-trained line). The daemon uses this to trigger
+// host-side data-plane notifications (hotplug) at the moment the link
+// actually goes live, rather than inferring it from the line state.
+message LinkActiveEvent {
+  uint32   vlan_id   = 1;  // assigned VLAN of the now-active link
+  DataPath kind      = 2;  // ATM or PTM
+  uint64   timestamp = 3;
+}
 ```
+
+## Versioning
+
+Three layers, three mechanisms — none of them optional:
+
+| Layer | Mechanism | Rule |
+|-------|-----------|------|
+| **Framing** | magic byte | `0x50` **is** framing v1. An incompatible framing change takes the next magic (`0x51`, …). Peers drop unknown magics **silently** (the OEM board ignores `0x50` the same way), so version skew degrades to no-contact — never a misparse. |
+| **Schema** | proto3 rules | Add fields freely; never reuse a field number; never change a field's type. Unknown fields are preserved and ignored (prost). Breaking schema changes are forbidden within one magic — they ship as a new magic + schema. |
+| **Features** | capabilities | `hello` returns `agent_version` plus capability strings; the host degrades gracefully when one is missing. A request whose payload the agent doesn't know (host newer than agent) gets `ok=false, "unsupported: …"` — never a silent drop. |
+
+Fragmentation does **not** touch the magic byte — its flag is bit 7 of
+the message_type byte, so a fragmented frame is still magic-`0x50`
+framing v1 (version and fragmentation are orthogonal). See
+[Fragmentation](#fragmentation).
 
 ## Capabilities negotiation
 
 The host calls `HelloRequest` first. The response lists supported capabilities:
 
 ```
-capabilities: ["shell", "spectrum", "vectoring", "ginp", "diagnostics",
+capabilities: ["shell", "spectrum", "vectoring", "ginp",
                "board_info", "snrm_offset", "rate_cap", "upbo", "oam_ping"]
 ```
 
@@ -797,18 +1015,42 @@ falls back gracefully. This allows incremental deployment.
 
 ## Error handling
 
-All responses carry `ok` + `error`:
+All responses carry `ok` + `error`. The rule is uniform: **`ok=false`
+implies a non-empty, descriptive `error`** — every request gets exactly
+one response, errors included; the agent always answers, never crashes.
+
+Errors start with a stable machine prefix followed by a human
+description, so the host can branch without an enum while still logging
+something actionable:
 
 ```protobuf
 // Success
 { id: 42, ok: true, line_status: { ... } }
 
 // Failure
-{ id: 42, ok: false, error: "/proc/tc3162/adsl_stats: no such file" }
+{ id: 42, ok: false,
+  error: "link_exists: PTM link on vlan 2000 already active — remove it first" }
 ```
 
-Host behavior on `!ok`: log the error, report degraded status via ubus/IPC,
-retry on next poll cycle.
+| prefix | meaning | host action |
+|--------|---------|-------------|
+| `line_closed` | `line_config` on a closed line | open via `line_open` first |
+| `link_exists` | create while a link is configured (single-link policy) | surface; remove first |
+| `no_such_link` | remove of an unknown VLAN | tolerate in cleanup retries ("already gone") |
+| `bad_vlan` | VLAN outside 2000–2007 | config error, no retry |
+| `upgrade_in_progress` | non-firmware request during a flash | retry after flash |
+| `unsupported` | capability not implemented by this agent | degrade gracefully |
+| `malformed_request` | undecodable payload | log; never retry verbatim |
+
+If richer structure is ever needed, an `ErrorCode` enum can be added as a
+new response field — proto3 additions are wire-compatible.
+
+Note on idempotency: `line_open`/`line_close` treat "already open/closed"
+as **success with `opened=false`**, not an error. Errors are reserved for
+"the agent refuses or cannot", which keeps host retry logic trivial.
+
+Host behavior on `!ok`: branch on the prefix, log the full string, report
+degraded status via ubus/IPC.
 
 ## Security
 
@@ -890,3 +1132,102 @@ identical — only the board communication layer changes.
    `remote_board`. Flash via opcode 8. Host daemon runs in protobuf mode.
 3. **Phase 3**: Full feature set — spectrum graphs, remote shell, vectoring
    status. OEM protocol removed from host daemon.
+
+## Appendix: abstraction mapping
+
+The shared model (`rbctl_proto::model`) is the semantic layer; both wire
+protocols are encodings of it. This is the complete mapping, including
+the deliberate folds. Source of truth for the Rust side:
+`src/protobuf/pack.rs` / `src/protobuf/unpack.rs`.
+
+### Who owns which serialization
+
+| form | owner | mechanism |
+|---|---|---|
+| OEM binary codes | `rbctl_proto::oem` | `as u8` / `from_code` (firmware numbering) |
+| Protobuf enums | `rbctl_proto::protobuf` | bridge fns in `pack`/`unpack` |
+| Daemon IPC tokens | `rbctl_proto::model` | `as_str` / `FromStr` (`state: ShowtimeTcSync`) — host-internal, not a board protocol |
+
+### LinkState
+
+| pb `LinkState` (wire #) | model `LineState` (decode) | note |
+|---|---|---|
+| `SHOWTIME` (4) | `ShowtimeTcSync` | `is_up()` true |
+| `HANDSHAKE` (2) | `Handshake` | |
+| `TRAINING` (3) | `FullInit` | |
+| `NO_SIGNAL` (1) | `Silent` | operational down |
+| `CLOSED` (5) | `Silent` | **lossy fold** — see below |
+| `UNSPECIFIED` (0) | `NotInitialized` | |
+
+Model states without a pb carrier (by design): `Idle`,
+`ShowtimeNoSync` (Lantiq/LuCI lifecycle, daemon/ubus-internal — the
+board never reports them on either protocol) and `Unknown(n)` (OEM
+diagnostic escape; a pb agent maps unrecognized firmware codes to
+`UNSPECIFIED`, dropping the code).
+
+**CLOSED caveat**: `native_state()` folds both `NO_SIGNAL` and `CLOSED`
+into `Silent` because operationally a closed line is not training —
+poll-loop gating (watchdog, up-transitions) behaves identically to the
+OEM-after-op3 case. The distinction is preserved only via
+`BasicStatus::is_closed()`. Any pb-backend code path that cares about
+admin-down must check `is_closed()`, not `native_state()`. In practice
+that's the startup logic ("was the line left closed?"), which routes
+through `get_config`/`line_open` anyway.
+
+Agent-side (firmware → pb, lives in the agent, not in our pack/unpack):
+codes `0|2`→`NO_SIGNAL`, `1`→`SHOWTIME`, `3`→`TRAINING`, `4`→
+`HANDSHAKE`, unknown→`UNSPECIFIED`; `CLOSED` is set from the agent's
+own admin state (a `line_close` it executed). There is deliberately no
+model→pb `LineState` converter in `pack.rs` — the daemon never sends
+line states; the agent builds them from firmware codes.
+
+### ModulationType
+
+| model `Modulation` (firmware code) | pb `ModulationType` (wire #) | note |
+|---|---|---|
+| `AdslAnsiT1413` (0) | `ADSL_T1413` (1) | |
+| `AdslGdmt` (1) | `ADSL_GDMT` (2) | |
+| `AdslGlite` (2) | `ADSL_GLITE` (3) | |
+| `AdslGdmtBis` (3) | `ADSL2` (4) | G.992.3 — two names, one standard |
+| `Adsl2Plus` (4) | `ADSL2PLUS` (5) | |
+| `AdslMultimode` (5) | `MULTIMODE` (7) | **one-way fold** — decodes back as `Multimode` |
+| `Vdsl2` (6) | `VDSL2` (6) | |
+| `Multimode` (7) | `MULTIMODE` (7) | |
+| — | `MODULATION_UNSPECIFIED` (0) | → `None` |
+
+### AnnexType
+
+| model `Annex` (firmware code) | pb `AnnexType` (wire #) |
+|---|---|
+| `A` (0) | `A` (1) |
+| `B` (1) | `B` (2) |
+| `I` (2) | `I` (3) |
+| `M` (3) | `M` (4) |
+| `J` (6) | `J` (5) |
+| `Auto` (8) | `AUTO` (6) — config-only, like MULTIMODE |
+| `AL` (4) | `AL` (7) — multi-annex A+L |
+| `ALM` (5) | `ALM` (8) — multi-annex A+L+M |
+| `BJ` (7) | `BJ` (9) — multi-annex B+J |
+
+The pb vocabulary is a **complete mirror** of the firmware annex table
+(`annexTypes` @ `0x3edd20`) — no folds on annex; only
+`ANNEX_UNSPECIFIED` decodes to `None`.
+
+### DataPath
+
+| model | pb |
+|---|---|
+| `Atm` | `ATM` (1) |
+| `Ptm` | `PTM` (2) |
+| `Unknown(n)` | `UNSPECIFIED` (0) — lossy, code dropped (the field is a stale power-on default; the trained modulation is the link-type authority) |
+
+### Operation results
+
+| abstraction | pb carrier | OEM equivalent |
+|---|---|---|
+| cache hit | `ConfigResponse.applied=false` | op1 status 0 (indistinguishable from applied) |
+| opened now | `ConfigResponse.opened=true` | impossible (double-apply workaround) |
+| already open | `opened=false`, ok | — |
+| link deferred | `LinkResponse.queued=true` + `LinkActiveEvent` | board queues internally, invisible |
+| link conflict | `ok=false`, `"link_exists: …"` (`split_error`) | op5/15 short status word |
+| admin state | `LinkState.CLOSED` (status poll) + `get_config` | op3 side effect, unreadable |
