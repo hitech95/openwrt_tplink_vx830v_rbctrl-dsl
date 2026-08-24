@@ -8,8 +8,10 @@
 //! | **Protobuf** | `0x50` | [`protobuf`] (`protobuf` feature) | Self-describing messages |
 //!
 //! Both share the same L2 frame format (24-byte header, CRC-16/ARC, EtherType
-//! `0x88B5`) — implemented in the shared [`frame`] and [`checksum`] modules.
-//! Only the magic byte and payload encoding differ.
+//! `0x88B5`) — implemented in the shared [`frame`] and [`checksum`] modules —
+//! and the same **DSL vocabulary** ([`model`]: `Modulation`, `Annex`,
+//! `LineState`, `LineMetrics`, …), which each backend maps to and from its
+//! wire form. The daemon consumes model types, making it backend-agnostic.
 //!
 //! ## Layout
 //!
@@ -18,6 +20,7 @@
 //! ├── lib.rs          ← crate root, shared re-exports
 //! ├── checksum.rs     ← CRC-16/ARC (shared by both protocols)
 //! ├── frame.rs        ← Frame parser + build_frame (shared, magic-agnostic)
+//! ├── model.rs        ← shared DSL vocabulary (modulation, annex, states…)
 //! ├── oem/            ← OEM binary protocol (magic 0x11/0x10)
 //! │   ├── mod.rs      ← MAGIC_OEM_COMMAND/RESPONSE, build_command_frame
 //! │   ├── pack.rs     ← Request encoders (opcodes 1/5/15/6/16)
@@ -40,6 +43,7 @@
 
 pub mod checksum;
 pub mod frame;
+pub mod model;
 
 // ── OEM binary protocol (magic 0x11/0x10) ─────────────────────────────
 

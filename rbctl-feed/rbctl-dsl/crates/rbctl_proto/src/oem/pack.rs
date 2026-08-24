@@ -6,156 +6,18 @@
 //!
 //! ## Enum tables
 //!
-//! The Python uses string-keyed dicts; we use `#[repr(u8)]` enums for
-//! compile-time exhaustiveness. The numeric values match `libcmm.so` exactly.
+//! The enum types themselves live in [`crate::model`] (shared with the
+//! protobuf backend); their numeric values match the `libcmm.so`
+//! globals exactly.
 
 use crate::frame::OFF_PAYLOAD;
 
-// ─── Enums (extracted from libcmm.so globals, see examples/pack.py) ─────
-
-/// DSL modulation type (`modulationTypes` @ `0x3edc20` in libcmm.so).
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Modulation {
-    AdslAnsiT1413 = 0,
-    AdslGdmt = 1,
-    AdslGlite = 2,
-    AdslGdmtBis = 3,
-    Adsl2Plus = 4,
-    AdslMultimode = 5,
-    Vdsl2 = 6,
-    Multimode = 7,
-}
-
-impl Modulation {
-    /// Stable wire token (also the canonical display name).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::AdslAnsiT1413 => "AdslAnsiT1413",
-            Self::AdslGdmt => "AdslGdmt",
-            Self::AdslGlite => "AdslGlite",
-            Self::AdslGdmtBis => "AdslGdmtBis",
-            Self::Adsl2Plus => "Adsl2Plus",
-            Self::AdslMultimode => "AdslMultimode",
-            Self::Vdsl2 => "Vdsl2",
-            Self::Multimode => "Multimode",
-        }
-    }
-}
-
-impl core::str::FromStr for Modulation {
-    type Err = ();
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s {
-            "AdslAnsiT1413" => Self::AdslAnsiT1413,
-            "AdslGdmt" => Self::AdslGdmt,
-            "AdslGlite" => Self::AdslGlite,
-            "AdslGdmtBis" => Self::AdslGdmtBis,
-            "Adsl2Plus" => Self::Adsl2Plus,
-            "AdslMultimode" => Self::AdslMultimode,
-            "Vdsl2" => Self::Vdsl2,
-            "Multimode" => Self::Multimode,
-            _ => return Err(()),
-        })
-    }
-}
-
-/// DSL annex type (`annexTypes` @ `0x3edd20`).
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Annex {
-    A = 0,
-    B = 1,
-    I = 2,
-    M = 3,
-    AL = 4,
-    ALM = 5,
-    J = 6,
-    BJ = 7,
-    Auto = 8,
-}
-
-impl Annex {
-    /// Stable wire token (single letter, "Auto" for auto-negotiation).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::A => "A",
-            Self::B => "B",
-            Self::I => "I",
-            Self::M => "M",
-            Self::AL => "AL",
-            Self::ALM => "ALM",
-            Self::J => "J",
-            Self::BJ => "BJ",
-            Self::Auto => "Auto",
-        }
-    }
-}
-
-impl core::str::FromStr for Annex {
-    type Err = ();
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s {
-            "A" => Self::A,
-            "B" => Self::B,
-            "I" => Self::I,
-            "M" => Self::M,
-            "AL" => Self::AL,
-            "ALM" => Self::ALM,
-            "J" => Self::J,
-            "BJ" => Self::BJ,
-            "Auto" => Self::Auto,
-            _ => return Err(()),
-        })
-    }
-}
-
-/// VDSL2 profile bitmask (`profiles` @ `0x3eddb0`).
-///
-/// OR together multiple profiles: `Vdsl2Profile::SEVENTEEN_A | Vdsl2Profile::THIRTY_A`.
-/// Only meaningful when [`Modulation`] is `Vdsl2` or `Multimode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Vdsl2Profiles(pub u16);
-
-impl Vdsl2Profiles {
-    pub const EIGHT_A: Self = Self(0x001);
-    pub const EIGHT_B: Self = Self(0x002);
-    pub const EIGHT_C: Self = Self(0x004);
-    pub const EIGHT_D: Self = Self(0x008);
-    pub const TWELVE_A: Self = Self(0x010);
-    pub const TWELVE_B: Self = Self(0x020);
-    pub const SEVENTEEN_A: Self = Self(0x040);
-    pub const THIRTY_A: Self = Self(0x080);
-    pub const THIRTYFIVE_B: Self = Self(0x100);
-
-    /// Bitmask value for the wire (big-endian u32 in the payload).
-    pub fn bitmask(self) -> u32 { self.0 as u32 }
-}
-
-impl core::ops::BitOr for Vdsl2Profiles {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) }
-}
-
-/// ATM encapsulation (`oal_atm_linkObjToMsg`).
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AtmEncap { Llc = 0, Vcmux = 1 }
-
-/// ATM link type (`oal_atm_linkObjToMsg`).
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AtmLinkType { Eoa = 0, Pppoa = 6, Ipoa = 7 }
-
-/// ATM QoS category (`oal_atm_qosObjToMsg`). The value 0 is unused.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AtmQos { Ubr = 1, Cbr = 2, VbrNrt = 3, VbrRt = 4 }
-
-impl AtmQos {
-    /// Whether this category carries SCR/MBS fields.
-    pub fn carries_scr(self) -> bool { matches!(self, Self::VbrNrt | Self::VbrRt) }
-}
+// Shared DSL vocabulary lives in `crate::model` (protocol-agnostic).
+// Re-exported for compatibility with existing `oem::pack::…` import
+// paths; new code should import from the model directly.
+pub use crate::model::{
+    Annex, AtmEncap, AtmLinkType, AtmQos, Modulation, Vdsl2Profiles,
+};
 
 // ─── Opcode 1: dsl_config_up (12 bytes) ─────────────────────────────────
 

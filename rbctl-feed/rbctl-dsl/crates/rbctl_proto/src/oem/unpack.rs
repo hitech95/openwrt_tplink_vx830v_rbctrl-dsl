@@ -3,142 +3,21 @@
 //! Ported from `examples/unpack.py`. Field names and offsets are confirmed
 //! against the board-side `remote_board` (EcoNet EN7516 MIPS) ground truth
 //! — see `docs/xdsl/responses.md` and `docs/server.md`.
+//!
+//! `LineState`, `DataPath` and `LineMetrics` live in [`crate::model`]
+//! (shared with the protobuf backend) and are re-exported below for
+//! compatibility with existing import paths.
 
-use super::pack::{Annex, Modulation, Vdsl2Profiles};
+use crate::model::{Annex, Modulation, Vdsl2Profiles};
 
-// ─── Link status ────────────────────────────────────────────────────────
+// Shared DSL vocabulary (`crate::model`), re-exported for compatibility
+// with existing `oem::unpack::…` import paths (and this module's own
+// use); new code should import from the model directly.
+pub use crate::model::{DataPath, LineMetrics, LineState};
 
-/// Canonical line state — the shared vocabulary of the board protocol
-/// (op2 `linkStatus` byte), the daemon IPC wire, and the Lantiq/LuCI
-/// ubus ABI.
-///
-/// Board codes map onto the training/showtime states (see [`Self::from_code`]);
-/// the remaining variants (`NotInitialized`, `Idle`, `ShowtimeNoSync`) are
-/// lifecycle states the board never reports but the daemon/ubus ABI define
-/// (e.g. `NotInitialized` before the first successful poll, `ShowtimeNoSync`
-/// reserved by the Lantiq state machine).
-///
-/// Serialized like [`Annex`](super::pack::Annex)/[`Modulation`](super::pack::Modulation):
-/// the wire token is the exact variant name, parsed back via `FromStr`.
-/// `Unknown` keeps its board code: `Unknown(9)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LineState {
-    #[default]
-    NotInitialized,
-    Idle,
-    Silent,
-    Handshake,
-    FullInit,
-    ShowtimeNoSync,
-    ShowtimeTcSync,
-    Unknown(u8),
-}
-
-impl LineState {
-    /// Decode the op2 `linkStatus` byte (reply offset `0x04`).
-    ///
-    /// Codes 0 and 2 both mean NoSignal (duplicate in the original firmware)
-    /// → [`Self::Silent`]; board code 1 trains with TC-layer sync.
-    pub fn from_code(code: u8) -> Self {
-        match code {
-            0 | 2 => Self::Silent,
-            1 => Self::ShowtimeTcSync,
-            3 => Self::FullInit,
-            4 => Self::Handshake,
-            other => Self::Unknown(other),
-        }
-    }
-
-    /// True for the showtime states (line trained and passing data).
-    pub fn is_up(self) -> bool {
-        matches!(self, Self::ShowtimeNoSync | Self::ShowtimeTcSync)
-    }
-}
-
-impl core::fmt::Display for LineState {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::NotInitialized => f.write_str("NotInitialized"),
-            Self::Idle => f.write_str("Idle"),
-            Self::Silent => f.write_str("Silent"),
-            Self::Handshake => f.write_str("Handshake"),
-            Self::FullInit => f.write_str("FullInit"),
-            Self::ShowtimeNoSync => f.write_str("ShowtimeNoSync"),
-            Self::ShowtimeTcSync => f.write_str("ShowtimeTcSync"),
-            Self::Unknown(code) => write!(f, "Unknown({code})"),
-        }
-    }
-}
-
-impl core::str::FromStr for LineState {
-    type Err = ();
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s {
-            "NotInitialized" => Self::NotInitialized,
-            "Idle" => Self::Idle,
-            "Silent" => Self::Silent,
-            "Handshake" => Self::Handshake,
-            "FullInit" => Self::FullInit,
-            "ShowtimeNoSync" => Self::ShowtimeNoSync,
-            "ShowtimeTcSync" => Self::ShowtimeTcSync,
-            other => {
-                let code = other
-                    .strip_prefix("Unknown(")
-                    .ok_or(())?
-                    .strip_suffix(')')
-                    .ok_or(())?;
-                Self::Unknown(code.parse().map_err(|_| ())?)
-            }
-        })
-    }
-}
-
-// ─── Data path ──────────────────────────────────────────────────────────
-
-/// Board-reported data path (`dataPath` field at reply offset `0x06`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DataPath {
-    Atm,
-    Ptm,
-    Unknown(u8),
-}
-
-impl DataPath {
-    pub fn from_code(code: u8) -> Self {
-        match code {
-            0 => Self::Atm,
-            1 => Self::Ptm,
-            other => Self::Unknown(other),
-        }
-    }
-}
 
 // ─── Opcode 2 reply: get_line_obj (63 bytes) ────────────────────────────
 
-/// Line metrics — 12 × `u32` at fixed offsets, all big-endian.
-///
-/// Field assignment verified EMPIRICALLY against the live board binary
-/// (qemu + gdb struct dump + distinct-value injection, session 3): the
-/// board's `read_adsl_stats_file` fills a fixed slot table from
-/// `/proc/tc3162/adsl_stats` needles and `dslCfgGet` copies the pairs
-/// below. Noise margin, attenuation, and output power are dB × 10
-/// (e.g. 63 = 6.3 dB). "near-end" rates are DOWNSTREAM (TrendChip
-/// convention: near end = what the CPE receives).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct LineMetrics {
-    pub down_rate: u32,              // 0x08 — near-end (DS) rate (kbps)
-    pub up_rate: u32,                // 0x0c — far-end (US) rate (kbps)
-    pub down_attainable_rate: u32,   // 0x10 — kbps
-    pub up_attainable_rate: u32,     // 0x14 — kbps
-    pub down_noise_margin: u32,      // 0x18 — dB × 10
-    pub up_noise_margin: u32,        // 0x1c — dB × 10
-    pub down_attenuation: u32,       // 0x20 — dB × 10
-    pub up_attenuation: u32,         // 0x24 — dB × 10
-    pub down_output_power: u32,      // 0x28 — dBm × 10
-    pub up_output_power: u32,        // 0x2c — dBm × 10
-    pub uptime_showtime_secs: u32,   // 0x30 — 'ADSL activetime second'
-    pub uptime_total_secs: u32,      // 0x34 — 'ADSL total ativetime second'
-}
 
 /// Parsed opcode-2 reply (`dsl_get_line_obj`, 63 bytes).
 #[derive(Debug, Clone)]
