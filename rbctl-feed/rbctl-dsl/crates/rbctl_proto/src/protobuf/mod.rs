@@ -9,7 +9,10 @@
 //! The generated Rust types live in [`rbctl`] (compiled from `proto/rbctl.proto`
 //! via `prost-build` + `protox`).
 
+pub mod codec;
 pub mod framing;
+pub mod pack;
+pub mod unpack;
 
 pub use framing::{FRAG_FLAG, MAGIC_PROTOBUF};
 
