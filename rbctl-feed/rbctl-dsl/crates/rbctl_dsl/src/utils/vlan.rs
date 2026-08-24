@@ -37,7 +37,7 @@ pub fn delete_vlan_iface(parent: &str, vlan_id: u16) {
     }
     match RtnlLink::new().and_then(|mut r| r.del(&name)) {
         Ok(()) => log::info!("deleted {name}"),
-        Err(e) if matches!(e.raw_os_error(), Some(libc::ENODEV) | Some(libc::ENXIO)) => {}
+        Err(e) if matches!(e.raw_os_error(), Some(libc::ENODEV) | Some(libc::ENOENT)) => {}
         Err(e) => log::warn!("delete {name}: {e}"),
     }
 }

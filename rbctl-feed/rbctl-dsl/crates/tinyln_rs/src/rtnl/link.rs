@@ -20,6 +20,47 @@ const NLM_F_EXCL: u16 = 0x0200;
 
 const IFF_UP: u32 = 1;
 
+/// Translate a libnl-tiny error return into an `io::Error`.
+///
+/// libnl-tiny's `nl_send_auto_complete`/`nl_wait_for_ack` do NOT return raw
+/// kernel errnos: they return (negated) `NLE_*` codes produced by
+/// `nl_syserr2nlerr()`, which collapses several errnos into one code.  E.g.
+/// a kernel `EEXIST` comes back as `-NLE_EXIST` (6) — blindly calling
+/// `from_raw_os_error(6)` displays `strerror(6)` ("No such device or
+/// address") and breaks `raw_os_error() == EEXIST` idempotency checks.
+///
+/// This inverts the mapping for every NLE code that has an unambiguous
+/// kernel-errno origin (the subset of `nl_syserr2nlerr` we can hit over
+/// rtnetlink); codes without one surface as `Other` with the NLE name.
+fn nle_err(ret: i32) -> io::Error {
+    // libnl-tiny errno.h, checked against nl_syserr2nlerr() in error.c.
+    let errno: i32 = match -ret {
+        2 => libc::EINTR,
+        3 => libc::EBADF,
+        4 => libc::EAGAIN,
+        5 => libc::ENOMEM,
+        6 => libc::EEXIST,
+        7 => libc::EINVAL,
+        8 => libc::ERANGE,
+        10 => libc::EOPNOTSUPP,
+        11 => libc::EAFNOSUPPORT,
+        12 => libc::ENOENT,
+        19 => libc::EADDRNOTAVAIL,
+        25 => libc::EBUSY,
+        26 => libc::EPROTONOSUPPORT,
+        27 => libc::EACCES,
+        28 => libc::EPERM,
+        31 => libc::ENODEV,
+        other => {
+            return io::Error::new(
+                io::ErrorKind::Other,
+                format!("libnl error {other} (NLE code, not an errno)"),
+            )
+        }
+    };
+    io::Error::from_raw_os_error(errno)
+}
+
 fn ifindex(name: &str) -> io::Result<i32> {
     let cname = CString::new(name).unwrap();
     let idx = unsafe { libc::if_nametoindex(cname.as_ptr()) };
@@ -73,9 +114,9 @@ impl RtnlLink {
 
     fn send(&mut self, msg: &NlMsg) -> io::Result<()> {
         let ret = unsafe { tinyln_rs_sys::nl_send_auto_complete(self.unl.sock, msg.as_ptr()) };
-        if ret < 0 { return Err(io::Error::from_raw_os_error(-ret)); }
+        if ret < 0 { return Err(nle_err(ret)); }
         let ret = unsafe { tinyln_rs_sys::nl_wait_for_ack(self.unl.sock) };
-        if ret < 0 { return Err(io::Error::from_raw_os_error(-ret)); }
+        if ret < 0 { return Err(nle_err(ret)); }
         Ok(())
     }
 
@@ -126,5 +167,34 @@ impl RtnlLink {
         let msg = self.alloc_msg(RTM_SETLINK as i32);
         msg.append_struct(&build_ifi(idx, flags, change))?;
         self.send(&msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nle_err;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn nle_exist_maps_to_eexist() {
+        // Kernel EEXIST -> nl_syserr2nlerr -> NLE_EXIST(6), negated by libnl.
+        assert_eq!(nle_err(-6).raw_os_error(), Some(libc::EEXIST));
+    }
+
+    #[test]
+    fn nle_nodev_maps_to_enodev() {
+        assert_eq!(nle_err(-31).raw_os_error(), Some(libc::ENODEV));
+    }
+
+    #[test]
+    fn nle_obj_notfound_maps_to_enoent() {
+        assert_eq!(nle_err(-12).raw_os_error(), Some(libc::ENOENT));
+    }
+
+    #[test]
+    fn unknown_nle_code_is_not_shown_as_bogus_errno() {
+        let e = nle_err(-1); // NLE_FAILURE — no errno counterpart
+        assert_eq!(e.kind(), ErrorKind::Other);
+        assert!(e.to_string().contains("NLE"), "{}", e);
     }
 }
