@@ -161,18 +161,25 @@ def start_sniffers():
 
 
 def set_line_state(state):
-    """Rewrite the fake /proc state files (the board's next fopen sees it)."""
+    """Rewrite the fake /proc state files (the board's next fopen sees it).
+
+    The board's parser is needle-strict: lines must appear in the needle
+    order, 'Opmode:' takes EXACTLY ONE space (the opmode table needles
+    start with ' '), and the firmware spells 'ativetime' with one 'c'.
+    Values keep the space after the colon (copied verbatim into slots).
+    """
     if state == "down":
-        xdsl, adsl = "0 3\n", ("ADSL link status: down\nOpmode:  Wrong opmode\n"
+        xdsl, adsl = "0 3\n", ("ADSL link status: down\nOpmode: Wrong opmode\n"
                                "Adsl Type: \n")
     elif state == "showtime_ptm":
         xdsl = "1 2\n"
+        # near-end = DOWNSTREAM, far-end = UPSTREAM (TrendChip convention;
+        # empirically verified session 3): 40M down / 12M up.
         adsl = (
-            "ADSL link status: up\n"
-            "Opmode:  ITU G.993.2(VDSL2)\n"
-            "near-end interleaved channel bit rate: 12000\n"
+            "ADSL link status: up\nOpmode: ITU G.993.2(VDSL2)\n"
+            "near-end interleaved channel bit rate: 40000\n"
             "near-end fast channel bit rate: 0\n"
-            "far-end interleaved channel bit rate: 40000\n"
+            "far-end interleaved channel bit rate: 12000\n"
             "far-end fast channel bit rate: 0\n"
             + "".join(f"{k} 0\n" for k in [
                 "near-end FEC error fast", "near-end FEC error interleaved",
@@ -188,7 +195,7 @@ def set_line_state(state):
               "noise margin upstream: 6.1\noutput power downstream: 14.2\n"
               "attenuation upstream: 10.5\n"
               "attain upstream: 15000\nattain downstream: 45000\n"
-              "ADSL activetime second: 5\nADSL total activetime second: 5\n"
+              "ADSL activetime second: 5\nADSL total ativetime second: 6\n"
               "Adsl Type: vdsl2\n")
     else:
         raise ValueError(state)
@@ -306,10 +313,28 @@ def e5_showtime(board, d):
     sys_before = open(path("board_sys.log")).read() if os.path.exists(path("board_sys.log")) else ""
     set_line_state("showtime_ptm")
     wait_file_contains("daemon_e3.log", "line state: Up", 15)
-    # rates parsed from our synthetic adsl_stats (12/40 Mbps)
-    wait_file_contains("daemon_e3.log", "", 1)
     time.sleep(2)   # let a poll cycle publish metrics
-    log("E5 PASS: daemon saw Up")
+
+    # The op2 replies after showtime must carry the injected metrics:
+    # near-end(=DS) 40000, far-end(=US) 12000, SNR 6.3/6.1 dB (×10).
+    # This pins the empirically-verified DS/US pair order (session 3).
+    import struct
+    got = None
+    for f in wire():
+        if f["dir"] == "h_RESP" and f["op"] == 2 and f["plen"] == 63:
+            p = f["payload"]
+            if p[0x04] == 1:
+                u32 = lambda o: struct.unpack(">I", p[o:o + 4])[0]
+                if u32(0x08):
+                    got = (u32(0x08), u32(0x0c), u32(0x18), u32(0x1c), p[0x05])
+                    break
+    assert got, "no post-showtime op2 reply with metrics"
+    ds, us, snr_d, snr_u, mod = got
+    assert (ds, us) == (40000, 12000), f"rates DS/US: {ds}/{us}"
+    assert (snr_d, snr_u) == (63, 61), f"snr DS/US (dB×10): {snr_d}/{snr_u}"
+    assert mod == 6, f"modulation: {mod}"
+    log("E5 PASS: daemon saw Up with correctly-ordered metrics "
+        f"(DS {ds} kbps @ {snr_d/10:.1f} dB)")
     return sys_before
 
 

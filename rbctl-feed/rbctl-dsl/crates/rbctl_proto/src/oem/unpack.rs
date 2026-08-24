@@ -56,27 +56,27 @@ impl DataPath {
 
 /// Line metrics — 12 × `u32` at fixed offsets, all big-endian.
 ///
-/// Field names and types confirmed against board-side `dslCfgGet`
-/// (`FUN_004048c8` on the EcoNet MIPS `remote_board`). Noise margin,
-/// attenuation, and output power values are in dB × 10 (e.g. 63 = 6.3 dB).
-///
-/// The up/down ordering within each pair follows the board's read order
-/// from `/proc/tc3162/adsl_stats`; confirm exact DS/US assignment per pair
-/// with a live capture.
+/// Field assignment verified EMPIRICALLY against the live board binary
+/// (qemu + gdb struct dump + distinct-value injection, session 3): the
+/// board's `read_adsl_stats_file` fills a fixed slot table from
+/// `/proc/tc3162/adsl_stats` needles and `dslCfgGet` copies the pairs
+/// below. Noise margin, attenuation, and output power are dB × 10
+/// (e.g. 63 = 6.3 dB). "near-end" rates are DOWNSTREAM (TrendChip
+/// convention: near end = what the CPE receives).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LineMetrics {
-    pub down_rate: u32,              // 0x08 — current line rate (kbps)
-    pub up_rate: u32,                // 0x0c — current line rate (kbps)
-    pub up_output_power: u32,        // 0x10 — dB × 10
-    pub down_output_power: u32,      // 0x14 — dB × 10
-    pub up_noise_margin: u32,        // 0x18 — dB × 10
-    pub down_noise_margin: u32,      // 0x1c — dB × 10
-    pub up_attenuation: u32,         // 0x20 — dB × 10
-    pub down_attenuation: u32,       // 0x24 — dB × 10
-    pub up_attainable_rate: u32,     // 0x28 — kbps
-    pub down_attainable_rate: u32,   // 0x2c — kbps
-    pub up_crc_errors: u32,          // 0x30 — count
-    pub down_crc_errors: u32,        // 0x34 — count
+    pub down_rate: u32,              // 0x08 — near-end (DS) rate (kbps)
+    pub up_rate: u32,                // 0x0c — far-end (US) rate (kbps)
+    pub down_attainable_rate: u32,   // 0x10 — kbps
+    pub up_attainable_rate: u32,     // 0x14 — kbps
+    pub down_noise_margin: u32,      // 0x18 — dB × 10
+    pub up_noise_margin: u32,        // 0x1c — dB × 10
+    pub down_attenuation: u32,       // 0x20 — dB × 10
+    pub up_attenuation: u32,         // 0x24 — dB × 10
+    pub down_output_power: u32,      // 0x28 — dBm × 10
+    pub up_output_power: u32,        // 0x2c — dBm × 10
+    pub uptime_showtime_secs: u32,   // 0x30 — 'ADSL activetime second'
+    pub uptime_total_secs: u32,      // 0x34 — 'ADSL total ativetime second'
 }
 
 /// Parsed opcode-2 reply (`dsl_get_line_obj`, 63 bytes).
@@ -133,16 +133,16 @@ pub fn parse_line_obj(data: &[u8]) -> Result<LineObj, &'static str> {
         metrics: LineMetrics {
             down_rate: u32_at(0x08),
             up_rate: u32_at(0x0c),
-            up_output_power: u32_at(0x10),
-            down_output_power: u32_at(0x14),
-            up_noise_margin: u32_at(0x18),
-            down_noise_margin: u32_at(0x1c),
-            up_attenuation: u32_at(0x20),
-            down_attenuation: u32_at(0x24),
-            up_attainable_rate: u32_at(0x28),
-            down_attainable_rate: u32_at(0x2c),
-            up_crc_errors: u32_at(0x30),
-            down_crc_errors: u32_at(0x34),
+            down_attainable_rate: u32_at(0x10),
+            up_attainable_rate: u32_at(0x14),
+            down_noise_margin: u32_at(0x18),
+            up_noise_margin: u32_at(0x1c),
+            down_attenuation: u32_at(0x20),
+            up_attenuation: u32_at(0x24),
+            down_output_power: u32_at(0x28),
+            up_output_power: u32_at(0x2c),
+            uptime_showtime_secs: u32_at(0x30),
+            uptime_total_secs: u32_at(0x34),
         },
     })
 }
@@ -226,10 +226,19 @@ mod tests {
         buf[0x38] = 0;   // is_atm = false (PTM)
         buf[0x39..0x3b].copy_from_slice(&(0x040u16 | 0x080u16).to_be_bytes()); // 17a + 30a
         buf[0x3b..0x3f].copy_from_slice(&3600u32.to_be_bytes()); // uptime = 1h
-        // Fill metrics with distinctive values
-        buf[0x08..0x0c].copy_from_slice(&100_000u32.to_be_bytes()); // down_rate
-        buf[0x18..0x1c].copy_from_slice(&150u32.to_be_bytes());     // up_noise_margin
-        buf[0x1c..0x20].copy_from_slice(&200u32.to_be_bytes());     // down_noise_margin
+        // Fill metrics with the E2E session-3 distinct values
+        buf[0x08..0x0c].copy_from_slice(&100_000u32.to_be_bytes()); // down_rate (near-end)
+        buf[0x0c..0x10].copy_from_slice(&40_000u32.to_be_bytes());  // up_rate (far-end)
+        buf[0x10..0x14].copy_from_slice(&45_000u32.to_be_bytes());  // attain DS
+        buf[0x14..0x18].copy_from_slice(&15_000u32.to_be_bytes());  // attain US
+        buf[0x18..0x1c].copy_from_slice(&63u32.to_be_bytes());      // down_noise_margin 6.3
+        buf[0x1c..0x20].copy_from_slice(&61u32.to_be_bytes());      // up_noise_margin 6.1
+        buf[0x20..0x24].copy_from_slice(&201u32.to_be_bytes());     // down_attenuation 20.1
+        buf[0x24..0x28].copy_from_slice(&105u32.to_be_bytes());     // up_attenuation 10.5
+        buf[0x28..0x2c].copy_from_slice(&142u32.to_be_bytes());     // down_output_power 14.2
+        buf[0x2c..0x30].copy_from_slice(&125u32.to_be_bytes());     // up_output_power 12.5
+        buf[0x30..0x34].copy_from_slice(&5u32.to_be_bytes());       // uptime showtime
+        buf[0x34..0x38].copy_from_slice(&6u32.to_be_bytes());       // uptime total
         buf
     }
 
@@ -245,8 +254,18 @@ mod tests {
         assert_eq!(line.uptime_secs, 3600);
         assert_eq!(line.vdsl2_profile_bitmask, 0x0c0); // 17a + 30a
         assert_eq!(line.metrics.down_rate, 100_000);
-        assert_eq!(line.metrics.up_noise_margin, 150);
-        assert_eq!(line.metrics.down_noise_margin, 200);
+        assert_eq!(line.metrics.up_rate, 40_000);
+        // DS/US pair order: empirically verified (session 3)
+        assert_eq!(line.metrics.down_attainable_rate, 45_000);
+        assert_eq!(line.metrics.up_attainable_rate, 15_000);
+        assert_eq!(line.metrics.down_noise_margin, 63);
+        assert_eq!(line.metrics.up_noise_margin, 61);
+        assert_eq!(line.metrics.down_attenuation, 201);
+        assert_eq!(line.metrics.up_attenuation, 105);
+        assert_eq!(line.metrics.down_output_power, 142);
+        assert_eq!(line.metrics.up_output_power, 125);
+        assert_eq!(line.metrics.uptime_showtime_secs, 5);
+        assert_eq!(line.metrics.uptime_total_secs, 6);
     }
 
     #[test]

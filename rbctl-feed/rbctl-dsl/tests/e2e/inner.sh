@@ -37,7 +37,7 @@ mkdir -p /proc/tc3162
 : > /proc/tc3162/tcci_cmd
 : > /proc/tc3162/vlan_tag_sw
 : > /proc/tc3162/xdsl_stats
-printf 'ADSL link status: down\nOpmode:  Wrong opmode\nAdsl Type: \n' > /proc/tc3162/adsl_stats
+printf 'ADSL link status: down\nOpmode: Wrong opmode\nAdsl Type: \n' > /proc/tc3162/adsl_stats
 printf 'mt7510ptm 12345 0 - Live 0x00000000\n' > /proc/modules
 printf 'CurrentProfiles: 17a\n' > /proc/tc3162/vdsl_interface_config
 

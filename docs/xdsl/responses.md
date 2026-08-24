@@ -56,42 +56,49 @@ and provides **ground truth** for every field.
 | `0x07` | 1 | `apiGetAdslType` | annex | `0`=A · `1`=B · `2`=I · `3`=M |
 | `0x08` | 4 | `FUN_00402818` | downstream rate | uint32 BE, kbps |
 | `0x0c` | 4 | `FUN_00402818` | upstream rate | uint32 BE, kbps |
-| `0x10` | 4 | `FUN_00402bf8` | **output power** pair ¹ | uint32 BE |
-| `0x14` | 4 | `FUN_00402bf8` | **output power** pair ¹ | uint32 BE |
-| `0x18` | 4 | `FUN_00402988` | **noise margin** pair ¹ | uint32 BE, dB×10 (e.g. 63 = 6.3 dB) |
-| `0x1c` | 4 | `FUN_00402988` | **noise margin** pair ¹ | uint32 BE, dB×10 |
-| `0x20` | 4 | `FUN_00402ac0` | **attenuation** pair ¹ | uint32 BE, dB×10 |
-| `0x24` | 4 | `FUN_00402ac0` | **attenuation** pair ¹ | uint32 BE, dB×10 |
-| `0x28` | 4 | `FUN_00402cec` | **attainable rate** pair ¹ | uint32 BE, kbps |
-| `0x2c` | 4 | `FUN_00402cec` | **attainable rate** pair ¹ | uint32 BE, kbps |
-| `0x30` | 4 | `FUN_00402e24` | **CRC errors** pair ¹ | uint32 BE, count |
-| `0x34` | 4 | `FUN_00402e24` | **CRC errors** pair ¹ | uint32 BE, count |
+| `0x10` | 4 | `FUN_00402bf8` | **attainable rate DS** ² | uint32 BE, kbps |
+| `0x14` | 4 | `FUN_00402bf8` | **attainable rate US** ² | uint32 BE, kbps |
+| `0x18` | 4 | `FUN_00402988` | **noise margin DS** ² | uint32 BE, dB×10 (e.g. 63 = 6.3 dB) |
+| `0x1c` | 4 | `FUN_00402988` | **noise margin US** ² | uint32 BE, dB×10 |
+| `0x20` | 4 | `FUN_00402ac0` | **attenuation DS** ² | uint32 BE, dB×10 |
+| `0x24` | 4 | `FUN_00402ac0` | **attenuation US** ² | uint32 BE, dB×10 |
+| `0x28` | 4 | `FUN_00402cec` | **output power DS** ² | uint32 BE, dBm×10 |
+| `0x2c` | 4 | `FUN_00402cec` | **output power US** ² | uint32 BE, dBm×10 |
+| `0x30` | 4 | `FUN_00402e24` | **uptime (showtime)** ² | uint32 BE, s — 'ADSL activetime second' |
+| `0x34` | 4 | `FUN_00402e24` | **uptime (total)** ² | uint32 BE, s — 'ADSL total ativetime second' |
 | `0x38` | 1 | `dslCfgGet` | **ATM connection flag** | `1`=ATM, `0`=PTM ← new field |
 | `0x39` | 2 | `FUN_00402284` | VDSL2 profile bitmask | uint16 BE, only when modulation=6 |
 | `0x3b` | 4 | `dslCfgGet` | **uptime seconds** | uint32 BE, only when link=1 ← was "unknown" |
 
-> ¹ The board reads DS and US values from `/proc/tc3162/adsl_stats` and
-> writes them to consecutive offsets. The DS/US order within each pair
-> follows the order in the stats file. The noise margin, attenuation, and
-> output power values are in **dB × 10** (parsed via `sscanf("%d.%d")`
-> then multiplied by 10).
+> ² **Empirically verified (session 3)** — the DS/US assignment within each
+> pair was confirmed by injecting direction-distinct values into the fake
+> `/proc/tc3162/adsl_stats` and reading them back from live op2 replies
+> under qemu. The board's extractor (`read_adsl_stats_file`,
+> `FUN_00401ad0`) is needle-strict: lines must appear in its fixed needle
+> order, `Opmode:` takes **exactly one space** (the opmode table needles in
+> `apiGetAdslType` start with a space), and the firmware misspells
+> `'ADSL total ativetime second'` (one `c`). "near-end" rates are
+> DOWNSTREAM (what the CPE receives), "far-end" are upstream. A needle
+> desync or opmode mismatch makes `apiGetAdslType` fail and `dslCfgGet`
+> return status 1 with **all metrics zero**.
 
 ### Corrections from board-side ground truth
 
 The previous (host-side-only) analysis inferred field names from TR-181
 ordering and destination struct offsets. Several were **wrong**:
 
-| Offset | Previous (inferred) | Corrected (board ground truth) |
+| Offset | Previous (inferred) | Corrected (empirically verified) |
 |--------|---------------------|-------------------------------|
 | `0x06` | reserved | **data path** (0=ATM, 1=PTM) |
-| `0x10` | US curr rate | **output power** (pair) |
-| `0x14` | DS curr rate | **output power** (pair) |
-| `0x18` | US max rate | **noise margin** (pair, dB×10) |
-| `0x1c` | DS max rate | **noise margin** (pair, dB×10) |
-| `0x20` | US SNR margin | **attenuation** (pair, dB×10) |
-| `0x24` | DS SNR margin | **attenuation** (pair, dB×10) |
-| `0x28` | US attenuation | **attainable rate** (pair) |
-| `0x2c` | DS attenuation | **attainable rate** (pair) |
+| `0x10` | output power pair | **attainable rate DS** |
+| `0x14` | output power pair | **attainable rate US** |
+| `0x18` | noise margin US | **noise margin DS** (pair order was swapped) |
+| `0x1c` | noise margin DS | **noise margin US** |
+| `0x20` | attenuation US | **attenuation DS** (pair order was swapped) |
+| `0x24` | attenuation DS | **attenuation US** |
+| `0x28` | attainable rate pair | **output power DS** |
+| `0x2c` | attainable rate pair | **output power US** |
+| `0x30` | CRC errors pair | **uptime showtime/total** (activetime seconds) |
 | `0x30` | US errors (ES) | **CRC errors** (pair) |
 | `0x34` | DS errors (SES) | **CRC errors** (pair) |
 | `0x38` | (not read) | **ATM connection flag** |

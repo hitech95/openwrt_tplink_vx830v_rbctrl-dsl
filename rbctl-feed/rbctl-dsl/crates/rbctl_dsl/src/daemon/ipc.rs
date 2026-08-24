@@ -105,6 +105,19 @@ fn opt<T: std::fmt::Display>(v: &Option<T>) -> String {
     }
 }
 
+/// Render an optional dB×10 field as dB with one decimal (63 → "6.3").
+fn opt_db(tenths: &Option<u32>) -> String {
+    match tenths {
+        Some(t) => format!("{:.1}", *t as f32 / 10.0),
+        None => "null".to_string(),
+    }
+}
+
+/// Parse a dB value back into dB×10 tenths (round-trip of [`opt_db`]).
+fn un_db(s: &str) -> Option<u32> {
+    s.parse::<f32>().ok().map(|db| (db * 10.0).round() as u32)
+}
+
 /// Parse a wire value back into an Option (`null` → None).
 fn unopt<T, F: Fn(&str) -> Option<T>>(s: &str, f: F) -> Option<T> {
     if s == "null" { None } else { f(s) }
@@ -119,7 +132,7 @@ impl StatusSnapshot {
              fw_status: {}\nmonitor: {}",
             self.state, self.state_num, self.up, opt(&self.uptime_secs),
             opt(&self.modulation), opt(&self.annex), self.xfer_mode,
-            opt(&self.down_rate), opt(&self.up_rate), opt(&self.down_snr), opt(&self.up_snr),
+            opt(&self.down_rate), opt(&self.up_rate), opt_db(&self.down_snr), opt_db(&self.up_snr),
             self.fw_status, self.monitor,
         )
     }
@@ -141,8 +154,8 @@ impl StatusSnapshot {
                     "xfer_mode" => s.xfer_mode = v.trim().to_string(),
                     "down_rate" => s.down_rate = unopt(v.trim(), |x| x.parse().ok()),
                     "up_rate" => s.up_rate = unopt(v.trim(), |x| x.parse().ok()),
-                    "down_snr" => s.down_snr = unopt(v.trim(), |x| x.parse().ok()),
-                    "up_snr" => s.up_snr = unopt(v.trim(), |x| x.parse().ok()),
+                    "down_snr" => s.down_snr = unopt(v.trim(), un_db),
+                    "up_snr" => s.up_snr = unopt(v.trim(), un_db),
                     "fw_status" => s.fw_status = v.trim().to_string(),
                     "monitor" => s.monitor = v.trim() == "true",
                     _ => {}
@@ -344,6 +357,8 @@ mod tests {
             monitor: false,
         };
         let text = s.to_lines();
+        assert!(text.contains("down_snr: 15.0"));
+        assert!(text.contains("up_snr: 12.0"));
         let parsed = StatusSnapshot::from_lines(&text);
         assert_eq!(parsed.state, "Up");
         assert_eq!(parsed.state_num, 7);
