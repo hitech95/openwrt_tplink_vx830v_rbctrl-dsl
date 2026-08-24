@@ -136,9 +136,9 @@ struct DaemonArgs {
     #[arg(long)]
     sra: Option<bool>,
 
-    /// Override transport VLAN base index; the board data VLAN is
-    /// base + 2000 [possible values: 0-7 → VLANs 2000-2007]
-    #[arg(short = 't', long)]
+    /// Override transport VLAN: full id 2000-2007 (e.g. 2000 or lan0.2000)
+    /// or the base index 0-7 (board data VLAN = 2000 + base)
+    #[arg(short = 't', long, value_parser = parse_transport_vlan)]
     transport_vlan: Option<u8>,
 
     /// Monitor mode: only poll the board (op2/op4) and publish status.
@@ -147,6 +147,24 @@ struct DaemonArgs {
     /// own defaults without the daemon disrupting it.
     #[arg(long)]
     monitor: bool,
+}
+
+/// Accept the transport VLAN as a full id (2000–2007), optionally with an
+/// interface prefix (`lan0.2000`), or as the raw base index (0–7).
+/// Returns the base index.
+fn parse_transport_vlan(s: &str) -> Result<u8, String> {
+    const BASE: u32 = 2000;
+    let raw = s.strip_prefix("lan0.").unwrap_or(s);
+    let n: u32 = raw.parse().map_err(|_| {
+        format!("invalid value '{s}': expected 2000-2007, lan0.2000-lan0.2007 or 0-7")
+    })?;
+    match n {
+        0..=7 => Ok(n as u8),
+        2000..=2007 => Ok((n - BASE) as u8),
+        _ => Err(format!(
+            "invalid value '{s}': expected 2000-2007, lan0.2000-lan0.2007 or 0-7"
+        )),
+    }
 }
 
 impl DaemonArgs {

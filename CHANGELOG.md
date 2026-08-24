@@ -4,6 +4,50 @@ Public-facing changes to the `rbctl-dsl` OpenWrt package. Dates are in
 YYYY-MM-DD format. Internal refactors and documentation-only changes are
 summarized, not itemized.
 
+## 0.4.1 — 2026-08-24
+
+### Fixed
+
+- **Line metrics DS/US pairs were crossed or mislabelled.** The op2
+  status decoder mapped five field pairs wrong: SNR margin, attenuation
+  and output power had downstream/upstream swapped or exchanged with
+  each other, the "attainable rate" pair was actually output power (and
+  vice versa), and the "CRC errors" pair is really the showtime/total
+  uptime counters. Verified empirically against the real board firmware
+  (direction-distinct values injected into the stats file and read back
+  from live op2 replies). Field reports of `down_snr: 0 / up_snr: 55`
+  now decode correctly as downstream 5.5 dB, upstream 0.0 dB.
+- `status` now prints SNR in dB with one decimal (`down_snr: 5.5`), the
+  modulation name (`modulation: VDSL2`) and the human line-state label.
+  The IPC status reply is fully typed — enums cross the wire as stable
+  identifier tokens parsed back into typed values (`state:
+  ShowtimeTcSync`, `modulation: Vdsl2`, `annex: B`, `xfer_mode: Ptm`,
+  `fw_status: UpgradingProgress stage=2 pct=45`; unknown states keep
+  their code, e.g. `Unknown(9)`) and measurements as integers with
+  fixed units (uptime in seconds, rates in kbps, SNR in dB×10). No
+  pre-formatted strings on the wire: machine consumers parse the
+  tokens/numbers directly and future output formats/units are CLI-only
+  changes. The line-state vocabulary now lives in the protocol crate as
+  one shared enum (`LineState`: board states plus the LuCI lifecycle
+  states `NotInitialized`/`Idle`/`ShowtimeNoSync`), so IPC and ubus
+  report the same states; the redundant `state_num` field was dropped
+  from the IPC reply (the Lantiq numeric ABI remains on the ubus
+  interface, where it belongs).
+- The `VLAN create … (os error 6)` warning on restart was a false
+  alarm: libnl-tiny returns its own error codes, not errnos, and code 6
+  (`NLE_EXIST`) was displayed as `ENXIO`. Existing-interface (EEXIST)
+  is now correctly recognized as the idempotent success path.
+- `-t/--transport-vlan` accepts the full VLAN id (`2000`–`2007`) and
+  the interface form (`lan0.2000`) in addition to the base index 0–7.
+
+### Testing
+
+- The E2E suite's fake driver stats file now matches the board parser's
+  needle-strict format (single space after `Opmode:`, the firmware's
+  `ativetime` spelling), which unblocked end-to-end metric verification:
+  E5 now asserts the decoded rates/SNR of a showtime injection against
+  the real board binary.
+
 ## 0.4.0 — 2026-08-23
 
 ### Fixed
