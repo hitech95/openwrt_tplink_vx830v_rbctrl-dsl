@@ -12,7 +12,9 @@ fn main() -> std::io::Result<()> {
     prost_build::Config::new()
         .compile_fds(file_descriptor_set)?;
 
-    println!("cargo:rerun-if-changed=proto/rbctl.proto");
+    // rbctl.proto imports the section files — watch the whole directory,
+    // or edits to common.proto & co. silently reuse stale generated code.
+    println!("cargo:rerun-if-changed=proto");
     Ok(())
 }
 

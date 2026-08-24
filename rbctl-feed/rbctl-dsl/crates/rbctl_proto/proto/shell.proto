@@ -3,6 +3,13 @@
 // The board runs Linux but has no SSH/telnet path from the host. This
 // provides a multiplexed remote shell over the L2 protobuf protocol.
 // Implemented via posix_openpt + fork + execve("/bin/sh") on the board.
+//
+// Backpressure: credit window per session per direction (start 8 KB).
+// The agent stops reading the pty at high watermark — the kernel pty
+// buffer then blocks the child's writes (native Unix pacing), so the
+// agent never buffers unbounded stdout. The host symmetrically blocks
+// its input forwarder. Acks ride the opposite direction's data messages
+// (stdin_consumed) plus the window-exempt ShellFlow control.
 
 syntax = "proto3";
 
@@ -14,6 +21,7 @@ message ShellRequest {
     ShellData   data   = 2;
     ShellResize resize = 3;
     ShellClose  close  = 4;
+    ShellFlow   flow   = 5;  // stdout credit refill (window-exempt control)
   }
 }
 
@@ -34,9 +42,18 @@ message ShellResize {
 
 message ShellClose {}
 
+// Backpressure ack: cumulative count of stdout bytes the host has
+// received/reflowed. Sent standalone when the host has no stdin to
+// piggyback it on — never window-limited, so acks cannot deadlock.
+message ShellFlow {
+  uint32 session_id   = 1;
+  uint64 stdout_acked = 2;
+}
+
 message ShellResponse {
-  uint32 session_id = 1;
-  bytes  stdout     = 2;  // board → host
-  bool   exited      = 3;
-  int32  exit_code   = 4;
+  uint32 session_id    = 1;
+  bytes  stdout        = 2;  // board → host
+  bool   exited        = 3;
+  int32  exit_code     = 4;
+  uint64 stdin_consumed = 5;  // cumulative stdin credits (board → host)
 }

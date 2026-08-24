@@ -1,8 +1,14 @@
-// xDSL line status — replaces OEM opcode 2 (63-byte packed struct).
+// xDSL line status (basic) — the daemon's poll request.
 //
-// Parses /proc/tc3162/adsl_stats and exposes all fields plus far-end info,
-// vectoring/G.INP, INP/delay, and per-channel errors — none of which the OEM
-// exposes.
+// Replaces OEM opcode 2 for control purposes: just enough for the daemon's
+// state machine (up/down/closed, trained modulation for link-type
+// derivation) at minimal agent cost — one cheap /proc read, ~30 bytes on
+// the wire, never fragmented.
+//
+// The full statistics (SNR, power, errors, per-channel counters) live in
+// xdsl_metrics.proto (line_metrics) — a strict superset fetched on demand
+// by ubus/IPC consumers. Splitting keeps the 1 Hz poll cheap on the MIPS
+// agent and the daemon's transition logic independent of bulk data.
 
 syntax = "proto3";
 
@@ -13,114 +19,9 @@ import "common.proto";
 message GetLineStatusRequest {}
 
 message LineStatusResponse {
-  LinkState       link_state           = 1;
-  ModulationType  modulation           = 2;
-  DataPath        data_path            = 3;
-  AnnexType       annex                = 4;
-  uint32          uptime_secs          = 5;
-
-  // ── Rates (kbps) ──
-  DirectionalU32  current_rate         = 10;
-  DirectionalU32  attainable_rate      = 11;
-  PerChannelRates per_channel_rates    = 12;
-
-  // ── Signal metrics (dB × 10) ──
-  DirectionalU32  noise_margin         = 20;
-  DirectionalU32  attenuation          = 21;
-  DirectionalU32  output_power         = 22;
-  DirectionalU32  snr_margin           = 23;
-
-  // ── Error counters ──
-  DirectionalU32  crc_errors           = 30;
-  DirectionalU32  fec_errors           = 31;
-  DirectionalU32  hes_errors           = 32;
-  PerChannelErrors per_channel_errors  = 33;
-
-  // ── Error seconds ──
-  DirectionalU32  es                   = 40;
-  DirectionalU32  ses                  = 41;
-  DirectionalU32  uas                  = 42;
-  DirectionalU32  los                  = 43;
-  DirectionalU32  lof                  = 44;
-  DirectionalU32  lpr                  = 45;
-
-  // ── Far-end identification ──
-  FarEndInfo      far_end              = 50;
-
-  // ── Vectoring / G.INP ──
-  VectoringInfo   vectoring            = 60;
-  GinpInfo        ginp                 = 61;
-
-  // ── INP / delay ──
-  DirectionalU32  inp_symbols          = 70;
-  DirectionalU32  interleave_delay_us  = 71;
-
-  // ── VDSL2 ──
-  uint32          vdsl2_profile_bitmask = 80;
-  BandPlan        band_plan             = 81;
-
-  // ── Raw timestamp ──
-  uint64          stats_timestamp      = 90;
-}
-
-message DirectionalU32 {
-  uint32 downstream = 1;
-  uint32 upstream   = 2;
-}
-
-message PerChannelRates {
-  uint32 ds_fast        = 1;
-  uint32 ds_interleaved = 2;
-  uint32 us_fast        = 3;
-  uint32 us_interleaved = 4;
-}
-
-message PerChannelErrors {
-  PerChannelDirection near_end = 1;
-  PerChannelDirection far_end  = 2;
-}
-
-message PerChannelDirection {
-  uint32 crc_fast        = 1;
-  uint32 crc_interleaved = 2;
-  uint32 fec_fast        = 3;
-  uint32 fec_interleaved = 4;
-  uint32 hes_fast        = 5;
-  uint32 hes_interleaved = 6;
-}
-
-message FarEndInfo {
-  uint32 vendor_id        = 1;
-  bytes  vendor_id_raw    = 2;
-  uint32 standard_version = 3;
-  string vendor_name      = 4;
-  string country_code     = 5;
-}
-
-message VectoringInfo {
-  bool   enabled       = 1;
-  bool   active        = 2;
-  uint32 sync_detected = 3;
-  string vector_profile = 4;
-}
-
-message GinpInfo {
-  bool   enabled       = 1;
-  uint32 actual_inp    = 2;
-  uint32 dtu_tx_count  = 3;
-  uint32 dtu_rx_count  = 4;
-  uint32 dtu_err_count = 5;
-}
-
-message BandPlan {
-  string        profile = 1;
-  repeated Band bands   = 2;
-}
-
-message Band {
-  uint32 index      = 1;
-  uint32 start_tone = 2;
-  uint32 end_tone   = 3;
-  uint32 psd_max    = 4;
-  uint32 tone_count = 5;
+  LinkState      link_state  = 1;  // incl. CLOSED = administratively down
+  ModulationType modulation  = 2;  // trained modulation (link-type authority)
+  DataPath       data_path   = 3;  // ATM/PTM as reported by the driver
+  AnnexType      annex       = 4;
+  uint32         uptime_secs = 5;  // current showtime session
 }

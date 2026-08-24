@@ -1,0 +1,158 @@
+// xDSL line metrics (full) — on-demand statistics for ubus/IPC consumers.
+//
+// A strict superset of the basic line status: all signal metrics, error
+// counters, per-channel (fast/interleaved, near/far) statistics, channel
+// blocks, retransmission (G.INP), far-end identification, vectoring,
+// INP/delay and band plan. Everything except the per-tone spectrum.
+//
+// Absorbs the former line_stats and channel_stats requests (OEM opcode 4's
+// two flavors): parsing the full /proc stats file on every poll would waste
+// agent CPU for data the daemon's state machine never looks at, so metrics
+// are fetched when a consumer asks (or on a slow background refresh).
+
+syntax = "proto3";
+
+package rbctl;
+
+import "common.proto";
+
+message GetLineMetricsRequest {}
+
+message LineMetricsResponse {
+  // ── Rates (kbps) ──
+  DirectionalU32  current_rate       = 10;
+  DirectionalU32  attainable_rate    = 11;
+  PerChannelRates per_channel_rates  = 12;
+
+  // ── Signal metrics (dB × 10) ──
+  DirectionalU32  noise_margin       = 20;  // SNR margin (down/up)
+  DirectionalU32  attenuation        = 21;
+  DirectionalU32  output_power       = 22;
+
+  // ── Error counters (cumulative since link-up) ──
+  DirectionalU32  crc_errors         = 30;
+  DirectionalU32  fec_errors         = 31;
+  DirectionalU32  hes_errors         = 32;
+  PerChannelErrors per_channel_errors = 33;
+
+  // ── Error seconds ──
+  DirectionalU32  es = 40;  // errored seconds
+  DirectionalU32  ses = 41; // severely errored seconds
+  DirectionalU32  uas = 42; // unavailable seconds
+  DirectionalU32  los = 43; // loss of signal seconds
+  DirectionalU32  lof = 44; // loss of frame seconds
+  DirectionalU32  lpr = 45; // loss of power seconds
+
+  // ── Channel blocks (absorbs the old channel_stats / opcode 4) ──
+  ChannelBlocks   channel_blocks     = 50;
+
+  // ── Session uptime ──
+  uint32          total_act_seconds  = 51;  // cumulative across sessions
+  uint32          current_act_seconds = 52; // current session
+
+  // ── Far-end identification ──
+  FarEndInfo      far_end            = 60;
+
+  // ── Vectoring / G.INP ──
+  VectoringInfo   vectoring          = 61;
+  GinpInfo        ginp               = 62;
+  RetransmissionStats retransmission = 63;
+
+  // ── INP / delay ──
+  DirectionalU32  inp_symbols        = 70;  // impulse noise protection
+  DirectionalU32  interleave_delay_us = 71;
+
+  // ── VDSL2 ──
+  uint32          vdsl2_profile_bitmask = 80;
+  BandPlan        band_plan             = 81;
+
+  // ── Raw timestamp ──
+  uint64          stats_timestamp = 90;  // when the stats were read
+}
+
+// ─── Shared types ──────────────────────────────────────────────────────
+
+message DirectionalU32 {
+  uint32 downstream = 1;
+  uint32 upstream   = 2;
+}
+
+message PerChannelRates {
+  // Separate fast/interleaved channel rates (both directions)
+  uint32 ds_fast        = 1;
+  uint32 ds_interleaved = 2;
+  uint32 us_fast        = 3;
+  uint32 us_interleaved = 4;
+}
+
+message PerChannelErrors {
+  PerChannelDirection near_end = 1;
+  PerChannelDirection far_end  = 2;
+}
+
+message PerChannelDirection {
+  uint32 crc_fast         = 1;
+  uint32 crc_interleaved  = 2;
+  uint32 fec_fast         = 3;
+  uint32 fec_interleaved  = 4;
+  uint32 hes_fast         = 5;
+  uint32 hes_interleaved  = 6;
+}
+
+message ChannelBlocks {
+  uint32 rx_blocks   = 1;
+  uint32 rx_errors   = 2;
+  uint32 rx_discards = 3;
+  uint32 tx_blocks   = 4;
+  uint32 tx_errors   = 5;
+  uint32 tx_discards = 6;
+}
+
+message FarEndInfo {
+  uint32 vendor_id        = 1;  // ATU-R vendor ID (EOC)
+  bytes  vendor_id_raw    = 2;  // full 8-byte vendor ID
+  uint32 standard_version = 3;  // ITU-T standard version code
+  string vendor_name      = 4;  // decoded vendor name if known
+  string country_code     = 5;  // if reported
+}
+
+message VectoringInfo {
+  bool   enabled       = 1;
+  bool   active        = 2;
+  uint32 sync_detected = 3;  // G.vector synchronization
+  string vector_profile = 4; // e.g. "R-Vector1_2"
+}
+
+message GinpInfo {
+  bool   enabled        = 1;
+  uint32 actual_inp     = 2;  // actual impulse noise protection
+  uint32 dtu_tx_count   = 3;  // transmitted DTUs
+  uint32 dtu_rx_count   = 4;  // received DTUs
+  uint32 dtu_err_count  = 5;  // errored DTUs
+}
+
+message RetransmissionStats {
+  uint32 tx_dtu_count      = 1;
+  uint32 rx_dtu_count      = 2;
+  uint32 correct_dtu       = 3;
+  uint32 errored_dtu       = 4;
+  uint32 error_free_bits   = 5;
+  uint32 min_throughput    = 6;  // min error-free throughput rate
+  uint32 actual_throughput = 7;  // actual error-free throughput rate
+  uint32 rein_value        = 8;  // REIN impulse noise value
+  uint32 shine_value       = 9;  // SHINE impulse noise value
+  uint32 act_delay_rtx_us  = 10; // retransmission delay (µs)
+}
+
+message BandPlan {
+  string        profile = 1;  // "17a", "30a", "35b", "12a", "8b", "8d"
+  repeated Band bands   = 2;
+}
+
+message Band {
+  uint32 index      = 1;
+  uint32 start_tone = 2;
+  uint32 end_tone   = 3;
+  uint32 psd_max    = 4;  // dBm/Hz
+  uint32 tone_count = 5;
+}

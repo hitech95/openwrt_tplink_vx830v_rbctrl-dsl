@@ -9,10 +9,12 @@ package rbctl;
 
 enum LinkState {
   LINK_STATE_UNSPECIFIED = 0;
-  NO_SIGNAL              = 1;
+  NO_SIGNAL              = 1; // operational down: no DSL signal
   HANDSHAKE              = 2;
   TRAINING               = 3;
-  SHOWTIME               = 4; // = Up
+  SHOWTIME               = 4; // operational up
+  CLOSED                 = 5; // administratively down (line_close / OEM op3):
+                              // not training — distinct from NO_SIGNAL
 }
 
 enum ModulationType {
@@ -23,6 +25,9 @@ enum ModulationType {
   ADSL2                  = 4;
   ADSL2PLUS              = 5;
   VDSL2                  = 6;
+  MULTIMODE              = 7; // config-only: auto-detect across standards
+                              // (OEM code 7). Never appears in line status —
+                              // the trained modulation is always concrete.
 }
 
 enum DataPath {
@@ -37,4 +42,10 @@ enum AnnexType {
   B                 = 2;
   I                 = 3;
   M                 = 4;
+  J                 = 5;   // OEM code 6
+  AUTO              = 6;   // OEM code 8 — auto-negotiate (config-only,
+                           // like MULTIMODE)
+  AL                = 7;   // OEM code 4 — multi-annex A+L
+  ALM               = 8;   // OEM code 5 — multi-annex A+L+M
+  BJ                = 9;   // OEM code 7 — multi-annex B+J
 }

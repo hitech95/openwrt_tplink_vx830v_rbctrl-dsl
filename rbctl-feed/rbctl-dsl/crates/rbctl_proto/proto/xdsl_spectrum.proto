@@ -1,45 +1,39 @@
-// xDSL spectrum data + loop diagnostics — NEW, no OEM equivalent.
+// xDSL spectrum data — per-tone graphs + loop diagnostics trigger.
 //
-// Per-tone graphs (SNR, bits, gain, Hlog, QLN) via tcci_cmd show commands.
-// Unlocks 40+ fields locked inside the DSL driver that the OEM never surfaces.
+// NEW, no OEM equivalent. Per-tone graphs (SNR, bits, gain, Hlog, QLN) via
+// tcci_cmd show commands. Unlocks 40+ fields locked inside the DSL driver
+// that the OEM never surfaces.
+//
+// Hlog/QLN may require a fresh measurement (the driver caches the last
+// one): `fresh=true` triggers it, and the response reports in_progress —
+// a second request later fetches the completed data. This absorbs the
+// former separate diagnostics request: measurement is inherently spectrum
+// work.
 
 syntax = "proto3";
 
 package rbctl;
-
-// ── Spectrum ───────────────────────────────────────────────────────────
 
 message GetSpectrumRequest {
   bool snr_per_tone  = 1;
   bool bits_per_tone = 2;
   bool hlog          = 3;
   bool qln           = 4;
+  bool fresh         = 5;  // trigger a new Hlog/QLN measurement first
 }
 
 message SpectrumResponse {
-  ToneData snr  = 1;
-  ToneData bits = 2;
-  ToneData gain = 3;
-  ToneData hlog = 4;
-  ToneData qln  = 5;
+  ToneData snr         = 1;
+  ToneData bits        = 2;
+  ToneData gain        = 3;
+  ToneData hlog        = 4;
+  ToneData qln         = 5;
+  bool     in_progress = 6;  // measurement still running — refetch later
 }
 
 message ToneData {
-  uint32             start_tone   = 1;
-  uint32             tone_count   = 2;
-  uint32             tone_spacing = 3;
-  repeated sint32    values       = 4 [packed = true];
-}
-
-// ── Diagnostics ────────────────────────────────────────────────────────
-
-message GetDiagnosticsRequest {
-  bool run_hlog = 1;
-  bool run_qln  = 2;
-}
-
-message DiagnosticsResponse {
-  ToneData hlog        = 1;
-  ToneData qln         = 2;
-  bool     in_progress = 3;
+  uint32          start_tone   = 1;
+  uint32          tone_count   = 2;
+  uint32          tone_spacing = 3;  // kHz (4.3125 for ADSL, 8.0 for VDSL2 US0)
+  repeated sint32 values       = 4 [packed = true];  // one value per tone
 }

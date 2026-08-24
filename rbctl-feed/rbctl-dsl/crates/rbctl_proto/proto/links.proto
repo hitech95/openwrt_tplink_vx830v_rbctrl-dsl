@@ -1,0 +1,72 @@
+// Data-link management — ATM/PTM links over the DSL channel.
+//
+// Replaces OEM opcodes 5/6 (ATM link add/del) and 15/16 (PTM link add/del),
+// lifted out of the line-config request: data links have their own lifecycle
+// (created around showtime, keyed by VLAN) and their own error surface.
+//
+// ─── Queueing semantics (matches the current OEM agent) ────────────────
+// link_create received before the line is in showtime is QUEUED by the
+// agent and materialized automatically when the line trains — exactly what
+// the OEM board does with its provisioning commands (the board's status
+// thread materializes queued link ops at showtime). The response reports
+// queued=true so the host knows the link is deferred, not active.
+// link_remove of a queued-but-not-materialized link simply dequeues it.
+// Materialization is announced asynchronously via LinkActiveEvent
+// (events.proto) — the hook for host-side data-plane notifications.
+//
+// Single-link policy for now: link_create while another link is configured
+// is an error (envelope ok=false, error prefix "link_exists:" naming the
+// conflicting link). The create/remove shape is already multi-link
+// ready — only the agent-side capacity check narrows for now.
+
+syntax = "proto3";
+
+package rbctl;
+
+message LinkRequest {
+  oneof action {
+    LinkCreate create = 1;
+    LinkRemove remove = 2;
+  }
+}
+
+// Create a data link. `vlan_id` is the desired transport VLAN; the
+// response echoes the board-assigned one.
+message LinkCreate {
+  uint32 vlan_id = 1;  // 2000-2007
+  oneof kind {
+    AtmLinkParams atm = 2;
+    PtmLinkParams ptm = 3;
+  }
+}
+
+// Altering a link is deliberately not modeled: remove + re-create (the
+// OEM ops are add/delete only too). If a real alter use case appears
+// (e.g. ATM QoS change), it can be added as a new oneof arm later —
+// proto3 additions are wire-compatible.
+
+message LinkRemove {
+  uint32 vlan_id = 1;  // link ID = assigned VLAN
+}
+
+message AtmLinkParams {
+  uint32 vpi       = 1;
+  uint32 vci       = 2;
+  uint32 encap     = 3;  // 0=LLC, 1=VCMUX
+  uint32 link_type = 4;  // 0=EoA, 6=PPPoA, 7=IPoA
+  uint32 qos       = 5;  // 0=UBR, 1=CBR, 2=VBR
+  uint32 pcr       = 6;
+  uint32 scr       = 7;
+  uint32 mbs       = 8;
+}
+
+message PtmLinkParams {
+  bool   tag_enable = 1;
+  uint32 tag_vid    = 2;
+  uint32 tag_pri    = 3;
+}
+
+message LinkResponse {
+  uint32 vlan_id = 1;  // assigned (create) / removed VLAN
+  bool   queued  = 2;  // true: deferred until showtime (not yet materialized)
+}

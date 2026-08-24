@@ -19,3 +19,14 @@ message FirmwareProgress {
   uint32 stage = 1;
   uint32 pct   = 2;
 }
+
+// A queued data link was materialized — dequeued and active on the board
+// (fired when the line reaches showtime, or immediately when a create
+// arrives on an already-trained line). The daemon uses this to trigger
+// host-side data-plane notifications (hotplug) at the moment the link
+// actually goes live, rather than inferring it from the line state.
+message LinkActiveEvent {
+  uint32   vlan_id   = 1;  // assigned VLAN of the now-active link
+  DataPath kind      = 2;  // ATM or PTM
+  uint64   timestamp = 3;
+}
