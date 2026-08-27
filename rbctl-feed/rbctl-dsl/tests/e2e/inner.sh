@@ -51,6 +51,31 @@ ip link add link lan0 name lan0.1   type vlan id 1
 ip link add link lan0.1 name lan0.1.500 type vlan id 500
 for i in eth0 eth0.1 eth0.1.500 lan0 lan0.1 lan0.1.500; do ip link set "$i" up; done
 
+# Dummy PTM interface: the board's vdsl_linkAdd gates the smuxctl/vconfig
+# materialization on if_nametoindex("nas8") != 0 (on real hw the mt7510ptm
+# driver creates nas8 when the line trains). Without it the op15 handler
+# bails with "interface nas8 is not ready" and board_exec.log never sees
+# the data-plane commands.
+ip link add nas8 type dummy 2>/dev/null || true
+ip link set nas8 up
+
+# Pre-create every interface ptmCreateVLAN(pvc) polls for (50 x 5 ms via
+# waitIntfExists): "nas8_<pvc>", "eth0.1.<2000+pvc>", "br<pvc+2>" for
+# pvc 0..7. On real hw the board's own vconfig/brctl/smuxctl create them;
+# under the harness those are ENOENT absolute paths or no-op stubs, so
+# nothing would materialize — ptmCreateVLAN would return 1, vdsl_linkAdd
+# with it, the handled flag would never be set and op16 would silently
+# skip vdsl_linkDel (no smuxctl rem, l_vidInfo never freed). Verified
+# against ptmCreateVLAN @ 0x00406094 + ptm_build_ifnames @ 0x00405de8.
+for p in 0 1 2 3 4 5 6 7; do
+  ip link add "nas8_$p" type dummy 2>/dev/null || true
+  ip link set "nas8_$p" up
+  ip link add link eth0.1 name "eth0.1.$((2000+p))" type vlan id $((2000+p)) 2>/dev/null || true
+  ip link set "eth0.1.$((2000+p))" up
+  ip link add "br$((p+2))" type bridge 2>/dev/null || true
+  ip link set "br$((p+2))" up
+done
+
 # ── shell stubs: satisfy the binaries' system() calls, record them ──
 mkdir -p "$STUBBIN"
 for t in ifconfig brctl vconfig smuxctl route; do
