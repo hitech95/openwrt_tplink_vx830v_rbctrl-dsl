@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "af_packet"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "libc",
 ]
@@ -554,7 +554,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rbctl_dsl"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "af_packet",
  "clap",
@@ -569,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "rbctl_proto"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "crc",
  "prost",
@@ -737,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "tinyln-rs"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "libc",
  "tinyln-rs-sys",
@@ -745,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "tinyln-rs-sys"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "bindgen",
  "libc",

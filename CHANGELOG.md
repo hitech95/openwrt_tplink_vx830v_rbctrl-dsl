@@ -4,6 +4,54 @@ Public-facing changes to the `rbctl-dsl` OpenWrt package. Dates are in
 YYYY-MM-DD format. Internal refactors and documentation-only changes are
 summarized, not itemized.
 
+## 0.5.0 — 2026-08-27
+
+### Added — data-link configuration (multi-link, board-side tagging)
+
+- **UCI data-link sections** (`network.<name>=ptm|atm`): one named
+  section per data link with a stable explicit `index` (transport VLAN =
+  `2000 + index`, immune to UCI reordering — netifd hooks
+  `lan0.<transport>` by name), `vid`/`pbit` service-VLAN tagging applied
+  by the BOARD (op15 tag fields → smux mode 3), and ATM PVC params
+  (`vpi`, `vci`, `encaps`, `payload`). Validation enforces the board's
+  physical limits at load with named errors: indices 0–7 unique, ≤ 8
+  links, service vids unique (board vid-dedup), at most one untagged
+  PTM link, `ptp` rejected as the IEEE-1588 typo of `ptm`. No sections =
+  the implicit legacy single link. CLI `--link-index/--link-vid/
+  --link-pbit` override the implicit link.
+- **Queue-at-open provisioning** (the session-4 tester-verified OEM
+  flow): all links are op5/op15-queued while the line is still DOWN and
+  materialized by the board's up-transition handler. Shutdown/reload
+  tear down per-link (op16/op6 for both types — covers queued-not-yet-
+  materialized nodes); reload diffs links by index and swaps changed
+  ones. Post-up provisioning (reload adds, auto corrections) logs the
+  F3 warning naming the `restart-line` remedy — the econet direct path
+  is real-hardware-verified but historically fragile.
+- **Auto-mode type correction (F4)**: with `line_mode auto` and no link
+  sections, an optimistic untagged PTM link is queued at open; if the
+  line trains ADSL the daemon swaps it to ATM post-up (op16 the queued
+  PTM node + op5 with default PVC 8/35), and re-swaps if a mixed-mode
+  line re-trains as the other family. Explicitly typed links are never
+  silently retyped — they keep the physical-compatibility error.
+
+### Fixed
+
+- The 0.4.2-r2 TEST-DIRTY hardcodes (worker tag=100, forced queueing)
+  are superseded by the config-driven flow above; `PKG_RELEASE` is 1.
+
+### E2E harness (tests/e2e)
+
+- Fake `/proc/tc3162/xdsl_stats` now uses the real `tccicmd.ko` colon
+  format (`"1:2"` etc.); `/proc/modules` swaps with the line family
+  (mt7510ptm/mt7510sar). The harness pre-creates the 24 interfaces the
+  board's `ptmCreateVLAN` polls for, so materialization, the
+  handled-flag teardown gate and the vid-dedup re-add cycle all
+  exercise the real board logic.
+- New scenarios: ED (two-link daemon config end-to-end), EX (both
+  materialization paths + smux mode 1/3 semantics), EA (auto-mode
+  ADSL swap), E9b (7 invalid data-link configs). E2 flipped: link-adds
+  are REQUIRED at open, while the line is down.
+
 ## 0.4.2 — 2026-08-24
 
 ### Fixed
