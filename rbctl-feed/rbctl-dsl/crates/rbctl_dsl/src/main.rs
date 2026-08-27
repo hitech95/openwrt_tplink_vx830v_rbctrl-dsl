@@ -108,6 +108,20 @@ struct DaemonArgs {
     #[arg(long)]
     xfer_mode: Option<String>,
 
+    /// Data-link index 0–7 for the implicit default link
+    /// (transport VLAN = 2000 + index)
+    #[arg(long)]
+    link_index: Option<u8>,
+
+    /// Service VLAN (1–4094) tagged by the BOARD on the implicit
+    /// default link [default: untagged]
+    #[arg(long)]
+    link_vid: Option<u16>,
+
+    /// 802.1p priority (0–7) for --link-vid [default: 0]
+    #[arg(long)]
+    link_pbit: Option<u8>,
+
     /// Override ATM VPI (0–255) [default: from atm-bridge UCI or 8]
     #[arg(long)]
     vpi: Option<String>,
@@ -181,6 +195,9 @@ impl DaemonArgs {
             bitswap: self.bitswap,
             sra: self.sra,
             transport_vlan: self.transport_vlan,
+            link_index: self.link_index,
+            link_vid: self.link_vid,
+            link_pbit: self.link_pbit,
         }
     }
 }

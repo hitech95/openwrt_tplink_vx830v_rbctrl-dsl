@@ -51,6 +51,16 @@ impl XferMode {
         }
     }
 
+    /// Whether a link of this type can carry a line that TRAINED as
+    /// `trained` — used for auto-correction of queued links (F4).
+    /// Unresolvable combos (Auto) defer to the caller.
+    pub fn compatible_with_trained(self, trained: XferMode) -> bool {
+        match (self, trained) {
+            (Self::Auto, _) | (_, Self::Auto) => true,
+            (a, b) => a == b,
+        }
+    }
+
     /// TC layer implied by a trained modulation: VDSL2 → PTM, ADSL
     /// family → ATM. Used to resolve `Auto` (and the selftest) — the
     /// board does not derive the data-link type from the connection by
@@ -120,7 +130,7 @@ impl std::str::FromStr for XferMode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AtmConfig {
     pub vpi: u8,
     pub vci: u16,
@@ -158,7 +168,7 @@ pub struct DslConfig {
     pub annex: Annex,
     pub profiles: Vdsl2Profiles,
     pub xfer_mode: XferMode,
-    /// Present only when `xfer_mode == Atm`.
+    /// Present only when `xfer_mode == Atm` (legacy single-link ATM).
     pub atm: Option<AtmConfig>,
     /// Bitswap enable (opcode 1 byte 0x02, `X_TP_BitswapEnable`).
     pub bitswap: bool,
@@ -166,6 +176,42 @@ pub struct DslConfig {
     pub sra: bool,
     /// Transport VLAN base index (0–7). Actual VLAN id = base + 2000.
     pub transport_vlan_base: u8,
+    /// Data links from named `network.<name>=ptm|atm` sections.
+    /// Empty = one implicit default untagged PTM link at index 0
+    /// (resolved by [`DslConfig::data_links`]).
+    pub links: Vec<DataLink>,
+}
+
+/// One configured data link (UCI: `network.<name>=ptm` or `=atm`).
+///
+/// `index` is the stable data-link identity: transport VLAN =
+/// `2000 + index` (board PVC slot). It is EXPLICIT in config so that
+/// UCI section order changes can never re-point netifd interfaces
+/// (pppoe/ipoe hook `lan0.<transport>` by name) at the wrong link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataLink {
+    /// UCI section name (e.g. `internet`) — for diagnostics.
+    pub name: String,
+    /// Data-link index 0–7 → board transport VLAN `2000 + index`.
+    pub index: u8,
+    /// Whether `index` was explicit in config (validation: required on
+    /// every section when more than one link exists).
+    pub index_explicit: bool,
+    /// Link type: PTM (op15) or ATM (op5).
+    pub xfer: XferMode, // Ptm | Atm only
+    /// Service VLAN tagging applied by the BOARD (op15/op5 tag fields):
+    /// `None` = untagged (smux mode 1), `Some(vid, pbit)` = smux mode 3.
+    /// PTM only.
+    pub bearer_tag: Option<(u16, u8)>,
+    /// ATM PVC parameters (ATM only).
+    pub atm: Option<AtmConfig>,
+}
+
+impl DataLink {
+    /// Transport (host↔board) VLAN id for this link.
+    pub fn transport_vlan(&self) -> u16 {
+        crate::constants::VLAN_TRANSPORT_BASE_OFFSET + self.index as u16
+    }
 }
 
 // ── parsing helpers (host-testable, no UCI dependency) ───────────────────
@@ -303,6 +349,11 @@ pub struct CliOverrides {
     pub bitswap: Option<bool>,
     pub sra: Option<bool>,
     pub transport_vlan: Option<u8>,
+    /// Single-link overrides (apply to the implicit default link only;
+    /// an error if explicit data-link sections exist).
+    pub link_index: Option<u8>,
+    pub link_vid: Option<u16>,
+    pub link_pbit: Option<u8>,
 }
 
 // ── UCI loader (target-only, links libuci) ───────────────────────────────
@@ -432,6 +483,9 @@ impl DslConfig {
             })
             .min(crate::constants::VLAN_TRANSPORT_BASE_MAX);
 
+        // ── Data links: named network.<name>=ptm|atm sections ─────────
+        let links = parse_data_links(uci, ov)?;
+
         Ok(Self {
             modulation,
             annex,
@@ -441,8 +495,214 @@ impl DslConfig {
             bitswap,
             sra,
             transport_vlan_base,
+            links,
         })
     }
+
+    /// Effective data links: the configured sections, or the implicit
+    /// default when none are — one untagged link at index 0 whose type
+    /// follows the configured transport (PTM for VDSL/auto, ATM for the
+    /// legacy fixed-ATM config, carrying the @atm-bridge PVC params).
+    pub fn data_links(&self) -> Vec<DataLink> {
+        if self.links.is_empty() {
+            let (xfer, atm) = if self.xfer_mode == XferMode::Atm {
+                (XferMode::Atm, self.atm.clone())
+            } else {
+                (XferMode::Ptm, None)
+            };
+            vec![DataLink {
+                name: "default".into(),
+                index: 0,
+                index_explicit: true,
+                xfer,
+                bearer_tag: None,
+                atm,
+            }]
+        } else {
+            self.links.clone()
+        }
+    }
+}
+
+/// Parse + validate the data-link sections from UCI.
+///
+/// Schema (see plans/data-link-uci-plan.md F1):
+/// - `network.<name>=ptm`  → `index` (0–7, optional), `vid` (optional,
+///   service VLAN → board-side tag, absent = untagged), `pbit` (0–7),
+/// - `network.<name>=atm`  → `index`, `vpi`, `vci`, `encaps`, `payload`,
+/// - legacy anonymous `network.@atm-bridge[0]` still read for the
+///   single-link case (no explicit sections present).
+///
+/// Validation (board limits, session-4 RE): ≤ 8 links, indices unique
+/// 0–7, service vids unique (board vid-dedup), at most one untagged PTM
+/// link, and — the stable-identity rule — an explicit `index` on every
+/// section when more than one exists.
+fn parse_data_links(
+    uci: &mut rust_uci::Uci,
+    ov: &CliOverrides,
+) -> Result<Vec<DataLink>, ConfigError> {
+    let uci_get = |uci: &mut rust_uci::Uci, key: &str| -> String {
+        uci.get_opt(key).unwrap_or(None).unwrap_or_default()
+    };
+    let sections = uci.get_sections("network").unwrap_or_default();
+    let mut links: Vec<DataLink> = Vec::new();
+
+    for sec in &sections {
+        let sec_type = uci_get(uci, &format!("network.{sec}"));
+        let sec_type = sec_type.trim().to_ascii_lowercase();
+        let (xfer, is_ptm) = match sec_type.as_str() {
+            "ptm" => (XferMode::Ptm, true),
+            "atm" => (XferMode::Atm, false),
+            // IEEE-1588 confusion guard — common typo for ptm.
+            "ptp" => {
+                return Err(ConfigError(format!(
+                    "network.{sec}: section type 'ptp' is not valid \
+                     (did you mean 'ptm'? 'ptp' is IEEE-1588 time sync)"
+                )))
+            }
+            _ => continue,
+        };
+        let name = sec.clone();
+
+        let index: Option<u8> = uci_get(uci, &format!("network.{sec}.index"))
+            .trim().parse().ok();
+        if let Some(i) = index {
+            if i > crate::constants::VLAN_TRANSPORT_BASE_MAX {
+                return Err(ConfigError(format!(
+                    "network.{sec}: index {i} out of range (0-7; \
+                     transport VLAN is 2000+index)"
+                )));
+            }
+        }
+
+        let link = if is_ptm {
+            let vid: Option<u16> = uci_get(uci, &format!("network.{sec}.vid"))
+                .trim().parse().ok();
+            if let Some(v) = vid {
+                if !(1..=4094).contains(&v) {
+                    return Err(ConfigError(format!(
+                        "network.{sec}: vid {v} out of range (1-4094)"
+                    )));
+                }
+            }
+            let pbit: u8 = uci_get(uci, &format!("network.{sec}.pbit"))
+                .trim().parse().unwrap_or(0);
+            if pbit > 7 {
+                return Err(ConfigError(format!(
+                    "network.{sec}: pbit {pbit} out of range (0-7)"
+                )));
+            }
+            DataLink {
+                name,
+                index: index.unwrap_or(0),
+                index_explicit: index.is_some(),
+                xfer,
+                bearer_tag: vid.map(|v| (v, pbit)),
+                atm: None,
+            }
+        } else {
+            let vpi_s = uci_get(uci, &format!("network.{sec}.vpi"));
+            let vci_s = uci_get(uci, &format!("network.{sec}.vci"));
+            let encap = uci_get(uci, &format!("network.{sec}.encaps"));
+            let payload = uci_get(uci, &format!("network.{sec}.payload"));
+            let encap = if encap.is_empty() { "llc".into() } else { encap };
+            let payload = if payload.is_empty() { "bridged".into() } else { payload };
+            let vpi: u8 = vpi_s.trim().parse().unwrap_or(constants::ATM_DEFAULT_VPI);
+            let vci: u16 = vci_s.trim().parse().unwrap_or(constants::ATM_DEFAULT_VCI);
+            DataLink {
+                name,
+                index: index.unwrap_or(0),
+                index_explicit: index.is_some(),
+                xfer,
+                bearer_tag: None,
+                atm: Some(AtmConfig {
+                    vpi,
+                    vci,
+                    encap: parse_encaps(&encap)?,
+                    link_type: parse_payload(&payload)?,
+                    qos: AtmQos::Ubr,
+                    pcr: 0,
+                }),
+            }
+        };
+        links.push(link);
+    }
+
+    // CLI single-link overrides apply only when no UCI sections exist.
+    if links.is_empty() {
+        if ov.link_index.is_some() || ov.link_vid.is_some() || ov.link_pbit.is_some() {
+            let vid = ov.link_vid;
+            return Ok(vec![DataLink {
+                name: "cli".into(),
+                index: ov.link_index.unwrap_or(0),
+                index_explicit: true,
+                xfer: XferMode::Ptm,
+                bearer_tag: vid.map(|v| (v, ov.link_pbit.unwrap_or(0))),
+                atm: None,
+            }]);
+        }
+        return Ok(Vec::new()); // implicit default resolved by data_links()
+    }
+
+    // ── validation ──
+    if links.len() > 8 {
+        return Err(ConfigError(format!(
+            "{} data-link sections (max 8 — board PVC limit)",
+            links.len()
+        )));
+    }
+    // Stable identity: >1 link requires an explicit index on every one
+    // (collected structurally during the section loop above).
+    if links.len() > 1 {
+        for link in &links {
+            if !link.index_explicit {
+                return Err(ConfigError(format!(
+                    "network.{}: explicit 'index' required when multiple \
+                     data-link sections exist (transport VLAN = 2000+index, \
+                     stable across UCI reordering)",
+                    link.name
+                )));
+            }
+        }
+    }
+    // unique indices
+    for (i, a) in links.iter().enumerate() {
+        for b in links.iter().skip(i + 1) {
+            if a.index == b.index {
+                return Err(ConfigError(format!(
+                    "network.{}: duplicate index {} (also network.{})",
+                    b.name, b.index, a.name
+                )));
+            }
+        }
+    }
+    // unique service vids + at most one untagged PTM link (board rules:
+    // vdsl_linkAdd dedups on the service vid; untagged = vid -1 = one slot)
+    let mut untagged = 0;
+    for (i, a) in links.iter().enumerate() {
+        if a.xfer == XferMode::Ptm && a.bearer_tag.is_none() {
+            untagged += 1;
+        }
+        for b in links.iter().skip(i + 1) {
+            let va = a.bearer_tag.map(|(v, _)| v);
+            let vb = b.bearer_tag.map(|(v, _)| v);
+            if va == vb {
+                return Err(ConfigError(format!(
+                    "network.{}: duplicate service vid {} (also network.{}) — \
+                     the board dedups links on the service vid",
+                    b.name,
+                    va.map(|v| v.to_string()).unwrap_or_else(|| "untagged".into()),
+                    a.name
+                )));
+            }
+        }
+    }
+    if untagged > 1 {
+        return Err(ConfigError(
+            "at most one untagged ptm data link allowed".into(),
+        ));
+    }
+    Ok(links)
 }
 
 impl Default for DslConfig {
@@ -457,6 +717,7 @@ impl Default for DslConfig {
             bitswap: true,
             sra: true,
             transport_vlan_base: 0,
+            links: Vec::new(),
         }
     }
 }
@@ -546,6 +807,30 @@ mod tests {
         // Multimode resolves at train time — both accepted statically.
         assert!(Ptm.compatible_with(Modulation::Multimode));
         assert!(Atm.compatible_with(Modulation::Multimode));
+    }
+
+    #[test]
+    fn data_link_transport_vlan() {
+        let l = DataLink {
+            name: "internet".into(), index: 3, index_explicit: true,
+            xfer: XferMode::Ptm, bearer_tag: Some((100, 0)), atm: None,
+        };
+        assert_eq!(l.transport_vlan(), 2003);
+        assert_eq!(
+            DataLink { index: 0, ..l }.transport_vlan(),
+            crate::constants::VLAN_TRANSPORT_BASE_OFFSET
+        );
+    }
+
+    #[test]
+    fn default_data_links_is_untagged_ptm_index0() {
+        let c = DslConfig::default();
+        let links = c.data_links();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].index, 0);
+        assert_eq!(links[0].xfer, XferMode::Ptm);
+        assert_eq!(links[0].bearer_tag, None);
+        assert_eq!(links[0].transport_vlan(), 2000);
     }
 
     #[test]
