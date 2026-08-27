@@ -192,6 +192,10 @@ pub(crate) struct Daemon {
     startup_provisioning_sent: bool,
     /// Last-applied data-link set (reload diffing).
     links_snapshot: Vec<crate::config::DataLink>,
+    /// F4 auto-correction bookkeeping: transport vlan → the type the
+    /// link was LAST swapped to (drives re-swaps on family re-trains;
+    /// absent = still the configured/queued type).
+    links_auto_corrected: std::collections::BTreeMap<u16, XferMode>,
     /// Throttle for deferred op1 retries (board-reachable transitions).
     last_apply: Option<Instant>,
     /// One TC-layer hotplug emission per Up session.
@@ -293,6 +297,7 @@ impl Daemon {
             vlans_owned: Default::default(),
             startup_provisioning_sent: false,
             links_snapshot,
+            links_auto_corrected: Default::default(),
             last_apply: None,
             tc_emitted: false,
             nosignal_since: None,
@@ -508,6 +513,8 @@ impl Daemon {
                 self.config_applied = false;
                 self.links_provisioned.clear();
                 self.vlans_owned.clear();
+                // Keep links_auto_corrected: the board (if it comes back)
+                // still holds the swapped link type, not the config one.
             }
             WorkerEvent::LineState { status, data_path, modulation } => {
                 let event = link_status_to_event(status);
@@ -659,6 +666,64 @@ impl Daemon {
             self.tc_emitted = true;
         }
 
+        // F4 — auto-mode type correction. The implicit default link of an
+        // `xfer auto` config is queued at open as optimistic PTM; if the
+        // line trains ADSL, swap it to ATM via the post-up path (warned,
+        // once per trained type). NOTE: LinkProvisioned fires on the
+        // hollow queue-time ack, so links_provisioned CANNOT gate this —
+        // a dedicated corrected-type map does (and allows a re-swap when
+        // a mixed-mode line re-trains as the other family). Explicitly
+        // typed links (sections, forced xfer) are never silently
+        // retyped: they keep the physical-compatibility error.
+        if let Some(trained) = trained {
+            let optimistic = !self.monitor
+                && self.cfg.xfer_mode == XferMode::Auto
+                && self.cfg.links.is_empty();
+            for link in self.cfg.data_links() {
+                let vlan = link.transport_vlan();
+                // Current board-side type: the corrected one if a swap
+                // already happened, else the configured/queued one.
+                let current = self
+                    .links_auto_corrected
+                    .get(&vlan)
+                    .copied()
+                    .unwrap_or(link.xfer);
+                if current.compatible_with_trained(trained) {
+                    continue;
+                }
+                if optimistic {
+                    log::warn!(
+                        "auto correction: the default link is {:?} but the line \
+                         trained {:?} — swapping (post-up path)",
+                        current, trained
+                    );
+                    let _ = self.cmd_tx.send(WorkerCmd::RemoveLink {
+                        xfer: current,
+                        vlan,
+                    });
+                    let corrected = crate::config::DataLink {
+                        xfer: trained,
+                        atm: if trained == XferMode::Atm {
+                            // worker falls back to atm_params defaults
+                            // (vpi/vci from constants) when None
+                            None
+                        } else {
+                            link.atm.clone()
+                        },
+                        ..link.clone()
+                    };
+                    self.provision_link_post_up(&corrected, "auto type correction");
+                    self.links_auto_corrected.insert(vlan, trained);
+                } else {
+                    log::error!(
+                        "data link '{}' is {:?} but the line trained {:?} — \
+                         not provisioning (fix the link type / line mode in config)",
+                        link.name, current, trained
+                    );
+                }
+            }
+        }
+
         // Board came back reachable with the line still up and links
         // unprovisioned (unreachable reset them): re-provision post-up.
         if !self.monitor && !self.startup_provisioning_sent {
@@ -719,6 +784,10 @@ impl Daemon {
                 }
             }
             self.links_snapshot = self.cfg.data_links();
+            // The re-queue below re-establishes the CONFIG types — old
+            // auto-corrections are stale (on_line_up re-corrects if the
+            // trained line contradicts the new config).
+            self.links_auto_corrected.clear();
             self.config_applied = false;
             self.tc_emitted = false;
             // A changed config differs from the board cache by
