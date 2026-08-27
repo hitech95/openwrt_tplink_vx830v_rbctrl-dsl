@@ -11,8 +11,10 @@ host build-path string leaked in `diagTool`):
 
 `remote_board`, `libcmm.so`, and the host management clients are all **AArch64**
 ELFs (loaded into Ghidra as `AARCH64:LE:64:v8A`). The **remote board firmware**
-(version `7.3.261.1_v016`) has been **extracted** from the firmware container —
-see [firmware_encryption.md](firmware_encryption.md). It uses a custom `2RDH`
+(version `7.3.261.1_v016`) ships only inside the vendor's signed multi-image
+container — see [firmware_encryption.md](firmware_encryption.md) for the
+container format and the unpack (verify + decrypt + split) operation the
+firmware-update path performs on it. It uses a custom `2RDH`
 container format and is a **MIPS** image.
 
 > **Addresses live in [map.md](map.md).** This documentation uses **mnemonic
@@ -136,7 +138,7 @@ loop (`msg_serveForever`) with its own ack/retransmit.
 | [e2e.md](e2e.md) | **E2E test harness** — the real MIPS board firmware vs the real daemon under qemu-user, on a host: architecture, scenarios E1–E8, running & CI guide |
 | [safety-audit.md](safety-audit.md) | **Type/memory-safety audit (pre-P4)** — every `unsafe` site, fixes applied, SDK verification gate |
 | [map.md](map.md) | **Symbol map**: every function/global/type, original → renamed, with addresses |
-| [firmware_encryption.md](firmware_encryption.md) | **Firmware container format & encryption** — AES-128-CBC with key embedded in RSA-2048 PSS signature, decrypted in `rsl_sys_updateFirmware` |
+| [firmware_encryption.md](firmware_encryption.md) | **Firmware update container** — vendor package format; the unpack (verify + decrypt + split) the update path performs (RSA-2048 PSS, AES-128-CBC) |
 | [server.md](server.md) | **Board-side `remote_board`** (EcoNet EN7516 MIPS) — 0x88B5 server: dispatch table, handler analysis, client vs server opcode comparison (13 vs 12 entries) |
 | [led_control.md](led_control.md) | **LED control & DSL polling** — `cos` daemon, `tp_gpio.ko`, blink patterns, 10s polling interval, handler table |
 | [hunt.md](hunt.md) | **Search kit**: grep patterns & commands for finding missing binaries (rootfs, board firmware, EcoNet SDK) |
@@ -152,7 +154,7 @@ loop (`msg_serveForever`) with its own ack/retransmit.
 
 ## How to reproduce
 
-Ghidra project *RemoteBoard Modulus* in the repository root. Programs:
-`/remote_board` (fully renamed, 0 `FUN_*` remaining) and `/libcmm.so`
-(analyzed, 5838 functions). All code/data addresses are image-relative; see
-[map.md](map.md).
+Analysis was performed in a private Ghidra project (not distributed with
+this repository). Programs analyzed: `/remote_board` (fully renamed, 0
+`FUN_*` remaining) and `/libcmm.so` (analyzed, 5838 functions). All
+code/data addresses are image-relative; see [map.md](map.md).

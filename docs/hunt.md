@@ -89,8 +89,9 @@ strings -a -n 4 <bin> | grep -iE 'remoteflash|remote_upgrade|firmware|flash|upgr
 ```
 
 Specifically watch for:
-- `/var/tmp/remoteflash.bin` — the staged upgrade image (the practical way to
-  obtain a board firmware copy; see [reverse-engineering-plan.md](../plans/reverse-engineering-plan.md) §1)
+- `/var/tmp/remoteflash.bin` — the staged upgrade image the OEM updater
+  writes before the opcode-8 transfer (unpacking it from the vendor
+  container: [firmware_encryption.md](firmware_encryption.md))
 - `remote_upgrade` — the completion marker `firmware_upgrade` writes
 
 If any binary *generates* or *fetches* that staging file, you've found the image

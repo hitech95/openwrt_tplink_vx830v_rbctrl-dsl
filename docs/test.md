@@ -9,7 +9,7 @@ card).
 ### Build the binary
 
 ```bash
-cd ~/Documenti/Progetti/openwrt
+cd $OPENWRT_SDK
 make package/rbctl-dsl/compile V=s
 ```
 
@@ -170,8 +170,8 @@ Copy them back to the host:
 
 ```bash
 # On the host:
-mkdir -p ~/projects/openwrt_tplink_vx830v_rbctrl-dsl/captures/
-scp 'root@192.168.1.1:/tmp/rbctl-capture/*' ~/projects/openwrt_tplink_vx830v_rbctrl-dsl/captures/
+mkdir -p ./captures/
+scp 'root@192.168.1.1:/tmp/rbctl-capture/*' ./captures/
 ```
 
 ### Files to look for
@@ -179,7 +179,7 @@ scp 'root@192.168.1.1:/tmp/rbctl-capture/*' ~/projects/openwrt_tplink_vx830v_rbc
 | File | Content | RE value |
 |------|---------|----------|
 | `tx-02-*.bin` | Opcode 2 (get_line_obj) request frame | Verify payload_type, seq, checksum |
-| `rx-02-*.bin` | Opcode 2 **response** from real board | **Critical:** compare against `docs/unpack.md` field layout |
+| `rx-02-*.bin` | Opcode 2 **response** from real board | **Critical:** compare against `docs/xdsl/responses.md` field layout |
 | `tx-05-*.bin` | Opcode 5 (atm_link_add) request frame | Verify ATM link descriptor encoding |
 | `rx-05-*.bin` | Opcode 5 **response** | **Critical:** VLAN id at payload offset `0x12` |
 | `tx-01-*.bin` | Opcode 1 (line_config_up) request | Verify modulation/annex/profile encoding |
@@ -191,7 +191,7 @@ scp 'root@192.168.1.1:/tmp/rbctl-capture/*' ~/projects/openwrt_tplink_vx830v_rbc
 The `rx-*.bin` files contain real board responses. These are **gold** for
 validating the RE documentation:
 
-1. **Compare field offsets** in `rx-02-*.bin` against `docs/unpack.rs` /
+1. **Compare field offsets** in `rx-02-*.bin` against `docs/xdsl/responses.md` /
    `examples/unpack.py`. If the board's response doesn't match, the RE has
    errors and the parser needs updating.
 
@@ -286,7 +286,7 @@ start of the VLAN lifecycle test, so this should be rare.
 
 ```bash
 # Build
-cd ~/Documenti/Progetti/openwrt && make package/rbctl-dsl/compile V=s
+cd $OPENWRT_SDK && make package/rbctl-dsl/compile V=s
 
 # Deploy
 scp build_dir/target-aarch64_cortex-a53_musl/rbctl-dsl-0.1.0/ipkg-aarch64_cortex-a53/rbctl-dsl/usr/bin/rbctl-dsl root@TARGET_IP:/tmp/rbctl-dsl
@@ -296,5 +296,5 @@ chmod +x /tmp/rbctl-dsl
 /tmp/rbctl-dsl --selftest --config-iface lan0.500
 
 # Retrieve captures
-scp 'root@TARGET_IP:/tmp/rbctl-capture/*' ~/projects/openwrt_tplink_vx830v_rbctrl-dsl/captures/
+scp 'root@TARGET_IP:/tmp/rbctl-capture/*' ./captures/
 ```

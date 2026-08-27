@@ -57,11 +57,11 @@ The pieces:
 
 | Piece | File | Role |
 |---|---|---|
-| Entry point | [`run.sh`](run.sh) | prerequisite check + namespace entry |
-| Environment builder | [`inner.sh`](inner.sh) | mounts, veth/VLANs, sysroots, stubs — runs *inside* the ns |
-| Scenario driver | [`e2e.py`](e2e.py) | spawns/stops peers, injects line state, runs assertions |
-| Wire recorder | [`sniffer.py`](sniffer.py) | AF_PACKET tap per veth end → text wire log |
-| Protocol library | [`proto.py`](proto.py) | frame build/parse + CRC-16/ARC + raw replay client |
+| Entry point | [`run.sh`](../rbctl-feed/rbctl-dsl/tests/e2e/run.sh) | prerequisite check + namespace entry |
+| Environment builder | [`inner.sh`](../rbctl-feed/rbctl-dsl/tests/e2e/inner.sh) | mounts, veth/VLANs, sysroots, stubs — runs *inside* the ns |
+| Scenario driver | [`e2e.py`](../rbctl-feed/rbctl-dsl/tests/e2e/e2e.py) | spawns/stops peers, injects line state, runs assertions |
+| Wire recorder | [`sniffer.py`](../rbctl-feed/rbctl-dsl/tests/e2e/sniffer.py) | AF_PACKET tap per veth end → text wire log |
+| Protocol library | [`proto.py`](../rbctl-feed/rbctl-dsl/tests/e2e/proto.py) | frame build/parse + CRC-16/ARC + raw replay client |
 | Fake driver files | (runtime) | tmpfs `/proc/tc3162/*` served by `inner.sh`/`e2e.py` |
 
 ### 1.1 The wire: why stacked VLANs
@@ -245,13 +245,13 @@ sequenceDiagram
 
 ## 4. File-by-file reference
 
-### [`run.sh`](run.sh) — entry point
+### [`run.sh`](../rbctl-feed/rbctl-dsl/tests/e2e/run.sh) — entry point
 Checks prerequisites (`qemu-mips`, `qemu-aarch64`, `strace`,
 `unshare`), then `exec`s `unshare -Urnm --fork --kill-child bash
 inner.sh`. `--kill-child` guarantees the qemu processes die with the
 harness even on assertion crashes.
 
-### [`inner.sh`](inner.sh) — environment builder (runs inside the ns)
+### [`inner.sh`](../rbctl-feed/rbctl-dsl/tests/e2e/inner.sh) — environment builder (runs inside the ns)
 1. `mount -t sysfs` — **required**: without a private sysfs mount,
    `/sys/class/net` still shows the host's interfaces (sysfs is not
    netns-aware by default) and the daemon's carrier/MAC probing
@@ -265,7 +265,7 @@ harness even on assertion crashes.
 6. The aarch64 sysroot (§1.4).
 7. `exec python3 e2e.py`.
 
-### [`e2e.py`](e2e.py) — scenario driver (also the assertion suite)
+### [`e2e.py`](../rbctl-feed/rbctl-dsl/tests/e2e/e2e.py) — scenario driver (also the assertion suite)
 - **Peer control** — `start_board` (qemu-mips under strace, own process
   group so SIGTERM reaches the emulator, not just strace),
   `start_daemon` (qemu-aarch64, SIGTERM to exit), `kill_board` (group
@@ -287,7 +287,7 @@ harness even on assertion crashes.
   host MAC; the two session-2 payload hex constants live here as
   permanent fixtures.
 
-### [`proto.py`](proto.py) — protocol library
+### [`proto.py`](../rbctl-feed/rbctl-dsl/tests/e2e/proto.py) — protocol library
 - `crc16_arc` — CRC-16/ARC (poly 0xA001, init 0, reflected); verified
   against the crate's `0x1ea0` test vector.
 - `build_frame` — 24-byte header + payload. **Coverage**: the CRC is
@@ -300,7 +300,7 @@ harness even on assertion crashes.
 - `RawClient` — request/response with seq matching and retransmit, for
   the E8 fixtures.
 
-### [`sniffer.py`](sniffer.py) — wire tap
+### [`sniffer.py`](../rbctl-feed/rbctl-dsl/tests/e2e/sniffer.py) — wire tap
 Plain AF_PACKET raw socket bound per interface (`0x88B5`), two
 instances (one per veth end) writing tagged lines to `wire.log`. Both
 ends are tapped because each raw socket sees only its own side's

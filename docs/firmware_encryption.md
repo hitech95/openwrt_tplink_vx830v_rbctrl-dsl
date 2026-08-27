@@ -1,11 +1,36 @@
-# Firmware Container Format & Encryption
+# Firmware Update Container — Format & Unpack Operation
 
-The TP-Link multi-image firmware container (`*.bin`) wraps a host (MT7986)
-kernel image and a remote-board (EcoNet EN75xx) firmware image in a signed,
-encrypted package. This page documents the full format, reverse-engineered
-from `libcmm.so` (`rsl_sys_updateFirmware`, `checkFwSignNoTag` /
-`FUN_00169ee8`) and `libcutil.so`
+The remote-board firmware image that the opcode-8 update path flashes (see
+[commands/firmware.md](commands/firmware.md)) is **not distributed as a
+standalone file**: it ships only inside the TP-Link multi-image firmware
+container (`*.bin`), which wraps a host (MT7986) kernel image and the
+remote-board (EcoNet EN75xx) image in a signed, encrypted package.
+
+On the OEM device, the host stack itself unpacks this container at upgrade
+time: `rsl_sys_updateFirmware` verifies the vendor signature, decrypts the
+payload, splits the two images, and streams the remote-board part to the
+board over `0x88B5`. A replacement daemon that wants to keep the board
+firmware updatable must perform the same unpack operation on
+vendor-supplied update packages — there is no other channel through which
+the board image is available.
+
+This page documents the container format and that unpack operation,
+reverse-engineered from `libcmm.so` (`rsl_sys_updateFirmware`,
+`checkFwSignNoTag` / `FUN_00169ee8`) and `libcutil.so`
 (`cen_rsaVerifyPSSSignByBase64EncodePublicKeyBlob`, `FUN_00117a70`).
+
+> **Scope & responsibility.** This project only documents the format and
+> provides extraction tooling; it does not distribute firmware or any
+> cryptographic key material. The RSA keys involved are *public
+> verification keys* embedded by the vendor in every unit's `libcmm.so` —
+> they are extracted at runtime from the user's own device (see
+> [`extract_rsa_keys.py`](../examples/extract_rsa_keys.py)). Nothing here
+> can create or modify firmware: only an image signed by the vendor's
+> private RSA key (which is not public) passes signature verification.
+> Obtaining a firmware package for your device is your responsibility and
+> must be done lawfully; `rbctl-dsl` itself performs no container
+> unpacking — the user extracts the board image and feeds it to the
+> firmware-update path.
 
 ## Container layout
 
@@ -168,7 +193,7 @@ The base64 encoding of the 8-byte BLOBHEADER always produces the prefix
 
 ### Extraction
 
-Use [`examples/extract_rsa_keys.py`](../../examples/extract_rsa_keys.py) to
+Use [`examples/extract_rsa_keys.py`](../examples/extract_rsa_keys.py) to
 extract both keys from a `libcmm.so` binary:
 
 ```bash
@@ -274,31 +299,25 @@ Offset Size  Field               Value (this firmware)
 
 #### LZMA kernel
 
-The kernel at offset `0x100` is **LZMA-compressed** (standard alone
-format, props `0x5D`, 8 MB dictionary). Decompression yields 5,273,216
-bytes of valid **MIPS big-endian** code:
-
-| Evidence | Detail |
-|----------|--------|
-| Reset vector | branch to a high kernel address (MIPS `j` instruction) |
-| Function prologues | standard MIPS epilogue pattern (`addiu/lui/sw` on `$sp`/`$s0`) |
-| Linux version | `3.18.21` (gcc 4.6.3, Buildroot 2015.08.1) |
-| Subsystems found | JFFS2, ATM (`atm_dev_register`), 802.1Q VLAN, SPI NAND, NTFS |
-| Load address | `0x80002000` (MIPS KSEG0 unmapped cached segment) |
-
-This is the **EcoNet EN75xx Linux kernel** — the autonomous DSL SoC's
-operating system. It can be loaded into Ghidra as `MIPS:BE:32:default`
-for further analysis.
+The kernel at offset `0x100` is **LZMA-compressed** (standard alone format,
+props `0x5D`, 8 MB dictionary); decompressed it is 5,273,216 bytes of
+**MIPS big-endian** code — the EcoNet EN75xx Linux kernel for the
+autonomous DSL SoC (version string `3.18.21`, gcc 4.6.3, Buildroot
+2015.08.1). The load address is `0x80002000` (MIPS KSEG0).
 
 #### Rootfs
 
 The squashfs rootfs follows the LZMA kernel (with `0xFF` padding to
 alignment). Size: 4,399,484 bytes (4.2 MB).
 
-### EcoNet platform context
+### EcoNet platform context (public sources)
 
-The OpenWrt econet target (merged September 2025) documents the broader
-EN75xx platform:
+The broader EN75xx platform is documented by the OpenWrt econet target
+(merged September 2025), itself derived from vendor GPL source releases —
+the bootloader sources are part of TP-Link's GPL release. This information
+is public and reproduced here for context: the dual-image layout is how
+the board boots a newly flashed image after an opcode-8 update, and
+bootloader xmodem flashing is the recovery path if an update fails.
 
 - **Bootloader**: accessible via UART at 115200 baud, supports xmodem
   flashing (`xmdm 0x80020000 <len>` → `flash 0x80000 0x80020000 <len>`)
@@ -313,7 +332,7 @@ EN75xx platform:
 
 ## fwextract `--decrypt` flag
 
-The Rust [`fwextract`](../../fwextract/) tool supports full decryption when
+The Rust [`fwextract`](../fwextract/) tool supports full decryption when
 built with `--features decrypt`:
 
 ```bash
@@ -335,7 +354,7 @@ The `--decrypt` feature adds:
 
 ## Reference implementation
 
-See [`examples/decrypt_fw.py`](../../examples/decrypt_fw.py) for a Python
+See [`examples/decrypt_fw.py`](../examples/decrypt_fw.py) for a Python
 script that:
 1. Reads the RSA public key from a file (produced by `extract_rsa_keys.py`)
 2. Parses the tag header and chunk metadata

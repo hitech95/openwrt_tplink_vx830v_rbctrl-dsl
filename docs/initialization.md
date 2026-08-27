@@ -10,7 +10,7 @@ ELF `_start` is at `entry`. Per the glibc ABI, it invokes:
 __libc_start_main(main, argc, argv, _init, _fini, 0);
 ```
 
-where `main` is at.
+where `main` is the program entry (see [map.md](map.md)).
 
 ## main()
 

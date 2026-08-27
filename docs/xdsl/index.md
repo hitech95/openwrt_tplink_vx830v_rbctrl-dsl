@@ -63,8 +63,9 @@ flowchart LR
 | 16 | `0x2978` | `oal_ptm_delVlanTag` | 3 B | no | `ptm_link_del` | **PTM/VDSL link del** (`ifconfig down`) |
 | 20 | `0x297C` | *(no sender — **DEAD**)* | — | — | `board_identity_check` | board identity / MAC check (dead code) |
 
-> The dispatch table at has **13 handlers** (read until the
-> zero-`nCmd` terminator, not a fixed length). **Both ADSL (5/6) and VDSL (15/16)
+> The host dispatch table (see [../map.md](../map.md)) has **13 handlers**
+> (read until the zero-`nCmd` terminator, not a fixed length). **Both ADSL (5/6)
+> and VDSL (15/16)
 > are fully supported** — each link opcode configures the board *and* mirrors the
 > VLAN interface locally. See [data_plane.md](data_plane.md) for where
 > decapsulation actually happens.

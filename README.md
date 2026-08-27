@@ -94,7 +94,7 @@ cd openwrt
 make menuconfig    # select Target (e.g. MediaTek Filogic) + rust/host
 
 # Add the rbctl feed
-echo 'src-link rbctl /path/to/openwrt_tplink_vx830v_rbctrl-dsl/rbctl-feed' >> feeds.conf
+echo 'src-link rbctl /path/to/this-repo/rbctl-feed' >> feeds.conf
 ./scripts/feeds update rbctl && ./scripts/feeds install rbctl-dsl
 
 # Build
@@ -149,6 +149,7 @@ with a proprietary ethertype (`0x88B5`). Full reverse-engineering documentation:
 - [docs/libcmm.md](docs/libcmm.md) — OAL layer (sole-bridge proof, TX/RX serializers)
 - [docs/network.md](docs/network.md) — socket setup, VLAN handling, QinQ data plane
 - [docs/led_control.md](docs/led_control.md) — LED control & DSL polling architecture (cos daemon, tp_gpio.ko)
+- [docs/firmware_encryption.md](docs/firmware_encryption.md) — firmware-update container format & unpack operation (verify + decrypt + split)
 - [docs/commands/dispatch.md](docs/commands/dispatch.md) — opcode dispatch table (13 handlers)
 - [docs/xdsl/](docs/xdsl/) — TX payload formats, RX response layouts, ATM vs PTM, VLAN selection rule
 - [docs/map.md](docs/map.md) — complete symbol map (remote_board + libcmm.so)
@@ -158,23 +159,39 @@ with a proprietary ethertype (`0x88B5`). Full reverse-engineering documentation:
 ## Legal notice
 
 The reverse-engineering documentation in `docs/` and the reference scripts in
-`examples/` were produced solely to achieve **interoperability** between this
+`examples/` were produced to achieve **interoperability** between this
 daemon and the EcoNet xDSL board already lawfully owned and operated by the
-author. This activity is expressly permitted for interoperability purposes
-under, among others:
+author. This includes the firmware-update path: the remote-board firmware
+image is distributed only inside the vendor's signed multi-image container,
+so a functional replacement must unpack (verify + decrypt + split) that
+container exactly as the OEM host stack does on-device — the documentation
+and tooling in [docs/firmware_encryption.md](docs/firmware_encryption.md)
+exist solely for that purpose. This activity is expressly permitted for
+interoperability purposes under, among others:
 
 - **EU**: Directive 2009/24/EC, Article 6 (decompilation for interoperability).
-- **USA**: 17 U.S.C. §1201(f) (reverse engineering for interoperability).
+- **USA**: 17 U.S.C. §1201(f) (reverse engineering for interoperability),
+  including the development and dissemination of technological means solely
+  to enable interoperability under §1201(f)(2)–(3).
 - **UK**: Copyright, Designs and Patents Act 1988, s. 296B.
 
 The `rbctl-dsl` Rust implementation is an **independent reimplementation**
 produced by reverse-engineering the proprietary `remote_board` binary and
 `libcmm.so` library for interoperability purposes, as permitted by the
-statutes above. No source code, decompiled listing, or creative expression
-from those components is reproduced in the source tree; symbol names,
-addresses, and call-tree references that appear in the documentation are
-factual findings about the wire protocol and the binary's structure, retained
-as engineering breadcrumbs rather than derivative works.
+statutes above. It contains no proprietary signing or decryption logic of
+its own: firmware extraction is performed by the user, from the user's own
+lawfully obtained vendor package, using the documented container format —
+this project only documents how. No cryptographic key material is included
+in this repository: the RSA keys referenced in the documentation are
+*public verification keys* embedded by the vendor in every unit's
+`libcmm.so` and are extracted at runtime from the user's own device, and
+only the vendor's private key (not public) can produce a firmware image
+that passes verification. Symbol names, addresses, call-tree references,
+and short reconstructed pseudocode snippets that appear in the
+documentation are factual findings about the wire protocol and the
+binary's structure, retained as engineering breadcrumbs rather than
+derivative works; no wholesale decompiled listing or creative expression
+from those components is reproduced.
 
 Product and company names mentioned in this project (e.g. TP-Link, EcoNet,
 Trendchip, OpenWrt) are trademarks of their respective owners; use here does

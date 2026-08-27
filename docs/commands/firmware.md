@@ -2,8 +2,8 @@
 
 Detailed wire-level documentation of the firmware upgrade protocol spoken over
 EtherType `0x88B5`. This is the deep-dive companion to
-[firmware.md](firmware.md), which covers the cmm command
-wrapper (`firmware_upgrade` / msg `0x2970`).
+[dispatch.md](dispatch.md) § Firmware upgrade command, which covers the cmm
+command wrapper (`firmware_upgrade` / msg `0x2970`).
 
 ## Overview
 
