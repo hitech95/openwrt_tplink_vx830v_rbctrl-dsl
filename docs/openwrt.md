@@ -845,3 +845,154 @@ target/linux/<your-subtarget>/base-files/
 
 target/linux/<your-subtarget>/target.mk        # DEFAULT_PACKAGES += ...
 ```
+
+---
+
+## 11. This port — rbctl-dsl UCI reference (implementation-specific)
+
+> Everything above (§1–§10) documents the **generic, chipset-agnostic
+> OpenWrt contract** and must stay valid for any DSL daemon. This section
+> is the **ad-hoc extension implemented by `rbctl-dsl`** (the external-board
+> port described in §5.4). It extends — never replaces — the generic
+> schema of §2.4.
+
+### 11.1 `dsl` section extensions
+
+Beyond the stock options of §2.4, `rbctl-dsl` reads:
+
+| UCI option        | Type      | Default | Meaning |
+|-------------------|-----------|---------|---------|
+| `line_mode`       | enum      | `vdsl`  | `vdsl`\|`vdsl2`, `adsl`\|`adsl2`\|`adsl2+`\|`adsl2plus`, `auto`\|`multi`\|`multimode` (case-insensitive). Drives smart defaults for the other options. |
+| `xfer_mode`       | enum      | *(from line_mode)* | `ptm`, `atm`, or `auto` — `auto` decides from the trained modulation. |
+| `bitswap`         | 0/1       | 1       | opcode 1 byte `0x02` (`X_TP_BitswapEnable`). |
+| `sra`             | 0/1       | 1 (0 in auto mode) | opcode 1 byte `0x03` (`X_TP_SRAEnable`). |
+| `transport_vlan`  | 0–7       | 0       | Base index for the **implicit** link only — see §11.2. Actual VLAN = base + 2000. |
+| `config_iface`    | iface     | `lan0.500` | Management VLAN toward the board (declared as a UCI device section so netifd creates it at boot; the init script belt-and-suspenders it). |
+| `firmware`        | —         | —       | **Not used** (§5.4: the board runs its own firmware). |
+| `ds_snr_offset`   | —         | —       | **Ignored** — SNR is reported, not settable. |
+
+Smart-default cascade from `line_mode`: `vdsl` → xfer `ptm`, tone `av`,
+annex `b`; `adsl` → xfer `atm`, tone *(empty)*, annex `a`; `auto` → xfer
+`auto`, tone `av`, annex `auto`, sra off (board boot defaults).
+
+### 11.2 Data-link sections (multi-link data plane)
+
+One **named section per DSL data link**, addressable like interfaces
+(`network.internet`, `network.voice`). The section type selects the link
+family:
+
+```
+# PTM (VDSL2) link
+config ptm 'internet'
+    option index '0'      # data-link index → transport VLAN 2000+index
+    option vid   '100'    # service VLAN the BOARD tags toward the DSL side
+    option pbit  '0'      # 802.1p priority (0–7, default 0)
+
+# ATM (ADSL) link
+config atm 'atm'
+    option index   '1'
+    option vpi     '8'
+    option vci     '35'
+    option encaps  'llc'      # llc | vcmux
+    option payload 'bridged'  # bridged (EoA) | routed (IPoA) | pppoa (PPPoA)
+```
+
+> Section type `ptp` is rejected with a pointed error (IEEE-1588 typo
+> guard).
+
+#### Options — `ptm` sections
+
+| Option  | Type    | Default | Meaning |
+|---------|---------|---------|---------|
+| `index` | 0–7     | 0       | Data-link identity. Transport VLAN = **2000 + index** (host interface `lan0.<2000+index>`). |
+| `vid`   | 1–4094  | *(absent)* | **Service VLAN applied by the board** to the bearer toward the DSLAM (op15 tag fields). Absent = untagged bearer. |
+| `pbit`  | 0–7     | 0       | 802.1p priority of the service tag (with `vid`). |
+
+> `vid` is **not** the transport VLAN and **not** a host-side interface —
+> it selects the board's smux service-VLAN mode: absent → smux **mode 1**
+> (strip any 802.1Q tag on TX), `vid=N` → smux **mode 3** (insert/rewrite
+> the TCI to N on TX, restore on RX). Mode 2 (transparent Q-in-Q) is not
+> reachable via op15. If the ISP expects traffic on a service VLAN, `vid`
+> **must** be set — an untagged bearer silently strips a host-added inner
+> VLAN and the BRAS drops the frames (debug-session-4 root cause).
+
+#### Options — `atm` sections
+
+| Option    | Type     | Default   | Meaning |
+|-----------|----------|-----------|---------|
+| `index`   | 0–7      | 0         | Same index space as `ptm` — transport VLAN 2000+index. |
+| `vpi`     | 0–255    | 8         | ATM VPI (op5). |
+| `vci`     | 1–65535  | 35        | ATM VCI (op5). |
+| `encaps`  | enum     | `llc`     | `llc` / `vcmux`. |
+| `payload` | enum     | `bridged` | `bridged` (EoA) / `routed` (IPoA) / `pppoa` (PPPoA). |
+
+The legacy anonymous `network.@atm-bridge[0]` section (§2.4) is still read
+for single-link compatibility when no named data-link sections exist.
+
+#### The stable-identity rule (`index`)
+
+The transport VLAN is derived from the **explicit per-link index**, never
+from UCI section order: UCI list position can change across reloads/edits,
+and consumers (netifd `pppoe`/`ipoe` interfaces, scripts) hook the created
+`lan0.<transport>` **by name** — a reorder would silently re-point them at
+the wrong link. Consequences:
+
+- `index` is optional per section, defaulting to 0.
+- **More than one data-link section ⇒ every section must carry an explicit
+  `index`** (config load aborts otherwise, naming the offending section).
+- Duplicate indices and service vids are load errors.
+
+#### Board limits (validated at config load)
+
+| Rule | Reason (board firmware) |
+|------|-------------------------|
+| ≤ 8 data-link sections | 8 PVC slots, transport VLANs 2000–2007 only |
+| unique `index` per section | transport VLAN collision |
+| unique service `vid` | `vdsl_linkAdd` dedups on the service vid |
+| **at most one untagged PTM link** | untagged maps to service vid −1 — a single board slot |
+| `ptm` link with fixed ADSL `line_mode` | ADSL standards are ATM-only (physical impossibility) |
+
+#### Implicit default link
+
+With **no** data-link sections configured, the daemon resolves one implicit
+default link: untagged PTM at index 0 (transport VLAN 2000), or ATM
+carrying the legacy `@atm-bridge[0]` PVC parameters when `xfer_mode=atm`.
+Zero-config VDSL works out of the box; `xfer_mode=auto` (multimode) queues
+the optimistic PTM link and swaps it for an ATM link if the line trains
+ADSL. The `dsl.transport_vlan` base index (§11.1) selects the implicit
+link's index.
+
+### 11.3 Provisioning flow (queue-at-open)
+
+Links are provisioned at **line open, while the line is still down** — the
+board's OEM materialization flow (op5/op15 are queued and materialized at
+the showtime transition by the board's own 2-second status thread):
+
+```mermaid
+sequenceDiagram
+    participant D as rbctl-dsl
+    participant B as board
+    D->>B: op16 cleanup 2000..2000+N-1 (stale links)
+    D->>B: op1 line config → wan adsl open
+    D->>B: op15/op5 per link (line DOWN → queued, hollow ACK 0)
+    Note over B: line trains...
+    B->>B: showtime: status thread walks queue,<br/>materializes each link (nas8_N + eth0.1.200x + brN)
+    D->>D: op2 poll sees Up → creates host lan0.<2000+index>
+    D->>D: hotplug DSL_INTERFACE_STATUS=UP
+```
+
+Adding a link by `reload` while the line is **up** takes the board's
+direct path — which works on real hardware but is harder to verify; the
+daemon logs a warning recommending a line restart if the new link does not
+pass data.
+
+### 11.4 Validation (this port)
+
+```sh
+uci show network.dsl
+uci show network.internet     # named data-link sections (§11.2)
+# …then the generic §9 checks
+```
+
+Full board-side semantics of the queue/materialization/teardown state
+machine: [board-side link-lifecycle spec](../vx830v/xDSL/docs/link-lifecycle.md).
