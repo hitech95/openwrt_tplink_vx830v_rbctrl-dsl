@@ -53,12 +53,17 @@ export BINDGEN_EXTRA_CLANG_ARGS:=--target=$(RUSTC_TARGET_ARCH) -isystem $(TOOLCH
 # this package is a Cargo workspace (Cargo.toml + crates/ at the root, not
 # ./src/). Override Prepare to copy the full workspace so cargo finds the
 # workspace manifest, the lockfile, .cargo/config.toml, and crates/rbctl_dsl/.
+# The copy carries no .git, so also bake the source repo's git describe into
+# rbctl_git_sha — build.rs reads it to embed the sha in the version banner
+# (git rev-parse inside the SDK copy would always fail -> "unknown").
 define Build/Prepare
 	mkdir -p "$(PKG_BUILD_DIR)"
 	tar -cf - -C "$(CURDIR)" \
 		--exclude=target --exclude=.git --exclude='*.swp' \
 		--exclude=files \
 		. | tar -xf - -C "$(PKG_BUILD_DIR)"
+	git -C "$(CURDIR)" describe --always --dirty=-dirty > "$(PKG_BUILD_DIR)/rbctl_git_sha" \
+		|| echo unknown > "$(PKG_BUILD_DIR)/rbctl_git_sha"
 endef
 
 define Package/rbctl-dsl

@@ -25,7 +25,29 @@ fn main() {
 }
 
 /// `<short-sha>` or `<short-sha>-dirty` (any uncommitted change).
+///
+/// Resolution order:
+/// 1. `RBCTL_GIT_SHA` env (explicit override, e.g. CI);
+/// 2. `rbctl_git_sha` at the workspace root — written by the OpenWrt
+///    package Makefile's Build/Prepare (the SDK builds from a .git-less
+///    copy, so this is the only way an apk build knows its sha);
+/// 3. `git rev-parse` next to the crate (direct cargo builds in a repo).
 fn git_short_sha() -> Option<String> {
+    if let Ok(sha) = std::env::var("RBCTL_GIT_SHA") {
+        if !sha.is_empty() {
+            return Some(sha);
+        }
+    }
+    if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let baked = std::path::Path::new(&dir).join("../../rbctl_git_sha");
+        println!("cargo:rerun-if-changed={}", baked.display());
+        if let Ok(s) = std::fs::read_to_string(&baked) {
+            let s = s.trim();
+            if !s.is_empty() && s != "unknown" {
+                return Some(s.to_string());
+            }
+        }
+    }
     let sha = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
