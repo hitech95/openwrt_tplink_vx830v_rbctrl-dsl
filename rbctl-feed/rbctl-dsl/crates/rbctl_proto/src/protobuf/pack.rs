@@ -16,7 +16,7 @@
 use super::framing;
 use super::rbctl::{self as pb};
 use crate::model::{
-    Annex, AtmEncap, AtmLinkType, AtmQos, DataPath, Modulation, Vdsl2Profiles,
+    Annex, AtmEncap, AtmLinkType, AtmQos, DataPath, Modulation, PtmVlanMode, Vdsl2Profiles,
 };
 
 // Conversions operate on the shared model types; re-exported here so
@@ -24,6 +24,31 @@ use crate::model::{
 pub use crate::model::{AtmParams, LineParams, PtmParams};
 
 // ─── enum conversions ─────────────────────────────────────────────────
+
+/// Bearer VLAN mode ↔ protobuf. Numeric values agree with the board's
+/// smux vlan_mode (1/2/3); UNSPECIFIED is the agent-default path.
+impl From<PtmVlanMode> for pb::VlanMode {
+    fn from(m: PtmVlanMode) -> Self {
+        use pb::VlanMode as V;
+        match m {
+            PtmVlanMode::Unspecified => V::Unspecified,
+            PtmVlanMode::Untagged => V::Untagged,
+            PtmVlanMode::Transparent => V::Transparent,
+            PtmVlanMode::Tagged => V::Tagged,
+        }
+    }
+}
+
+impl From<pb::VlanMode> for PtmVlanMode {
+    fn from(v: pb::VlanMode) -> Self {
+        match v {
+            pb::VlanMode::Unspecified => PtmVlanMode::Unspecified,
+            pb::VlanMode::Untagged => PtmVlanMode::Untagged,
+            pb::VlanMode::Transparent => PtmVlanMode::Transparent,
+            pb::VlanMode::Tagged => PtmVlanMode::Tagged,
+        }
+    }
+}
 
 /// Native → protobuf modulation.
 pub fn modulation_to_pb(m: Modulation) -> pb::ModulationType {
@@ -169,14 +194,21 @@ impl AtmParams {
 impl PtmParams {
     pub fn to_pb(self) -> pb::PtmLinkParams {
         pb::PtmLinkParams {
-            tag_enable: self.tag_enable,
             tag_vid: self.tag_vid as u32,
             tag_pri: self.tag_pri as u32,
+            vlan_mode: pb::VlanMode::from(self.vlan_mode) as i32,
         }
     }
 
     pub fn from_pb(p: &pb::PtmLinkParams) -> Self {
-        Self { tag_enable: p.tag_enable, tag_vid: p.tag_vid as u16, tag_pri: p.tag_pri as u16 }
+        Self {
+            tag_vid: p.tag_vid as u16,
+            tag_pri: p.tag_pri as u16,
+            vlan_mode: pb::VlanMode::try_from(p.vlan_mode)
+                .ok()
+                .map(|m| m.into())
+                .unwrap_or_default(),
+        }
     }
 }
 

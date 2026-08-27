@@ -696,7 +696,7 @@ message ConfigDataResponse {
 // "line is up" alone only approximates it, since materialization
 // completes shortly after the showtime transition (LinkActiveEvent).
 message LinkEntry {
-  uint32 vlan_id = 1;  // assigned transport VLAN (the link ID)
+  uint32 vlan_id = 1;  // assigned transport VLAN = 2000 + slot (the link ID)
   oneof kind {
     AtmLinkParams atm = 2;
     PtmLinkParams ptm = 3;
@@ -722,19 +722,40 @@ unreadable — the backends differ in mechanism, not in guarantee.
 ### Data-link management (replaces opcodes 5/6, 15/16)
 
 Data links are configured separately from the line params (the line first,
-links around showtime) and have their own request type, keyed by the
-assigned VLAN.
+links around showtime) and have their own request type.
 
-**Queueing (matches the current OEM agent):** `link_create` received
-before the line is in showtime is queued by the agent and materialized
-automatically when the line trains — exactly what the OEM board does with
-its provisioning commands. The response reports `queued=true` so the host
-knows the link is deferred, not active. `link_remove` of a
-queued-but-not-materialized link simply dequeues it. Materialization is
-announced asynchronously via `LinkActiveEvent` (see async events) — the
-hook for host-side data-plane notifications.
+**Slots and identity.** A data link occupies one of 8 board slots
+(index 0–7); the transport VLAN is always `2000 + slot`, so the
+`vlan_id` keying the messages is the slot spelled out. The slot is the
+stable link identity — the host-side interface name (`lan0.<vlan>`,
+which netifd hooks) derives from it, so re-pointing an interface at
+another link means re-creating it on a different slot. Board limits
+apply and are enforced agent-side with named errors: max 8 links
+(`link_table_full:`), the board dedups on the **service vid**
+(`link_exists:`) — and untagged counts as vid −1, so at most ONE
+untagged PTM link can ever exist.
+
+**Bearer VLAN awareness (smux modes).** The board's smux layer gives the
+PTM bearer one of three service-VLAN behaviors; the protocol models all
+three as `VlanMode` (numeric values = board smux vlan_mode):
+
+| mode | name | board behavior | note |
+|---|---|---|---|
+| 1 | `UNTAGGED` | strips any 802.1Q tag on TX | the session-4 field failure mode — a host-added service tag dies at the board |
+| 2 | `TRANSPARENT` | VLAN-aware passthrough, tags traverse untouched | **QinQ possible** (host stacks `[transport 2000][service N]`); unreachable via the OEM op15 encoding (it expresses only modes 1/3) — first-class in this protocol |
+| 3 | `TAGGED` | inserts/rewrites TCI to (vid, pbit) on TX, restores on RX | the board applies the service VLAN itself — the verified PPPoE fix |
+
+`vlan_mode` selects the smux behavior (absent → agent default
+UNTAGGED); `tag_vid`/`tag_pri` carry the service tag for TAGGED links.
 
 ```protobuf
+enum VlanMode {
+  VLAN_MODE_UNSPECIFIED = 0;  // absent → agent default (UNTAGGED)
+  VLAN_MODE_UNTAGGED    = 1;  // smux mode 1
+  VLAN_MODE_TRANSPARENT = 2;  // smux mode 2 — QinQ possible
+  VLAN_MODE_TAGGED      = 3;  // smux mode 3
+}
+
 message LinkRequest {
   oneof action {
     LinkCreate create = 1;
@@ -742,10 +763,9 @@ message LinkRequest {
   }
 }
 
-// `vlan_id` is the desired transport VLAN; the response echoes the
-// board-assigned one.
+// `vlan_id` = 2000 + slot; the response echoes the board-assigned one.
 message LinkCreate {
-  uint32 vlan_id = 1;  // 2000-2007
+  uint32 vlan_id = 1;  // 2000-2007 (slot 0-7 + 2000)
   oneof kind {
     AtmLinkParams atm = 2;
     PtmLinkParams ptm = 3;
@@ -753,7 +773,7 @@ message LinkCreate {
 }
 
 message LinkRemove {
-  uint32 vlan_id = 1;  // link ID = assigned VLAN
+  uint32 vlan_id = 1;  // link ID = assigned VLAN = 2000 + slot
 }
 
 // Altering a link is deliberately not modeled: remove + re-create (the
@@ -773,21 +793,31 @@ message AtmLinkParams {
 }
 
 message PtmLinkParams {
-  bool   tag_enable = 1;
-  uint32 tag_vid    = 2;
-  uint32 tag_pri    = 3;
+  uint32  tag_vid   = 1;  // service vid 1-4094 (TAGGED mode only)
+  uint32  tag_pri   = 2;  // 802.1p 0-7 (TAGGED mode only)
+  VlanMode vlan_mode = 3;
 }
 
 message LinkResponse {
-  uint32 vlan_id = 1;  // assigned (create) / affected (alter, remove)
+  uint32 vlan_id = 1;  // assigned (create) / removed VLAN (= 2000 + slot)
   bool   queued  = 2;  // true: deferred until showtime
 }
 ```
 
-Single-link policy for now: `link_create` while another link is configured
-is an error (`link_exists:`, naming the conflicting link). The
-create/remove shape is already multi-link ready — only the agent-side
-capacity check narrows for now.
+**Queueing (matches the current OEM agent):** `link_create` received
+before the line is in showtime is queued by the agent and materialized
+automatically when the line trains — exactly what the OEM board does with
+its provisioning commands (materialization happens at the showtime
+transition; ACK-at-queue-time is hollow and never means "active"). The
+response reports `queued=true` so the host knows the link is deferred,
+not active. `link_remove` of a queued-but-not-materialized link simply
+dequeues it. Materialization is announced asynchronously via
+`LinkActiveEvent` (see async events) — the hook for host-side data-plane
+notifications.
+
+Multi-link policy: up to 8 concurrent links (one per slot), subject to
+the service-vid dedup and single-untagged rules above; the agent
+enforces them at `link_create` time.
 
 ### Firmware upgrade (replaces opcode 8)
 
@@ -980,7 +1010,7 @@ message FirmwareProgress {
 // host-side data-plane notifications (hotplug) at the moment the link
 // actually goes live, rather than inferring it from the line state.
 message LinkActiveEvent {
-  uint32   vlan_id   = 1;  // assigned VLAN of the now-active link
+  uint32   vlan_id   = 1;  // assigned VLAN = 2000 + slot
   DataPath kind      = 2;  // ATM or PTM
   uint64   timestamp = 3;
 }

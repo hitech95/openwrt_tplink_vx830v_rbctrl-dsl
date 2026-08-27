@@ -389,11 +389,58 @@ impl Default for AtmParams {
     }
 }
 
-/// Semantic PTM link parameters (VLAN tag handling; `tag_enable=false`
-/// = untagged, matching the OEM op15 encoding).
+/// Bearer service-VLAN handling of a PTM link — mirrors the board's
+/// smux vlan_mode values exactly (session-4 verdict; see
+/// docs/xdsl/data_plane.md "smux service-VLAN modes"):
+///
+/// - [`PtmVlanMode::Untagged`] (smux 1): strip any 802.1Q tag on TX —
+///   a host-added service tag dies at the board (the session-4 field
+///   failure).
+/// - [`PtmVlanMode::Transparent`] (smux 2): VLAN-aware passthrough,
+///   tags traverse untouched — QinQ (host-stacked service VLAN inside
+///   the transport VLAN) works end-to-end. NOT expressible via the OEM
+///   op15 encoding (which can only say untagged/tagged); first-class in
+///   the protobuf protocol.
+/// - [`PtmVlanMode::Tagged`] (smux 3): the board inserts/rewrites the
+///   TCI to (vid, pri) on TX and restores it on RX — the verified
+///   board-side service-VLAN flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PtmVlanMode {
+    /// Absent selection: the agent defaults to [`Self::Untagged`].
+    /// Maps to protobuf VLAN_MODE_UNSPECIFIED.
+    #[default]
+    Unspecified,
+    Untagged,
+    Transparent,
+    Tagged,
+}
+
+impl PtmVlanMode {
+    /// Board smux vlan_mode value (1/2/3); 0 for [`Self::Unspecified`].
+    pub fn smux_mode(self) -> u8 {
+        match self {
+            Self::Unspecified => 0,
+            Self::Untagged => 1,
+            Self::Transparent => 2,
+            Self::Tagged => 3,
+        }
+    }
+
+    /// A concrete selection, or [`Self::Untagged`] when unspecified.
+    pub fn or_default_untagged(self) -> Self {
+        match self {
+            Self::Unspecified => Self::Untagged,
+            concrete => concrete,
+        }
+    }
+}
+
+/// Semantic PTM link parameters (bearer VLAN handling). `vlan_mode` is
+/// the smux behavior selection (see [`PtmVlanMode`]); `tag_vid`/`tag_pri`
+/// carry the service tag for [`PtmVlanMode::Tagged`] links.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PtmParams {
-    pub tag_enable: bool,
     pub tag_vid: u16,
     pub tag_pri: u16,
+    pub vlan_mode: PtmVlanMode,
 }

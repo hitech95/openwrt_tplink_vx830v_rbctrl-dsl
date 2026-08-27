@@ -251,8 +251,8 @@ mod tests {
                     pb::LinkEntry {
                         vlan_id: 2000,
                         kind: Some(pb::link_entry::Kind::Ptm(pb::PtmLinkParams {
-                            tag_enable: true,
                             tag_vid: 100,
+                            vlan_mode: pb::VlanMode::Tagged as i32,
                             ..Default::default()
                         })),
                         queued: false, // materialized
@@ -396,4 +396,35 @@ mod tests {
         };
         assert!(s.in_progress);
     }
+    #[test]
+    fn ptm_vlan_mode_semantics() {
+        use crate::model::{PtmParams, PtmVlanMode};
+        use pb::VlanMode;
+
+        // Unspecified stays unspecified on the wire (agent resolves to
+        // untagged; the schema documents the default).
+        let dflt = PtmParams::default().to_pb();
+        assert_eq!(dflt.vlan_mode, VlanMode::Unspecified as i32);
+
+        // Explicit mode 2 (transparent/QinQ) survives the roundtrip —
+        // unreachable via OEM op15, first-class here.
+        let qinq = PtmParams { vlan_mode: PtmVlanMode::Transparent, ..Default::default() };
+        let back = PtmParams::from_pb(&qinq.to_pb());
+        assert_eq!(back.vlan_mode, PtmVlanMode::Transparent);
+
+        // Tagged carries the service tag and the smux mode number.
+        let tagged = PtmParams {
+            tag_vid: 100,
+            tag_pri: 5,
+            vlan_mode: PtmVlanMode::Tagged,
+        };
+        let p = tagged.to_pb();
+        assert_eq!(p.vlan_mode, VlanMode::Tagged as i32);
+        assert_eq!((p.tag_vid, p.tag_pri), (100, 5));
+        assert_eq!(PtmVlanMode::Tagged.smux_mode(), 3);
+        assert_eq!(PtmVlanMode::Transparent.smux_mode(), 2);
+        assert_eq!(PtmVlanMode::Untagged.smux_mode(), 1);
+        assert_eq!(PtmVlanMode::Unspecified.or_default_untagged(), PtmVlanMode::Untagged);
+    }
+
 }

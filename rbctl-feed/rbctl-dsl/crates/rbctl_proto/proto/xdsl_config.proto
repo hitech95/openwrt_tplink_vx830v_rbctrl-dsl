@@ -86,7 +86,7 @@ message ConfigDataResponse {
 // materialization completes shortly after the showtime transition
 // (announced by LinkActiveEvent).
 message LinkEntry {
-  uint32 vlan_id = 1;  // assigned transport VLAN (the link ID)
+  uint32 vlan_id = 1;  // assigned transport VLAN = 2000 + slot (the link ID)
   oneof kind {
     AtmLinkParams atm = 2;
     PtmLinkParams ptm = 3;
