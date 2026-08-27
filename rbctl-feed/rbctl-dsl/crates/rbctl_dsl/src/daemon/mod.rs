@@ -181,13 +181,17 @@ pub(crate) struct Daemon {
     cfg: DslConfig,
     /// op1 acknowledged by the board.
     config_applied: bool,
-    /// op5/op15 acknowledged by the board.
-    link_provisioned: bool,
-    /// Board-assigned transport VLAN (authoritative for cleanup).
-    provisioned_vlan: Option<u16>,
-    /// True when this daemon instance created the host-side VLAN — only
-    /// then is it deleted at shutdown.
-    vlan_owned: bool,
+    /// op5/op15 acknowledged by the board, per transport VLAN
+    /// (multi-link: one entry per configured data link).
+    links_provisioned: std::collections::BTreeSet<u16>,
+    /// Host-side VLANs this daemon instance created — only those are
+    /// deleted at shutdown (pre-existing interfaces are left alone).
+    vlans_owned: std::collections::BTreeSet<u16>,
+    /// Provisioning queued at startup (queue-at-open): true until every
+    /// configured link has been sent while the line was down.
+    startup_provisioning_sent: bool,
+    /// Last-applied data-link set (reload diffing).
+    links_snapshot: Vec<crate::config::DataLink>,
     /// Throttle for deferred op1 retries (board-reachable transitions).
     last_apply: Option<Instant>,
     /// One TC-layer hotplug emission per Up session.
@@ -269,7 +273,8 @@ impl Daemon {
             let _ = worker_done_tx.send(());
         });
 
-        let daemon = Self {
+        let links_snapshot = cfg.data_links();
+        let mut daemon = Self {
             config_iface: config_iface.to_string(),
             notify_script: notify_script.map(str::to_string),
             overrides: overrides.clone(),
@@ -284,9 +289,10 @@ impl Daemon {
             ubus_conn,
             cfg,
             config_applied: false,
-            link_provisioned: false,
-            provisioned_vlan: None,
-            vlan_owned: false,
+            links_provisioned: Default::default(),
+            vlans_owned: Default::default(),
+            startup_provisioning_sent: false,
+            links_snapshot,
             last_apply: None,
             tc_emitted: false,
             nosignal_since: None,
@@ -309,13 +315,18 @@ impl Daemon {
             // possibly of the wrong type for the line about to train.
             // Clear it before opening; provisioning re-runs at line-Up
             // with the type derived from the trained modulation.
-            let _ = daemon.cmd_tx.send(WorkerCmd::CleanupLink {
-                vlan: daemon.transport_vlan(),
-            });
+            for link in daemon.cfg.data_links() {
+                let _ = daemon.cmd_tx.send(WorkerCmd::CleanupLink {
+                    vlan: link.transport_vlan(),
+                });
+            }
             let _ = daemon.cmd_tx.send(WorkerCmd::OpenLine);
-            // Data-plane provisioning is NOT queued here — it follows from
-            // the line-Up event (link type derived from the trained
-            // modulation), which keeps exactly one provisioning path.
+            // Queue the data links NOW, while the line is down: the
+            // board materializes them at the up-TRANSITION (the OEM
+            // flow, session-4 verified). Post-up provisioning is only
+            // used for corrections/reloads (with a warning).
+            daemon.provision_links_at_open();
+            daemon.startup_provisioning_sent = true;
             // Emit initial TC-layer status (monitor mode has no configured
             // mode to report; it emits on Up transitions instead).
             if let Some(script) = daemon.notify_script.as_deref() {
@@ -495,8 +506,8 @@ impl Daemon {
             WorkerEvent::BoardUnreachable => {
                 log::warn!("board became unreachable");
                 self.config_applied = false;
-                self.link_provisioned = false;
-                self.vlan_owned = false;
+                self.links_provisioned.clear();
+                self.vlans_owned.clear();
             }
             WorkerEvent::LineState { status, data_path, modulation } => {
                 let event = link_status_to_event(status);
@@ -516,15 +527,14 @@ impl Daemon {
                 // (on_line_up) for every mode — fixed and Auto alike.
             }
             WorkerEvent::LinkProvisioned { vlan } => {
-                self.link_provisioned = true;
-                self.provisioned_vlan = Some(vlan);
+                self.links_provisioned.insert(vlan);
                 log::info!("board assigned transport vlan: {vlan}");
                 // Track whether WE created the host-side interface, so
                 // shutdown only deletes what it owns (a pre-existing VLAN
                 // from an earlier daemon run is left alone).
                 match vlan::create_vlan_iface(&self.parent, vlan) {
                     Ok(true) => {
-                        self.vlan_owned = true;
+                        self.vlans_owned.insert(vlan);
                         log::info!("created {}.{}", self.parent, vlan);
                     }
                     Ok(false) => {
@@ -552,68 +562,111 @@ impl Daemon {
     ///    training (verified on-target: read `Atm` while a VDSL2 line
     ///    was in showtime); it serves only as the fallback for an
     ///    unknown modulation code, and a disagreement is logged.
+    /// Queue every configured data link while the line is DOWN — the
+    /// board materializes each at the up-TRANSITION (OEM flow,
+    /// session-4 verified on-target). Call before/at OpenLine.
+    fn provision_links_at_open(&self) {
+        for link in self.cfg.data_links() {
+            let (tag_en, tag_vid, tag_pbit) = match link.bearer_tag {
+                Some((vid, pbit)) => (1u8, vid, pbit as u16),
+                None => (0u8, 0u16, 0u16),
+            };
+            let _ = self.cmd_tx.send(WorkerCmd::ProvisionLink {
+                xfer: link.xfer,
+                vlan: link.transport_vlan(),
+                tag_enable: tag_en,
+                tag_vid,
+                tag_pbit,
+                atm: link.atm.clone(),
+            });
+        }
+    }
+
+    /// Provision (or correct) links AFTER the line is up. This relies on
+    /// the board's direct materialization path — verified on hardware,
+    /// but historically fragile (the ':' parse); warn (F3).
+    fn provision_link_post_up(
+        &mut self,
+        link: &crate::config::DataLink,
+        reason: &str,
+    ) {
+        if self.monitor {
+            return;
+        }
+        log::warn!(
+            "provisioning data link '{}' (vlan {}) while line is up ({reason}): \
+             the econet firmware's direct path may hollow-ACK this request — \
+             if the link does not pass data, restart the line (rbctl-dsl restart-line)",
+            link.name,
+            link.transport_vlan()
+        );
+        let (tag_en, tag_vid, tag_pbit) = match link.bearer_tag {
+            Some((vid, pbit)) => (1u8, vid, pbit as u16),
+            None => (0u8, 0u16, 0u16),
+        };
+        let _ = self.cmd_tx.send(WorkerCmd::ProvisionLink {
+            xfer: link.xfer,
+            vlan: link.transport_vlan(),
+            tag_enable: tag_en,
+            tag_vid,
+            tag_pbit,
+            atm: link.atm.clone(),
+        });
+    }
+
+    /// Line reached Up: the startup links were queued at open and are
+    /// materialized by the board's up-transition handler. What remains
+    /// here: auto-mode corrections (F4), unreachable-reset re-provision,
+    /// state/hotplug publication.
     fn on_line_up(&mut self, data_path: DataPath, modulation: Option<Modulation>) {
-        let effective = match self.cfg.xfer_mode {
-            forced @ (XferMode::Ptm | XferMode::Atm) => Some(forced),
-            XferMode::Auto => modulation.map(|m| {
-                let derived = XferMode::for_modulation(m);
-                let field = match data_path {
-                    DataPath::Ptm => Some(XferMode::Ptm),
-                    DataPath::Atm => Some(XferMode::Atm),
-                    DataPath::Unknown(_) => None,
-                };
-                if field.is_some_and(|f| f != derived) {
-                    log::warn!(
-                        "op2 data_path field says {data_path:?} but trained modulation \
-                         is {m:?} — using {derived:?} (field does not follow training)"
-                    );
-                }
-                derived
-            }).or_else(|| match data_path {
+        // Trained type (authoritative): from the trained modulation when
+        // known, else the op2 field (stale — warn if it disagrees).
+        let trained = modulation.map(XferMode::for_modulation).or_else(|| {
+            match data_path {
                 DataPath::Ptm => Some(XferMode::Ptm),
                 DataPath::Atm => Some(XferMode::Atm),
                 DataPath::Unknown(code) => {
                     log::warn!(
-                        "line up with unknown modulation and data_path code {code} \
-                         — cannot resolve the link type, not provisioning"
+                        "line up with unknown modulation and data_path code {code}"
                     );
                     None
                 }
-            }),
-        };
-
-        // Physical compatibility of the resolved transport with the
-        // trained modulation (only blocks what the standards cannot
-        // carry, e.g. PTM on ADSL — a Multimode line that trained ADSL
-        // despite a forced/configured PTM).
-        let blocked = matches!((modulation, effective),
-            (Some(m), Some(x)) if !x.compatible_with(m));
-        if blocked {
-            let (m, x) = (modulation.unwrap(), effective.unwrap());
-            log::error!(
-                "transport {x:?} cannot carry a trained {m:?} line — \
-                 not provisioning (fix xfer_mode/line_mode in config)"
-            );
-        }
-
-        if let Some(xfer) = effective {
-            let mut st = self.state.lock().unwrap();
-            st.xfer_mode = Some(xfer);
-        }
-        if let (Some(xfer), false) = (effective, blocked) {
-            if !self.tc_emitted {
-                if let Some(script) = self.notify_script.as_deref() {
-                    hotplug::emit_tc_layer(script, xfer);
-                }
-                self.tc_emitted = true;
             }
-            // Provision now that the link type is known — the single
-            // provisioning path for every mode (forced and Auto alike).
-            if !self.monitor && !self.link_provisioned {
-                let _ = self.cmd_tx.send(WorkerCmd::ProvisionLink {
-                    xfer,
-                    vlan: self.transport_vlan(),
-                });
+        });
+        if let (Some(m), Some(t)) = (modulation, trained) {
+            let field = match data_path {
+                DataPath::Ptm => Some(XferMode::Ptm),
+                DataPath::Atm => Some(XferMode::Atm),
+                DataPath::Unknown(_) => None,
+            };
+            if field.is_some_and(|f| f != t) {
+                log::warn!(
+                    "op2 data_path field says {data_path:?} but trained modulation \
+                     is {m:?} — using {t:?} (field does not follow training)"
+                );
+            }
+        }
+
+        if let Some(t) = trained {
+            let mut st = self.state.lock().unwrap();
+            st.xfer_mode = Some(t);
+        }
+        if !self.tc_emitted {
+            let emit = trained.unwrap_or(self.cfg.xfer_mode);
+            if let Some(script) = self.notify_script.as_deref() {
+                hotplug::emit_tc_layer(script, emit);
+            }
+            self.tc_emitted = true;
+        }
+
+        // Board came back reachable with the line still up and links
+        // unprovisioned (unreachable reset them): re-provision post-up.
+        if !self.monitor && !self.startup_provisioning_sent {
+            for link in self.cfg.data_links() {
+                let vlan = link.transport_vlan();
+                if !self.links_provisioned.contains(&vlan) {
+                    self.provision_link_post_up(&link, "board returned reachable");
+                }
             }
         }
     }
@@ -635,29 +688,50 @@ impl Daemon {
         }
         if changed {
             log::info!("line params changed — reconfiguring");
-            // Deprovision the old link on the board before reconfiguring.
-            if self.link_provisioned {
-                if let Some(vlan) = self.provisioned_vlan {
-                    let xfer = self
-                        .state
-                        .lock()
-                        .unwrap()
-                        .xfer_mode
-                        .unwrap_or(self.cfg.xfer_mode);
-                    let _ = self.cmd_tx.send(WorkerCmd::RemoveLink { xfer, vlan });
+            // Per-link diff: remove links that disappeared or changed,
+            // queue new links for the retrain's up-transition.
+            let new_links_vec = self.cfg.data_links();
+            let new_links: std::collections::BTreeMap<u16, &crate::config::DataLink> =
+                new_links_vec.iter().map(|l| (l.transport_vlan(), l)).collect();
+            let old_vlans: Vec<u16> = self.links_provisioned.iter().copied().collect();
+            for vlan in old_vlans {
+                match new_links.get(&vlan) {
+                    None => {
+                        log::info!("reload: link on vlan {vlan} removed");
+                        let _ = self.cmd_tx.send(WorkerCmd::RemoveLink { xfer: XferMode::Ptm, vlan });
+                        let _ = self.cmd_tx.send(WorkerCmd::RemoveLink { xfer: XferMode::Atm, vlan });
+                        self.links_provisioned.remove(&vlan);
+                    }
+                    Some(l) => {
+                        // type/tag change on the same index: swap
+                        let prev = self
+                            .links_snapshot
+                            .iter()
+                            .find(|p| p.transport_vlan() == vlan)
+                            .cloned();
+                        if prev.is_some_and(|p| p != **l) {
+                            log::info!("reload: link on vlan {vlan} changed — swapping");
+                            let _ = self.cmd_tx.send(WorkerCmd::RemoveLink { xfer: XferMode::Ptm, vlan });
+                            let _ = self.cmd_tx.send(WorkerCmd::RemoveLink { xfer: XferMode::Atm, vlan });
+                            self.links_provisioned.remove(&vlan);
+                        }
+                    }
                 }
             }
+            self.links_snapshot = self.cfg.data_links();
             self.config_applied = false;
-            self.link_provisioned = false;
-            self.vlan_owned = false;
             self.tc_emitted = false;
             // A changed config differs from the board cache by
             // construction, so a plain op1 always takes the full apply
             // path (setters + `wan adsl reset` inside them + final
             // `wan adsl open`) — no deliberate line-down needed. The line
-            // retrains, and provisioning re-runs at line-Up with the link
-            // type re-derived from the (possibly new) trained modulation.
+            // retrains; removed links are gone, new links queued below
+            // materialize at the new up-transition.
             let _ = self.cmd_tx.send(WorkerCmd::ApplyLineConfig);
+            // Queue all still-missing links at (presumably) line-down —
+            // if the line happens to be up these become post-up adds.
+            self.provision_links_at_open();
+            self.startup_provisioning_sent = true;
         } else {
             log::info!("no line-param changes");
         }
@@ -711,22 +785,12 @@ impl Daemon {
         // Teardown through the gate: monitor mode never configured the
         // board, so it must not tear it down either.
         if !self.monitor {
-            // Deprovision the board side first (op6/op16), then the line.
-            if self.link_provisioned {
-                if let Some(vlan) = self.provisioned_vlan {
-                    let xfer = match self.cfg.xfer_mode {
-                        XferMode::Ptm => XferMode::Ptm,
-                        XferMode::Atm => XferMode::Atm,
-                        // Auto: the observed mode was stored on Up.
-                        XferMode::Auto => self
-                            .state
-                            .lock()
-                            .unwrap()
-                            .xfer_mode
-                            .unwrap_or(XferMode::Ptm),
-                    };
-                    let _ = self.cmd_tx.send(WorkerCmd::RemoveLink { xfer, vlan });
-                }
+            // Deprovision the board side first (both del opcodes per vlan:
+            // we may hold queued-not-materialized nodes of either type),
+            // then the line.
+            for vlan in self.links_provisioned.iter().copied().collect::<Vec<_>>() {
+                let _ = self.cmd_tx.send(WorkerCmd::RemoveLink { xfer: XferMode::Ptm, vlan });
+                let _ = self.cmd_tx.send(WorkerCmd::RemoveLink { xfer: XferMode::Atm, vlan });
             }
             let _ = self.cmd_tx.send(WorkerCmd::LineDown);
             // Deliberate final state: daemon stopped ⇒ line is DOWN (op3
@@ -742,10 +806,10 @@ impl Daemon {
                 constants::DAEMON_SHUTDOWN_DEADLINE
             ),
         }
-        // Delete only the VLAN we created; a pre-existing one (earlier
-        // daemon run, operator-created) is left in place.
-        if !self.monitor && self.vlan_owned {
-            if let Some(vlan) = self.provisioned_vlan {
+        // Delete only the VLANs we created; pre-existing ones (earlier
+        // daemon run, operator-created) are left in place.
+        if !self.monitor {
+            for vlan in self.vlans_owned.iter().copied().collect::<Vec<_>>() {
                 vlan::delete_vlan_iface(&self.parent, vlan);
             }
         }

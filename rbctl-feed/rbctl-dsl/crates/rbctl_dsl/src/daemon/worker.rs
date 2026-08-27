@@ -51,9 +51,19 @@ pub enum WorkerCmd {
     /// whatever the cache held before (fresh boot, previous daemon's
     /// config, a line closed by shutdown op3, a foreign writer).
     OpenLine,
-    /// op5/op15 — provision the data-plane link. The daemon computed `xfer`
-    /// and `vlan`; the worker only executes the matching board opcode.
-    ProvisionLink { xfer: XferMode, vlan: u16 },
+    /// op5/op15 — provision the data-plane link. The daemon computed the
+    /// full link description; the worker only executes the matching
+    /// board opcode. `tag_enable/tag_vid/tag_pbit` configure the
+    /// BOARD-side service-VLAN tagging (op15 fields; smux mode 3);
+    /// `atm` carries the PVC params for op5.
+    ProvisionLink {
+        xfer: XferMode,
+        vlan: u16,
+        tag_enable: u8,
+        tag_vid: u16,
+        tag_pbit: u16,
+        atm: Option<config::AtmConfig>,
+    },
     /// op6/op16 — deprovision the data-plane link on the board (the host
     /// VLAN is deleted by the daemon).
     RemoveLink { xfer: XferMode, vlan: u16 },
@@ -220,23 +230,29 @@ impl BoardWorker {
                     Err(e) => log::warn!("open-line (second apply): {e} (daemon will retry)"),
                 }
             }
-            WorkerCmd::ProvisionLink { xfer, vlan } => {
+            WorkerCmd::ProvisionLink { xfer, vlan, tag_enable, tag_vid, tag_pbit, atm } => {
                 debug_assert!(matches!(xfer, XferMode::Ptm | XferMode::Atm));
                 let result = match xfer {
                     XferMode::Ptm => {
-                        log::info!("ptm_link_add: vlan={vlan}");
-                        self.board.ptm_link_add(0, 0, 0, vlan)
+                        if tag_enable != 0 {
+                            log::info!(
+                                "ptm_link_add: vlan={vlan} service-vid={tag_vid} pbit={tag_pbit} (board-tagged)"
+                            );
+                        } else {
+                            log::info!("ptm_link_add: vlan={vlan} untagged");
+                        }
+                        self.board.ptm_link_add(tag_enable, tag_vid, tag_pbit, vlan)
                     }
                     XferMode::Atm => {
-                        let params = config::atm_params(self.cfg.atm.as_ref(), vlan);
+                        let params = config::atm_params(atm.as_ref().or(self.cfg.atm.as_ref()), vlan);
                         log::info!(
                             "atm_link_add: vpi={} vci={} encap={:?} vlan={vlan}",
                             params.vpi, params.vci, params.encap
                         );
                         self.board.atm_link_add(&params)
                     }
-                    // The daemon always resolves Auto to the observed mode
-                    // before sending ProvisionLink.
+                    // The daemon always resolves a concrete type before
+                    // sending ProvisionLink.
                     XferMode::Auto => {
                         log::warn!("ProvisionLink with XferMode::Auto — ignored");
                         return;
