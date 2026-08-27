@@ -22,7 +22,9 @@ explains *what the binary does at runtime*, *how the crates fit together*, and
 1. Reads DSL config from UCI (`/etc/config/network`).
 2. Opens a raw `AF_PACKET` socket on the management VLAN (default `lan0.500`).
 3. Speaks the proprietary `0x88B5` protocol to the EcoNet board — brings the
-   line up, adds an ATM/PTM data link, and polls status every second.
+   line up, queues the configured data links while the line is down (the
+   board materializes them at showtime — the OEM flow), and polls status
+   every second.
 4. Creates the board-assigned transport VLAN on the host (via rtnetlink).
 5. Publishes live metrics on the ubus `dsl` object (LuCI-compatible) and emits
    hotplug events on line-state transitions.
@@ -257,7 +259,7 @@ flowchart TD
     F["6. IpcListener::bind<br/>/var/run/rbctl-dsl.sock"]
     G["7. connect_ubus + register 'dsl'<br/>(best-effort)"]
     H["8. spawn BoardWorker thread"]
-    I["9. queue OpenLine<br/>(monitor mode: queue nothing)"]
+    I["9. queue CleanupLink×N + OpenLine<br/>+ ProvisionLink×N (queue-at-open)<br/>(monitor mode: queue nothing)"]
     J["10. control loop (50 ms tick)<br/>events + IPC + ubus + watchdog"]
 
     A --> A1 --> B --> C --> D --> E --> F --> G --> H --> I --> J
@@ -310,7 +312,10 @@ sequenceDiagram
     participant B as Board firmware
     participant T as Board status thread (2 s poll)
 
-    Note over D,W: startup queues [OpenLine]
+    Note over D,W: startup queues [CleanupLink×N, OpenLine, ProvisionLink×N]
+    D->>W: WorkerCmd::CleanupLink (per configured vlan)
+    W->>B: op16 / op6 (stale-link cleanup, quiet)
+
     D->>W: WorkerCmd::OpenLine
     W->>B: op1 line config (bitswap flipped)
     Note right of B: identical to cache → dedup<br/>different → apply + wan adsl open
@@ -320,8 +325,8 @@ sequenceDiagram
     B-->>W: ack (status 0)
     W-->>D: WorkerEvent::LineConfigApplied
 
-    D->>W: WorkerCmd::ProvisionLink (fixed ptm/atm)
-    Note over D: fired by LineConfigApplied
+    D->>W: WorkerCmd::ProvisionLink ×N (queue-at-open)
+    Note over D: ALL configured links, line still down
     W->>B: op15 / op5 link add (line still training)
     Note right of B: not UP → enqueue in g_interfaceList<br/>(ack now, apply at showtime)
     B-->>W: 4-byte status ack
@@ -334,10 +339,10 @@ sequenceDiagram
         W->>B: op2 get_line_obj (1 s daemon poll)
     end
     Note right of B: showtime reached
-    T->>B: dslHandleStatusUp:<br/>materialize queued link<br/>(nas dev, bridge, eth0.1.vlan)
+    T->>B: dslHandleStatusUp:<br/>materialize queued links<br/>(nas dev, bridge, eth0.1.vlan)
     B-->>W: op2: link_status=Up, data_path
     W-->>D: WorkerEvent::LineState{Up, data_path}
-    D->>D: hotplug UP + tc_layer event
+    D->>D: hotplug UP + tc_layer event<br/>(auto mode: trained-type swap check)
 ```
 
 Three properties fall out of this sequence:
@@ -352,9 +357,14 @@ Three properties fall out of this sequence:
   state: stopping it deliberately closes the line (`LineDown`, zero-retry
   op3), and starting it re-opens deterministically via the double apply.
   op7, not op3, is the board reboot.
-- **Auto mode** skips the startup `ProvisionLink` (the TC mode is unknown
-  until showtime). The `LineState{Up}` event carries the observed
-  `data_path`, and the daemon provisions with the *observed* mode then.
+- **Auto mode** queues an *optimistic* untagged PTM link at startup (the
+  TC mode is unknown until showtime, but PTM covers the common VDSL case
+  with zero config). The `LineState{Up}` event carries the trained
+  modulation; if the line trained ADSL, the daemon swaps the queued link
+  post-up (op16 the PTM node + op5 the ATM replacement, warned — see the
+  F3 note in [e2e.md](e2e.md) scenario EA) and re-swaps if a mixed-mode
+  line re-trains as the other family. Explicitly typed links are never
+  silently retyped.
 
 ### NoSignal watchdog — warn-only
 
@@ -498,11 +508,12 @@ The 8 typed methods on `Board` map 1:1 to the original binary's opcodes — see
 
 | Layer | Command | What it covers |
 |---|---|---|
-| Protocol core | `cargo test -p rbctl_proto` | 18 tests — CRC, frame build/parse, all pack/unpack round-trips |
+| Protocol core | `cargo test -p rbctl_proto` | 58 tests — CRC, frame build/parse, all pack/unpack round-trips, board_sim (decompiled handler rules); +33 with the `protobuf` feature (codec/framing round-trips) |
 | AF_PACKET | `cargo test -p af_packet` | 10 tests — BPF filter, MAC parsing, ethertype match |
-| Board controller | `cargo test -p rbctl_dsl` (host) | 15 tests via `MockTransport` — every opcode, retries, checksum reject, seq increment |
-| QEMU selftest | `rbctl-dsl --selftest -i lan0.500` | Socket open + BPF + bind, VLAN create/up/down/delete round-trip, board opcode (expects timeout), UCI/uloop init |
-| Sniffer | `rbctl-dsl --sniff -i lan0.500 --dump /tmp/cap.pcap` | Passive 0x88B5/0x88B6 capture, Wireshark-openable |
+| Board controller | `cargo check -p rbctl_dsl` (host) | The daemon links target FFI libs, so its tests run cross-compiled: `MockTransport` coverage executes on-device / under the E2E harness instead |
+| E2E harness | `tests/e2e/run.sh` | Real MIPS firmware + real daemon under qemu-user: E1–E9b, ED, EX, EA — wire formats, bring-up, materialization, teardown, validation matrix |
+| QEMU selftest | `rbctl-dsl selftest -i lan0.500` | Socket open + BPF + bind, VLAN create/up/down/delete round-trip, board opcodes, UCI/uloop init |
+| Sniffer | `rbctl-dsl sniff -i lan0.500 --dump /tmp/cap.pcap` | Passive 0x88B5/0x88B6 capture, Wireshark-openable |
 
 The `MockTransport` in `board.rs` is what makes the board logic testable on a
 CI host with no hardware — it auto-generates valid response frames and can be

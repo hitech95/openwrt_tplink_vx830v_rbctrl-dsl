@@ -12,7 +12,12 @@
 > watchdog soak, opt-in). Capture instrument: strace (`openat`+`write`)
 > tailer → lossless `tcci_cmd` trace; state injection via tmpfs
 > `/proc/tc3162`; no host dependencies beyond qemu-user + strace.
-> Remaining: §3.4 on-target tester matrix.
+> §3.4 on-target tester matrix: **EXECUTED across debug sessions 1–4**
+> (stop/start cycles, watchdog soak, metric decode, PPPoE sweep with
+> host pcaps) — session 4 additionally root-caused the dead data plane
+> on-target and validated the bearer-tag fix (working PPPoE link;
+> follow-up in [data-link-uci-plan.md](data-link-uci-plan.md), released
+> as 0.5.0).
 
 > Resolves the session-2 field failure: **the line never trains because every
 > request payload is field-shifted (bogus opcode-echo byte) and op3 — sent

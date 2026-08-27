@@ -16,13 +16,13 @@ make package/rbctl-dsl/compile V=s
 The binary and `.apk` package are produced at:
 
 ```
-bin/packages/aarch64_cortex-a53/rbctl/rbctl-dsl-0.1.0-r1.apk
+bin/packages/aarch64_cortex-a53/rbctl/rbctl-dsl-<version>-r1.apk
 ```
 
 The raw ELF binary (for `scp` transfer) is at:
 
 ```
-build_dir/target-aarch64_cortex-a53_musl/rbctl-dsl-0.1.0/ipkg-aarch64_cortex-a53/rbctl-dsl/usr/bin/rbctl-dsl
+build_dir/target-aarch64_cortex-a53_musl/rbctl-dsl-<version>/ipkg-aarch64_cortex-a53/rbctl-dsl/usr/sbin/rbctl-dsl
 ```
 
 ### Identify the target
@@ -57,7 +57,7 @@ binary links are:
 
 ```bash
 # From the host, assuming the target is reachable at 192.168.1.1
-scp build_dir/target-aarch64_cortex-a53_musl/rbctl-dsl-0.1.0/ipkg-aarch64_cortex-a53/rbctl-dsl/usr/bin/rbctl-dsl root@192.168.1.1:/tmp/rbctl-dsl
+scp build_dir/target-aarch64_cortex-a53_musl/rbctl-dsl-<version>/ipkg-aarch64_cortex-a53/rbctl-dsl/usr/sbin/rbctl-dsl root@192.168.1.1:/tmp/rbctl-dsl
 ```
 
 On the target:
@@ -71,14 +71,14 @@ chmod +x /tmp/rbctl-dsl
 If the target runs the same snapshot:
 
 ```bash
-scp bin/packages/aarch64_cortex-a53/rbctl/rbctl-dsl-0.1.0-r1.apk root@192.168.1.1:/tmp/
+scp bin/packages/aarch64_cortex-a53/rbctl/rbctl-dsl-<version>-r1.apk root@192.168.1.1:/tmp/
 ```
 
 On the target:
 
 ```sh
-apk add --allow-untrusted /tmp/rbctl-dsl-0.1.0-r1.apk
-# Binary installed to /usr/bin/rbctl-dsl
+apk add --allow-untrusted /tmp/rbctl-dsl-<version>-r1.apk
+# Binary installed to /usr/sbin/rbctl-dsl
 ```
 
 ### Option C: Staging .so files (if library mismatch)
@@ -289,7 +289,7 @@ start of the VLAN lifecycle test, so this should be rare.
 cd $OPENWRT_SDK && make package/rbctl-dsl/compile V=s
 
 # Deploy
-scp build_dir/target-aarch64_cortex-a53_musl/rbctl-dsl-0.1.0/ipkg-aarch64_cortex-a53/rbctl-dsl/usr/bin/rbctl-dsl root@TARGET_IP:/tmp/rbctl-dsl
+scp build_dir/target-aarch64_cortex-a53_musl/rbctl-dsl-<version>/ipkg-aarch64_cortex-a53/rbctl-dsl/usr/sbin/rbctl-dsl root@TARGET_IP:/tmp/rbctl-dsl
 
 # Test (on target, as root)
 chmod +x /tmp/rbctl-dsl

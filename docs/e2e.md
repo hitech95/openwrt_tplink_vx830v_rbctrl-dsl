@@ -16,8 +16,9 @@ asserted.
 > [wire-format & bring-up fixes plan](../plans/wire-format-and-bringup-fixes-plan.md)
 > §3.5. (The field-failure analysis and the extracted firmware artifacts
 > it cites live in a private research tree that is **not part of this
-> repository**.) Final result at the time of writing: **E1 E2 E3 E5 E6 E8
-> all PASS** (E1–E8, including the warn-only watchdog check).
+> repository**.) Final result at the time of writing: **E1–E9b, ED, EX,
+> EA all PASS** (including the warn-only watchdog check and the
+> data-link scenarios added for 0.5.0).
 
 ---
 
@@ -95,10 +96,10 @@ so the harness fabricates exactly that interface on tmpfs:
 | File | Direction | Harness behavior |
 |---|---|---|
 | `tcci_cmd` | board writes | **Losslessly captured** via strace (§1.3) |
-| `xdsl_stats` | board reads | `"<status> <linktype>"` — `0 3` = down, `1 2` = showtime/PTM |
-| `adsl_stats` | board reads | full telemetry text (link state, Opmode, per-direction rates/SNR/attenuation, error counters); the harness rewrites it to inject showtime |
+| `xdsl_stats` | board reads | `"<status>:<type>"` (**colon** — the real `tccicmd.ko` format): `0:3` = down, `1:2` = showtime/VDSL2, `1:1` = showtime/ADSL. The board's `apiGetXdslStatus` strtok's on `:`; a space separator silently disables the op5/op15 direct materialization path (session-4 finding) |
+| `adsl_stats` | board reads | full telemetry text (link state, Opmode, per-direction rates/SNR/attenuation, error counters); the harness rewrites it to inject showtime (PTM and ADSL variants) |
 | `vdsl_interface_config` | board reads | `CurrentProfiles: 17a` |
-| `/proc/modules` | board reads | `mt7510ptm …` so op2 reports PTM data path |
+| `/proc/modules` | board reads | swaps with the injected line family: `mt7510ptm` (PTM data path) / `mt7510sar` (ATM — drives `dsl_isAtmConnection`) |
 
 Everything else is genuine: the OEM rootfs (uClibc loader + libs), the
 firmware's config cache, its dispatch/dedup logic, its status thread, the
@@ -204,6 +205,18 @@ Exit code 0 = all scenarios passed. Each run leaves a log directory
 | **E6** | daemon stop after showtime | teardown after materialization: op16 ack 0, line closed |
 | **E7** | 30 s of continuous NoSignal | warn-only watchdog: exactly one "line silent" diagnostic (with the `restart-line` hint) and **zero** board-side tcci activity — no re-apply, no close |
 | **E8** | raw replay of session-2 frames | the captured broken payloads against a fresh board: shifted op1 → board configures **G.DMT annex J** and acknowledges (the silent-garbage trap), shifted op16 → **status 2** rejection. The bug, reproducible forever |
+| **E9/E9b** | config validation | impossible transport combo (adsl+ptm) aborts at load; 7 invalid data-link UCI configs rejected with the rule named (stable-index, dup vid/index, one-untagged, pbit range, `ptp` typo) |
+| **ED** | two-link daemon config | UCI ptm sections vid 100 + vid 836 → both op15s queued **at open** with correct board-tag payloads → both materialize at the up-transition (`smuxctl add … 3 <vid>`), both host VLANs announced, teardown op16s both |
+| **EX** | op15 materialization semantics | queue-at-down → transition materialization (full `smuxctl`/`vconfig`/`brctl` command set, smux mode 1 untagged vs 3 tagged) **and** the post-up direct path — both board flows verified |
+| **EA** | auto-mode type swap | `line_mode auto` queues optimistic untagged PTM at open; an injected ADSL2+ showtime (with `mt7510sar` loaded) triggers the swap: op16 the queued PTM node + op5 (default PVC) with the F3 post-up warning logged |
+
+The harness **pre-creates** the 24 interfaces the board's `ptmCreateVLAN`
+polls for (`nas8_<pvc>`, `eth0.1.<2000+pvc>`, `br<pvc+2>` for pvc 0–7):
+under qemu-user the board's absolute-path `vconfig`/`smuxctl` execs fail
+and the PATH stubs are no-ops, so nothing would materialize without them —
+`ptmCreateVLAN` would return 1, the handled flag would never set, and op16
+would silently skip the teardown (see the quirks section of
+[xdsl/data_plane.md](xdsl/data_plane.md)).
 
 Scenario sequencing (default run):
 

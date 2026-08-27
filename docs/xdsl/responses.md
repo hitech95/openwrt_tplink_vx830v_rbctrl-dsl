@@ -145,9 +145,12 @@ Parsed by `oal_dsl_msgToChannelStatsTotObj` (`FUN_0032483c`). 7 uint32
 - ~~Undocumented u32 at payload[0x3B]~~ — **RESOLVED**: uptime seconds, only
   filled when link status == 1.
 - ~~Offset 0x06 "reserved"~~ — **RESOLVED**: data path flag (0=ATM, 1=PTM).
-- The DS/US ordering within each metric pair (offsets 0x10–0x34) follows the
-  order values appear in `/proc/tc3162/adsl_stats`; confirm exact DS/US
-  assignment per pair with a live capture.
+  Note: a power-on default that does NOT follow training (session 3 read
+  `Atm` during VDSL2 showtime) — trusted only as a fallback.
+- ~~The DS/US ordering within each metric pair (offsets 0x10–0x34)~~ —
+  **RESOLVED on-target** (session 3): near-end = downstream, far-end =
+  upstream (TrendChip convention); pairs verified against live showtime
+  and asserted by E2E scenario E5.
 
 ---
 

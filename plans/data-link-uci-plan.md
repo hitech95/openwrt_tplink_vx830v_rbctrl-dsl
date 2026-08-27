@@ -1,6 +1,10 @@
 # Data-link configuration & provisioning plan — post session-4
 
-Status: PROPOSED (2026-08-26). Target release: **0.5.0**.
+Status: **IMPLEMENTED (2026-08-27, released as 0.5.0)** — every F-step
+landed and is E2E-verified (E9b validation matrix, ED multi-link, EX
+materialization semantics, EA auto swap; see docs/e2e.md). The
+tester-verified 0.4.2-r2 hardcodes were superseded by F1/F2. Target
+release: **0.5.0**.
 
 Context: session 4 (debug_sessions/fourth) proved the data-plane root cause
 and the working flow. Tester confirmed the dirty build (0.4.2-r2): **op15

@@ -46,7 +46,26 @@ Common options for `daemon` / `selftest` / `sniff`:
 
 `daemon` additionally accepts `--notify <path>`, `--syslog`, and UCI overrides
 (`--annex`, `--line-mode`, `--tone`, `--xfer-mode`, `--vpi`, `--vci`,
-`--encaps`, `--payload`, `--bitswap`, `--sra`, `-t/--transport-vlan`).
+`--encaps`, `--payload`, `--bitswap`, `--sra`, `-t/--transport-vlan`,
+`--link-index`, `--link-vid`, `--link-pbit`).
+
+### Data links (UCI)
+
+Data links are named `network.<name>=ptm|atm` sections — one per link,
+up to 8, each with a stable explicit `index` (transport VLAN =
+`2000 + index`), an optional service `vid`/`pbit` **applied by the
+board** on the PTM bearer, and ATM PVC params for `atm` sections:
+
+```
+config ptm
+  option index '0'
+  option vid  '100'   # service VLAN tagged board-side; absent = untagged
+```
+
+With no sections, a single implicit untagged PTM link at index 0 is
+provisioned. Links are queued while the line is down and materialized
+by the board at showtime (the OEM flow — validated end-to-end by the
+E2E harness and on-target with a working PPPoE session).
 
 ### Selftest
 

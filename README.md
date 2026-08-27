@@ -13,7 +13,8 @@ protocol on mainline OpenWrt.
 | 2 — Board control | **PASSED** | AF_PACKET socket, netlink VLAN mgmt, Board struct with 8 opcodes (QEMU selftest 5/5) |
 | 3 — OpenWrt integration | **PASSED** | UCI config loader, ubus object, procd init, hotplug emitter, LED handler |
 | 4 — Packaging | **DONE** | APK builds, ships binary + init + notify + LED hotplug + uci-defaults |
-| 5 — P4 pcap validation | Deferred | Awaits device deployment |
+| 5 — On-target validation | **PASSED** | Debug sessions 1–4 on production hardware (host pcaps `s3`/`s4`): wire-format fixes verified field-side; session 4 root-caused the dead data plane (untagged PTM bearer → BRAS drop) via on-device pcap sweep, and the fix — op15 queued at line-down + board-side service VLAN — yielded a **working PPPoE link** |
+| 6 — Data-link configuration (0.5.0) | **DONE** | Multi-link UCI sections, queue-at-open provisioning, auto-mode type swap; validated by the E2E harness (real firmware binary + real daemon under qemu-user — E1–E9b, ED, EX, EA all pass) |
 
 ## Repository layout
 
@@ -101,7 +102,7 @@ echo 'src-link rbctl /path/to/this-repo/rbctl-feed' >> feeds.conf
 make package/rbctl-dsl/compile V=s
 ```
 
-Output: `bin/packages/<arch>/rbctl/rbctl-dsl-0.1.0-r1.apk`
+Output: `bin/packages/<arch>/rbctl/rbctl-dsl-<version>-r1.apk`
 
 ## Testing
 
@@ -109,9 +110,17 @@ Output: `bin/packages/<arch>/rbctl/rbctl-dsl-0.1.0-r1.apk`
 
 ```bash
 cd rbctl-feed/rbctl-dsl
-cargo test -p rbctl_proto    # 18 tests — CRC, frame, pack/unpack
+cargo test -p rbctl_proto    # 58 tests — CRC, frame, pack/unpack, board_sim
 cargo test -p af_packet      # 10 tests — BPF, MAC parsing, ethertype
 ```
+
+### E2E harness (real firmware vs real daemon, host-side)
+
+`tests/e2e/run.sh` runs the actual MIPS `remote_board` firmware binary
+against the actual aarch64 daemon under qemu-user, over a veth wire with
+an injected fake DSL driver — every daemon frame is judged by the
+firmware whose logic was reverse-engineered. Scenarios E1–E9b, ED, EX,
+EA all pass. See [docs/e2e.md](docs/e2e.md).
 
 ### QEMU selftest (on-device validation)
 
@@ -123,7 +132,7 @@ make package/rbctl-dsl/compile V=s
 # Or see docs/test.md for manual on-device testing instructions
 ```
 
-The `--selftest` mode validates:
+The `selftest` subcommand validates:
 1. AF_PACKET socket open + BPF filter + interface bind
 2. VLAN lifecycle via netlink (create → up → down → delete)
 3. Board opcode round-trip (expects timeout without hardware)
