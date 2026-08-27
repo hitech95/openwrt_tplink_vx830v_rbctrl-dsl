@@ -296,3 +296,80 @@ Both `remote_board` and `libcmm` create the transport interface (redundantly):
    `vconfig add lan0 <vlanid>` + `setWanIntfFlag`
 
 The daemon replacement needs only one path (the `vconfig`/`ip link` creation).
+
+## Firmware quirks — data-link materialization (sessions 4–5, RE-verified)
+
+Everything below is cited from the EcoNet MIPS `remote_board` binary or
+`tccicmd.ko` (Ghidra project "RemoteBoard Modulus"). Verified
+2026-08-27 unless noted.
+
+### Two materialization paths, one decision table
+
+| op5/op15 arrives… | path | outcome |
+|---|---|---|
+| line DOWN | node queued (`dsl_insertInterfaceList`, always returns 0), **hollow ACK 0** | materialized later by the up-transition: `dslStatusCheckHandler` (2 s poll) → `dslHandleStatusUp` walks the queued list → `vdsl_linkAdd`/`dsl_linkAdd` per node. **The OEM flow — the one the daemon uses (queue-at-open).** |
+| line UP (showtime) | **direct path** in the op15/op5 handler: `apiGetXdslStatus` must parse, `st==1`, `ty==2` (PTM) / `ty==1` (ADSL), `!dsl_isAtmConnection()` | `vdsl_linkAdd`/`dsl_linkAdd` runs immediately; status is its return value |
+
+If the direct path's parse fails, the node is still queued and the ACK is
+still 0 — **ACK 0 never means "materialized"** (hollow ACK).
+
+### `apiGetXdslStatus` and the kmod format — no vendor mismatch
+
+- `tccicmd.ko` `getXDSLState` (.text 0x16250) writes line 1 of
+  `/proc/tc3162/xdsl_stats` with `sprintf` **literals**: `"1:1\n"`
+  (showtime ADSL), `"1:2\n"` (showtime VDSL2), `"1:3\n"` (showtime,
+  unknown type — SoC path), `"0:3\n"` (down).
+- `remote_board` `apiGetXdslStatus` (0x00401e98) `strtok_r`'s on `":"`:
+  token1→status, token2→type (read only when status==1).
+- **The kmod and the daemon agree.** The historical "1 2" parse failure
+  was our E2E fake writing a space separator the real driver never
+  emits — a harness bug, not a vendor bug. `"1:3"` makes the daemon log
+  a warning and correctly fails the `ty` check (direct path skipped).
+- The deferred link is the vendor's *designed* flow, not a defect.
+
+### Handled-flag teardown gate (the phase2 `smuxctl rem` chain)
+
+`vdsl_linkAdd` (0x00408208) returns **`ptmCreateVLAN`'s result**.
+`ptmCreateVLAN` (0x00406094) `waitIntfExists`-polls (50 × 5 ms) three
+interfaces — `nas8_<pvc>`, `eth0.1.<2000+pvc>`, `br<pvc+2>` — and returns
+1 if any is missing. The handled flag (node+0x24,
+`dsl_setNodeHandledFlag` 0x00410140 / `dsl_getNodeHandledFlag` 0x0041006c)
+is set **only when the add returned 0**, by both materialization paths.
+The op16 handler (0x0040994c) then: `delNodeFromInterfaceList` (always) →
+`vdsl_linkDel(pvc)` **only if flag != 0** → `ptmRemoveVLAN` (0x004064f4,
+always returns 0) emits `ifconfig … down`, `brctl delbr`,
+`/userfs/bin/vconfig rem`, `/usr/bin/smuxctl rem nas8_<pvc>`.
+
+Consequence: if materialization half-failed (missing iface), teardown
+silently skips `smuxctl rem`, `l_vidInfo` keeps the slot busy and the
+board's vid-dedup rejects any future link with the same service vid —
+exactly the re-add bug reproduced in the harness before the interface
+pre-creation fix.
+
+### Slot table and limits (`vdsl_linkAdd`)
+
+- `l_vidInfo` @ `DAT_00429820`, 8 slots × 4 bytes: `[0]`=isUsed
+  (0xff free, 8 used), `[1]`=pbit, `[2..3]`=service vid.
+- Dedup keys on the **service vid** (payload bytes [1..2]); `tag_enable=0`
+  maps to vid −1 → **at most one untagged link can ever exist**.
+- Transport VLANs 2000–2007 (`0x7d7`), 8 links max.
+- `ptmCreateMainIntf` (0x00405ee0) always returns 0 (logs when line down).
+
+### smux service-VLAN modes (session-4 verdict, on-target)
+
+`vlan_mode = (service_vid >= 1) ? 3 : 1` — mode 2 (transparent Q-in-Q)
+is unreachable via op15:
+
+| mode | smuxctl semantics | effect |
+|---|---|---|
+| 1 (tag_enable=0) | **strip** any 802.1Q tag on TX | destroyed the tester's host-added VLAN 100 → untagged PADI → BRAS drop (session-4 root cause) |
+| 3 (tag_enable=1, vid=N) | insert/rewrite TCI to N on TX, restore on RX | the working bearer-tag flow (0.4.2-r2, PPPoE verified) |
+
+### Host-harness note
+
+Under qemu-user the board's absolute-path `/userfs/bin/vconfig`,
+`/usr/bin/smuxctl` execs fail (ENOENT) and PATH stubs are no-ops — nothing
+would ever create `nas8_<pvc>`/`eth0.1.<2000+pvc>`/`br<pvc+2>`, so
+`ptmCreateVLAN` would fail by construction. The E2E harness
+(`tests/e2e/inner.sh`) pre-creates all 24 interfaces so the full
+add/teardown/re-add cycle exercises the real board logic.
