@@ -15,5 +15,11 @@ if [ -x /usr/sbin/rbctl-dsl ]; then
 	. /lib/functions/uci-defaults.sh
 	. /usr/share/rbctl/ucidef.sh
 
+	board_config_update
+
 	ucidef_add_rbctl_dsl "lan0.500"
+
+	board_config_flush
 fi
+
+exit 0
