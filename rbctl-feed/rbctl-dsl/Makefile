@@ -6,7 +6,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=rbctl-dsl
-PKG_VERSION:=0.5.0
+PKG_VERSION:=0.5.1
 PKG_RELEASE:=1
 
 PKG_LICENSE:=GPL-2.0-only
@@ -94,9 +94,16 @@ define Package/rbctl-dsl/install
 	# LED hotplug handler — drives the led_dsl UCI LED on HANDSHAKE/TRAINING/UP/DOWN
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/dsl
 	$(INSTALL_BIN) ./files/led_dsl.sh $(1)/etc/hotplug.d/dsl/led_dsl.sh
-	# first-boot UCI defaults — generates network.dsl + network.atm sections
+	# first-boot UCI defaults — enriches network.dsl from board.json
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) ./files/dsl_defaults $(1)/etc/uci-defaults/dsl_defaults
+	# board.json hook — declares dsl.modem (generic) + dsl.rbctl (ours)
+	# at first boot / config regeneration via /bin/board_detect
+	$(INSTALL_DIR) $(1)/etc/board.d
+	$(INSTALL_DATA) ./files/board.d/10-rbctl-dsl $(1)/etc/board.d/10-rbctl-dsl
+	# package-provided ucidef helpers, sourced by our board.d script
+	$(INSTALL_DIR) $(1)/usr/share/rbctl
+	$(INSTALL_DATA) ./files/ucidef.sh $(1)/usr/share/rbctl/ucidef.sh
 endef
 
 $(eval $(call RustBinPackage,rbctl-dsl))
