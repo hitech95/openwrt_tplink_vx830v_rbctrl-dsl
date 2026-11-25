@@ -1,0 +1,46 @@
+# cargo-fuzz harness (nightly): cargo +nightly fuzz run <target> -- -max_total_time=600
+[package]
+name = "rbctl_voip_proto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rbctl_voip_proto = { path = ".." }
+
+# Not part of the main workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "frame"
+path = "fuzz_targets/frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "record"
+path = "fuzz_targets/record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "link"
+path = "fuzz_targets/link.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frame_valid"
+path = "fuzz_targets/frame_valid.rs"
+test = false
+doc = false
+bench = false
