@@ -1,0 +1,19 @@
+[package]
+name = "rbctl_voip_ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "C ABI over rbctl_voip_proto for the baresip module (staticlib + generated header)"
+publish = false
+
+[lib]
+name = "rbctl_voip_ffi"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+rbctl_voip_proto = { workspace = true }
+libc = { workspace = true }
+
+[lints]
+workspace = true

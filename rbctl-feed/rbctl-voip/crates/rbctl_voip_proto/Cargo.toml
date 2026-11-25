@@ -1,0 +1,24 @@
+[package]
+name = "rbctl_voip_proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Sans-I/O protocol core for the VX830v voice board link (DD01/DD02/DD03)"
+publish = false
+
+[lib]
+name = "rbctl_voip_proto"
+path = "src/lib.rs"
+
+[dependencies]
+# CRC-16/ARC: poly 0x8005 reflected (0xa001), init 0, no final XOR.
+crc = { workspace = true }
+# errno values only (EINVAL, EMSGSIZE, ...), so FFI codes match the target ABI.
+libc = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }

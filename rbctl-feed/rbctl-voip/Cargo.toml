@@ -1,0 +1,54 @@
+# rbctl-voip — Cargo workspace root (VoIP side of the rbctl family).
+#
+# Protocol, transport and FFI crates for the VX830v voice board link
+# (EtherTypes 0xDD01/0xDD02/0xDD03 on the management VLAN), plus the
+# rbctl-voicectl bring-up tool. The library is embedded in the baresip
+# module through `rbctl_voip_ffi` (staticlib + generated C header).
+#
+# Licence: GPL-2.0-or-later. The library is loaded into baresip next to
+# OpenSSL 3 (Apache-2.0); every linked crate must stay compatible with
+# GPLv3. `cargo deny check` (deny.toml) enforces the allow list.
+[workspace]
+resolver = "2"
+members = [
+    "crates/rbctl_voip_proto",
+    "crates/rbctl_voip_net",
+    "crates/rbctl_voip_ffi",
+    "crates/rbctl_voicectl",
+]
+exclude = ["crates/rbctl_voip_proto/fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "GPL-2.0-or-later"
+authors = ["rbctl-voip contributors"]
+
+[workspace.dependencies]
+libc = "0.2"
+crc = "3"
+log = { version = "0.4", features = ["std"] }
+nanologger = { version = "0.1", features = ["log"] }
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
+# Shared with rbctl-dsl; relicensed MIT so it can link into baresip.
+af_packet = { path = "../rbctl-dsl/crates/af_packet" }
+# Workspace-internal crates.
+rbctl_voip_proto = { path = "crates/rbctl_voip_proto" }
+rbctl_voip_net = { path = "crates/rbctl_voip_net" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

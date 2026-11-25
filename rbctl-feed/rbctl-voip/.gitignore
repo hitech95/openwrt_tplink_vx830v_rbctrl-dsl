@@ -1,0 +1,6 @@
+/target
+!/Cargo.lock
+!/crates/*/fuzz/Cargo.lock
+/crates/*/fuzz/target
+/crates/*/fuzz/corpus
+/crates/*/fuzz/artifacts

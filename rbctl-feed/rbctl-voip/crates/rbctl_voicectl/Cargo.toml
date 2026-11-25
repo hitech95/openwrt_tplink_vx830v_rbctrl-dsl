@@ -1,0 +1,29 @@
+[package]
+name = "rbctl_voicectl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Bring-up and diagnostic CLI for the VX830v voice board link"
+publish = false
+
+[[bin]]
+name = "rbctl-voicectl"
+path = "src/main.rs"
+
+[features]
+# Test-only: `--device fixture` reads/writes frames on the datagram socket
+# passed in RBCTL_VOIP_TEST_FD instead of AF_PACKET. Never enabled in
+# release packages.
+fixture = []
+
+[dependencies]
+rbctl_voip_proto = { workspace = true }
+rbctl_voip_net = { workspace = true }
+libc = { workspace = true }
+log = { workspace = true }
+nanologger = { workspace = true }
+clap = { workspace = true }
+
+[lints]
+workspace = true
