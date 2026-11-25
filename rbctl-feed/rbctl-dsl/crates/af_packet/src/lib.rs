@@ -92,10 +92,11 @@ pub struct RawSocket {
 pub struct RxPacket<'a> {
     pub data: &'a [u8],
     pub src_mac: [u8; 6],
-    /// `sockaddr_ll.sll_pkttype` — wire direction and special types.
-    /// `0` = PACKET_OUTGOING (our own TX echoed back), `1` = PACKET_INCOMING,
-    /// `2` = PACKET_BROADCAST, `3` = PACKET_MULTICAST. Sniff tools use this to
-    /// label TX vs RX.
+    /// `sockaddr_ll.sll_pkttype` — wire direction and special types
+    /// (`<linux/if_packet.h>`): `0` = PACKET_HOST (addressed to us),
+    /// `1` = PACKET_BROADCAST, `2` = PACKET_MULTICAST, `3` = PACKET_OTHERHOST,
+    /// `4` = PACKET_OUTGOING (our own TX echoed back to an `ETH_P_ALL`
+    /// socket). Sniff tools use this to label TX vs RX.
     pub pkt_type: u8,
 }
 
