@@ -117,17 +117,19 @@ EtherTypes**:
 | EtherType | Protocol | Magic | Used by |
 |-----------|----------|-------|---------|
 | `0x88B5` | Board management (OEM + our protobuf) | `0x11`/`0x10` (OEM), `0x50` (protobuf) | `remote_board` |
-| `0x88B6` | cmm message bus | varies | `libcmm.so` clients (voip_client, httpd, cos) |
-| `0xDD01` | VoIP proxy (direction A) | `0x11` | `voip_server_proxy` |
-| `0xDD02` | VoIP proxy (direction B) | `0x11` | `voip_server_proxy` |
+| `0x88B6` | cmm message bus | varies | management traffic |
+| `0xDD01` | Host request and peer status reply | host `0x11`, peer `0x10` | voice proxies |
+| `0xDD02` | Peer event and host status reply | host `0x11`, peer `0x10` | voice proxies |
+| `0xDD03` | RTP/RTCP datagrams in either direction | host `0x11`, peer `0x10` | voice proxies |
 
-All four run on `lan0.500` (VLAN 500), but on different EtherTypes — no
-collision. The VoIP proxy uses two unidirectional channels (`0xDD01` and
-`0xDD02`), both with magic `0x11`. `voip_client` connects via the cmm bus
-(`0x88B6`), not raw sockets.
+On the master, `voip_client` exchanges DSP records with `voip_server_proxy`
+over the Unix stream socket `/var/tmp/sock_CM_DSP`. The proxy owns the three
+voice EtherTypes on `lan0.500` (VLAN 500). DD01 and DD02 identify the
+transaction initiator: each reply uses the same EtherType as its request.
+See the [board-link contract](../docs/voip/board-link.md) and [Econet peer](../docs/voip/peer.md).
 
 Our protobuf protocol uses EtherType `0x88B5` + magic `0x50` ('P' for
-Protobuf), which is distinct from all three existing protocols.
+Protobuf), distinct from the OEM management markers and all three voice EtherTypes.
 
 ### Protocol auto-detection
 
