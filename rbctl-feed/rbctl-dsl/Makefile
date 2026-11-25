@@ -9,7 +9,7 @@ PKG_NAME:=rbctl-dsl
 PKG_VERSION:=0.5.1
 PKG_RELEASE:=2
 
-PKG_LICENSE:=GPL-2.0-only
+PKG_LICENSE:=GPL-2.0-only MIT
 PKG_MAINTAINER:=rbctl-dsl contributors
 
 # Trigger the Rust host toolchain bootstrap (rustc + cargo) on first build.

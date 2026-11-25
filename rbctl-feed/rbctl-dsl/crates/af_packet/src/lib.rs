@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `AF_PACKET` raw Ethernet socket for Linux.
 //!
 //! Creates a `SOCK_RAW` socket bound to a specific network interface. A
