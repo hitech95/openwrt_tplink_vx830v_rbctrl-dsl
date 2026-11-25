@@ -201,6 +201,23 @@ impl RawSocket {
         self.local_mac
     }
 
+    /// Switch the socket to non-blocking mode (`O_NONBLOCK`), so it can be
+    /// driven by an external `poll()`/event loop. `recv` then returns
+    /// `ErrorKind::WouldBlock` when no frame is queued.
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        let fd = self.fd.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let flags = if nonblocking {
+            flags | libc::O_NONBLOCK
+        } else {
+            flags & !libc::O_NONBLOCK
+        };
+        check(unsafe { libc::fcntl(fd, libc::F_SETFL, flags) })
+    }
+
     pub fn set_timeout(&self, timeout: Duration) -> io::Result<()> {
         let tv = libc::timeval {
             tv_sec: timeout.as_secs() as _,
@@ -268,6 +285,14 @@ impl RawSocket {
             src_mac: sa.sll_addr[..6].try_into().unwrap(),
             pkt_type: sa.sll_pkttype as u8,
         })
+    }
+}
+
+/// Expose the descriptor for `poll()`/`epoll`; ownership stays with the
+/// `RawSocket`.
+impl AsRawFd for RawSocket {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.fd.as_raw_fd()
     }
 }
 
