@@ -62,6 +62,29 @@ S:421b30 has `(1,0)` for host locale 0 and `(9,0)` for locale 6. The first word 
 
 In the seven static `slic3.ko` country mappings listed by `nm` (`le9622`, `le9641` default, `le9651`, `le9652`, `le9662`, `zl88601`, `zl88801`), row 9 is `ETS-ETSI`. Checked ELF relocations at **table base + 100 × profile ID + 72** (decimal byte offsets): within each model, rows 1 and 9 point to the **same** AC coefficient symbol, named `AC_FXS_*600R_DEF*`. E.g. `le9622_country_mapping` at `.data+0x170` uses `AC_FXS_ZL880A_RF14_600R_DEF` for both. This is high-confidence evidence about the compiled defaults, not a readback of the installed SLIC, a measured impedance, or proof of ETSI conformance. `libadam.so` distinguishes a `SLIC_IMPC_CTR21` enum from `SLIC_IMPC_600ohms`; enum presence does not show that the running driver selected it. Identify the active SLIC and any runtime profile override before treating a locale change as an impedance change. A CID display test verifies receiver interoperability; to distinguish V.23 from Bell 202, verify the actual modulation/configuration separately.
 
+## ATA feature reachability (M4 evaluation basis)
+
+The Econet board firmware is fixed (D4), so an ATA feature is available only if the stock
+`voip_server` accepts it as a DD01 command, or already reports it on DD02/DD03.
+Method as above, plus `llvm-objdump` of the stripped MIPS `voip_server`
+(`gp = 0x429d00`) and of `libadam.so`, whose symbols and partial DWARF are kept.
+Command numbers are decimal. **S:** = `voip_server`, **L:** = `libadam.so` offsets.
+
+**Host commands the peer actually dispatches.** Jump table S:411180, 94 entries, default `408458` (log and ignore):
+0, 1, 2, 4, 5, 6, 7, 8, 10, 11, 12, 13, 15, 16, 17, 18, 19, 23, 31, 91, 92, 93.
+Not dispatched as host commands: 3, 9, 14, 20, 21, 22, 24, 74. Of these, 20/21/22/24 are DD02 event codes from the peer, not host commands. The internal operation table is at S:421c00, indexed by the operation the dispatcher stores at `msg+0`; the handler receives `msg+8` (`sp+0x158`).
+
+| Feature | Evidence | Reachable via protocol | Confidence |
+|---|---|---|---|
+| **Call-waiting caller ID (type II)** | TONE_PLAY selector 31 → internal tone 7 (S:41134c). In `mtkTonePlay` (S:402838), tone 7 branches to S:402ba4, which calls `adamChanPlayType2Cid(1, line, &cache[line])` on the 304-byte per-line cache at S:422cb8 that CID_PLAY fills. So: CID_PLAY (fill cache, no transmission) then TONE_PLAY 31. | **Yes.** CAS/ACK handshake and display depend on the handset. | High (path); handset behaviour unverified |
+| **Per-line gain** | CHANNEL_OPEN (S:408a80) copies body words `+04`/`+08` into the message. The channel-open operation (S:402e80) builds the `adamChanConfig` parameter with mask 3 and sets byte 4 = `(int8)low_byte(+08) − 3`, byte 5 = `(int8)low_byte(+04) + 2` (S:402f38–402f78). In L:`chanConfigMtk`, bytes 4/5 go to SLIC op `+0x54` = `slic_kpc_audioDigitalGain(listen, speak)` (L:10d30, vtable L:f298). Analog gain (bytes 2/3, op `+0x50`, range −24..24 at L:108f0) is left 0. Offsets `+04`/`+08` carry the OEM endpoint provisioning IDs 0xa/0xb ([controller-startup](controller-startup.md#channel_open-body-0x2c-meaningful-bytes)). | **Yes**, per CHANNEL_OPEN: `+08` → receive (toward handset), `+04` → transmit (toward network). With zero words, effective digital gain is −3 receive / +2 transmit. Units (dB assumed) and range unverified. | High (data flow); units medium |
+| **Rotary / pulse dialling** | L:`_gdiEventTrans` logs `pulse dial, event=%d code=%d` (L:15608) and emits event class 2 / kind 1, the same as the DTMF digit branch (L:153e8). Detection requires `slic_hookThreshold_t.pulseEnable` (offset 40, DWARF). The peer fills that struct for `adamInfcConfigHookTs` with only `flashMin`/`flashMax`/`releaseMin` (S:4036c0–4036d8); no DD01 field reaches `pulseEnable` or `pulseTime`. Digit codes map through S:411c98 (0–9 → `'0'`–`'9'`, 10 → `*`, 11 → `#`). **Live 2026-11-26** (PHONE2, rotary, acknowledging monitor): two dial sequences produced only HOOK_OFF/HOOK_ON, no digit, flash or per-pulse event. | **No.** Pulse breaks are filtered and not reported; no host path enables detection. | High |
+| **Message waiting** | VMS_STATUS (93, S:4087b0): body word 1/2 sets/clears a flag for line 0 (S:422f54), 3/4 for line 1 (S:422f50). The only reader is TONE_PLAY (S:408844, 408e54): with the flag set, selector 4 (dial) becomes 19 → internal 14 (stutter dial). The peer contains an ETSI MWI element builder (`pncap_pie_set_mwi_am`, S:409c78), but its wrapper (S:409744) has no code or data reference except `.pdr`. | **Stutter dial tone: yes** (VMS_STATUS, or TONE_PLAY 19 directly). **Visual MWI (FSK/lamp): no** path found. | High |
+| **G.722 board leg** | RTP_ACTIVE codec selector 3 → ADAM G.722 (see table below). Whether the analog path samples at 16 kHz is physical. | Selectable; benefit is a live measurement (T4.8). | High (selection) |
+| Three-way conference | 15/16 dispatched (S:40880c/4087ec) → internal operations 0x17/0x18 with line and second word. | Yes (feature deferred) | High (dispatch) |
+| Port LED | SLIC_CONTROL (23, S:408774): body word 1 selects sub-operation 0–14; 2/14, 3, 4/5, 6/7 build `echo FXS<line+1> <a> <b> > /proc/tp_led` (S:411540) and call `system()`; others are ignored. Not a SLIC/gain control. | Yes; visible effect unverified | High (code); effect unknown |
+| Line statistics | 91/92 → internal operations 0x1b/0x1c (FXS statistics get/reset). | Yes (diagnostics) | High (dispatch) |
+
 ## RTP addressing and codec limits
 
 | Finding | Static evidence | Confidence |

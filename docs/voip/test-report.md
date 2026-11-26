@@ -1,5 +1,170 @@
 # VX830v FOSS voice milestone results
 
+## M3 review follow-up (host)
+
+13/13 module CTests passed, including rejection of a runtime tone with a successful subsequent call,
+one dropped synchronous channel-open send followed by redial, timeout followed by warm re-attach in
+the same process, and opt-in board-clock ringback/media with duplicate suppression. Host and AArch64
+module builds used GNU C11 and `-Wall -Wextra -Wshadow`. FFI clippy, C smoke and generated-header
+comparison passed. These results are host evidence for the review changes, not a new hardware run.
+
+## M3 live: PHONE2 stability and latency
+
+### Playout pacing and wired-LAN jitter-buffer comparison
+
+Repeated the 60-chirp PHONE2 measurement after anchoring the board player to a
+monotonic 20 ms schedule. Both runs used the same module, PC sender, Scarlett
+reference and 20 ms PCMA frames. Matched the 60 successive chirp onsets on the
+router between LAN ingress and slot-1 DD03 egress during each acoustic run.
+No audio file was saved.
+
+| baresip RTP jitter range (packets) | Router ingress→DD03 min / median / max | Above 150 ms | Earpiece minus CH2 median / max |
+|---|---|---|---|
+| Default 5–10 | 118.7 / 155.6 / 188.8 ms | 34/60 | 269.9 / 289.4 ms |
+| Wired-LAN trial 2–8 | 54.4 / 91.4 / 128.0 ms | 0/60 | 204.4 / 244.3 ms |
+
+Both calls: 60/60 acoustic matches, no clipped samples, zero kernel capture
+drops, no missed playout periods, maximum callback lateness 1 ms. The second
+run's router delay still rose from 58.4 to 128.0 ms. This comparison isolates
+the change in buffer profile with the pacing change in both builds. The
+downlink met the master budget over this minute on the wired LAN; sustained
+delay growth, uplink latency and conversational echo remain open. Internal
+queue occupancy was not sampled. Compare longer-duration source/board clock
+rates and queue depth before generalizing.
+
+### Acoustic follow-up: PHONE2 earpiece, Scarlett Solo
+
+2026-11-26: a temporary PC SIP endpoint answered PHONE2 and sent PCMA/PT 8,
+20 ms frames made from the PipeWire left output monitor. One 100 ms chirp
+(650–2400 Hz) per second for 60 s. Scarlett CH1 mic at the earpiece; headphone
+output into balanced mono CH2 as an electrical reference; Direct Monitor off.
+Both inputs and the digital source were captured together at 48 kHz and matched
+at 8 kHz. Operator confirmed chirps from the earpiece. All 60 matched, no
+clipped samples, no audio file saved. In-call CH2 lagged the digital monitor
+by 33.375–33.750 ms (median 33.625 ms).
+
+| Difference in arrival time | First | Median | Max | Last |
+|---|---:|---:|---:|---:|
+| Earpiece mic minus CH2 electrical reference | 157.1 ms | 296.9 ms | 357.3 ms | 316.8 ms |
+| Earpiece mic minus digital source | 190.9 ms | 330.5 ms | 390.6 ms | 350.5 ms |
+
+The acoustic figures include the PC injection path, LAN, router, board and
+handset; they do not isolate master-only delay. Delay often changed in units
+of one 20 ms packet. No simultaneous router timestamps or conversational echo
+check in this run. T3.6 remains open on the prior master-only measurement.
+
+2026-11-26, stock peer, line/slot 1, warm Italy profile 10, PCMA/20 ms.
+
+**T3.7 — pass.** The same router baresip process (PID 5915) completed 31
+outgoing calls to an Asterisk answer/tone/echo extension. Both ends counted 31;
+the PBX ended with zero active calls and channels. DD01 header monitoring found
+32 acknowledged opens/closes on slot 1, 31 acknowledged activations and 31
+deactivations. The extra open/close without media was not counted as a call;
+the operator reported dial mistakes. 442 control frames, zero kernel drops.
+No monotonic growth in measured idle RSS or descriptors. Slot ACKs substitute
+for the not-yet-implemented M5 ubus status interface.
+
+| Completed calls | Idle fds | Idle sockets | VmRSS (KiB) |
+|---:|---:|---:|---:|
+| 0 | 12 | 6 | 6552 |
+| 5 | 12 | 6 | 6608 |
+| 17 | 12 | 6 | 6584 |
+| 31 | 12 | 6 | 6584 |
+
+**T3.6 — current build misses the latency target.** On a separate 40-second
+PBX tone-only call (no Echo application), matched 40 active-tone onsets of an
+alternating 300/500 ms tone pattern. Compared first above-threshold 20 ms PCMA
+frames from LAN RTP ingress with slot-1 DD03 RTP egress using the router's own
+packet timestamps. Master downlink delay rose from 105.1 to 237.9 ms, median
+165.7 ms; 26/40 onsets exceeded 150 ms. This isolates a master segment rather
+than estimating one-way latency by halving a round trip. It excludes analog
+and uplink delay. No audio retained. Operator heard the pattern clearly and no
+noticeable delay on that call, but noted a large voice delay in the earlier
+deliberate Echo test. This is not a two-person echo assessment. Investigate
+20 ms playout scheduling and buffer growth, then repeat and check real speech.
+
+## M3 live calls: PHONE2 and Asterisk
+
+2026-11-26. One physical line (PHONE2/slot 1), Italy profile 10, router baresip
+3.16.0, LAN Asterisk 22.5.2, PCMA/8000 mono. The PBX used a synthetic account
+and an Echo application, not a recording. Temporary services and logs removed.
+
+| Gate | Evidence | Result |
+|---|---|---|
+| T3.2 outgoing | Handset dialled `600#`; baresip connected to extension 600, received 180 Ringing, then answer. Operator heard dial tone, ringback and their own speech returned through the PBX. | Pass |
+| T3.3 incoming | PBX originated a call, PHONE2 rang and displayed the expected synthetic number. Lifting answered; operator confirmed speech returned via the PBX. | Pass |
+| T3.4 release | Handset hangup and explicit PBX channel hangup both terminated established calls. After remote hangup the same receiver redialled successfully without restarting baresip. On redials: router-originated BYE and status-zero DD01 acknowledgements for RTP_DEACTIVE and CHANNEL_CLOSE on slot 1; Asterisk ended at zero active channels. Remote release was observed via PBX/UA state and slot reuse, not a separate remote-BYE capture. | Pass |
+| T3.5 in-call DTMF | RFC 4733 on outbound, SIP INFO on inbound. For each mode Asterisk logged the four requested test keys once each and in order on the PJSIP channel. | Pass |
+
+**Follow-up:** after PBX hangup the off-hook receiver was silent; it currently has
+no disconnect indication. This did not prevent release or redial. The tone is tracked in [M4, test T4.9](../../plans/voip-baresip-plan.md#m4--two-lines-and-complete-ata-feature-set). Baresip also
+reported jitter-buffer drops around echoed DTMF. T3.6 needs a calibrated latency
+measurement and normal (non-Echo) listening. T3.7's 30-call run was deferred.
+
+## M3 call integration (host)
+
+2026-11-26: **9/9 CTests passed**, including two calls between separate baresip
+3.16.0 processes with Unix-datagram board fixtures. Caller fixture on line 0
+lifted, received channel open and dial-tone selector 4, and dialled `202#`.
+The called extension on line 1 received CID number `101` with selection mask 2,
+and ring start; the caller received nonconstant ringback audio. Answer by hook
+event stopped ringing, and each fixture received the other's distinct 160-byte
+PCMA payload over the SIP/RTP bridge. Caller-initiated and callee-initiated
+hangup each released both slots. The non-fixture AArch64 module also built.
+No physical/PBX call or acoustic check in this run. [Live procedure](../../rbctl-feed/rbctl-voip/modules/rbctl_voip/README.md#live-call-checks-t32t34).
+
+## M3 live: T3.1 board ready and PBX registered
+
+**Pass, 2026-11-25.** The AArch64 OpenWrt master ran baresip/libre 3.16.0 and
+the non-fixture `rbctl_voip.so` from a private temporary directory. The module
+attached to the stock Econet peer over `lan0.500` (`DSP running`) and logged
+`rbctl_voip: board ready (warm, locale 10)`. In the same 10-second run, a
+synthetic SIP account received `200 OK` over UDP from a LAN Asterisk 22.5.2
+PBX with one binding. Asterisk's `pjsip show contacts` independently showed
+the router contact before baresip shut down normally. This covers warm startup
+and registration, not a call or an on-target cold boot.
+
+Built with the OpenWrt Cortex-A53 GCC 14.4 musl toolchain and the target Rust
+FFI archive. No package or service was installed. The temporary PBX was stopped
+and the temporary router runtime/configuration removed; no handset actions or
+packet captures. SDK packaging remains T5.1.
+
+## M3 host preflight
+
+**Current startup implementation: 7/7 host CTests passed.** Real baresip/libre
+3.16.0 registered with a loopback registrar while a Unix datagram fixture checked
+the ordered DSP commands and event acknowledgements. Cold (locale 10): SLIC
+completion, DSP defaults, fresh DSP start completion and four slot defaults.
+Warm (locale 7): RTP deactivate and channel close on all four slots, SLIC/DSP
+defaults and four slot defaults, with no DSP start. Both reported board ready.
+Missing attach state, missing SLIC completion, missing fresh DSP start completion,
+and rejection of the final slot default each prevented readiness while SIP still
+registered. The seventh test checks board-link ownership and transport errors.
+Target/PBX verification is recorded in the live T3.1 result above.
+
+**Historical scaffold run:**
+
+2026-11-25, Linux x86-64: **2/2 CTests passed** with upstream baresip/libre
+3.16.0 and the Rust FFI static archive. `board_lifecycle` exercised bind, duplicate
+bind, a failed DD01 send through the real link and callback, double close and
+rebind. `baresip_registration_smoke` ran the actual baresip executable: a synthetic
+account registered with a loopback UDP registrar (200 OK, one binding), while
+the loader separately reported `ENOSYS` for `rbctl_voip.so`, as expected from
+the scaffold. Baresip's own “ready” message does not imply board readiness.
+No handset, router media or provider credentials were used in that scaffold run.
+
+## T4.21 — rotary dialling (early evaluation)
+
+2026-11-26, PHONE2 (line 1), operator's rotary handset, locale 10. Temporary `rbctl-voicectl` build (SHA-256 `3119b49a…4a18`, same protocol code as T2.16) in router tmpfs; DD02-only tcpdump; all files removed afterwards. Digit values were decoded from the capture (the CLI does not print them).
+
+| Run | Master | Observed DD02 | Note |
+|---|---|---|---|
+| 1 | Monitor had exited; events unacknowledged | HOOK_OFF, three DTMF_START/END pairs all with value 35 (`#`), HOOK_ON; each frame sent 3× | Queue stalled without ACKs. Values do not correspond to the dialled digits; origin unexplained, not counted. |
+| 2 | Acknowledging monitor | HOOK_OFF, HOOK_ON 20.5 s later; no other event | Operator dialled 1–0 |
+| 3 | Acknowledging monitor | HOOK_OFF, HOOK_ON 7.3 s later; no other event | Operator dialled 5, 0 |
+
+**Result: unsupported by the stock peer.** Pulse breaks produce neither digit nor hook/flash events. The peer never sets the driver's `pulseEnable` and has no DD01 field for it ([peer.md](peer.md#ata-feature-reachability-m4-evaluation-basis)); the master cannot decode pulses from debounced hook state.
+
 ## M2.1 closure
 
 2026-11-25. **T2.17 passed** on the stock Econet peer via `lan0.500`, with the same Rust CLI SHA-256 as T2.16. Operator confirmed the handset observations. M2.1 closed with the operator-approved T2.16 exception: the tested CLI uses dynamic musl; the full OpenWrt SDK package build remains a T5.1 gate.
