@@ -33,6 +33,7 @@ discovery, dependency resolution, installability or service startup.
 | T5.4–T5.5 | Implement the `rbctl_voip_ubus` module and §8.3 methods/events on the libre loop. | Redacted status/events in order for a call; `dial` and `hangup` operate on the selected line. |
 | T5.6–T5.7 | Verify procd startup with the board VLAN available, then exercise the rpcd ACL. | After reboot: one service, registered, both lines ready. Unauthenticated HTTP RPC cannot dial. |
 
-M4 carry-over stays tracked in the [bench queue](m4-bench.md): T4.10 tone
-sign-off, T4.14 caller ID (parked), and T4.20 two-line drift/echo. No M5
-acceptance result depends on treating any of those as passed.
+Before choosing the UCI playout-clock default, run [T4.20](m4-bench.md#t420-live-comparison).
+`timer` remains the provisional default. T4.10 is accepted as evaluated, T4.14
+as partial (Q8 parked). For T5.6, the module now retries first attach even
+before the board has ever been ready; the host regression is not a reboot pass.

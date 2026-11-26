@@ -517,7 +517,7 @@ Prerequisites (implementation, not tests):
 | T4.22 | MWI | `message-summary` NOTIFY waiting → stutter dial tone (TONE_PLAY 19, or VMS_STATUS flag) on mapped lines, cleared when no messages. Visual MWI (FSK/lamp) is unsupported by the peer (peer.md) and not tested |
 | T4.23 | Front-panel FXS state via master-side OpenWrt LED hotplug, like DSL | Existing green/red FXS indicators follow aggregate board, registration, ringing and active state. Hanging up one of two calls leaves the active indication; the last hangup restores idle. Peer command 23 is diagnostic only. |
 
-Exit: T4.1–T4.23 pass or carry a recorded evaluation decision (T4.8, T4.14 CW CID, T4.18 units, T4.19 fallback, T4.21, T4.23);
+Exit: T4.1–T4.23 pass or carry a recorded evaluation decision (T4.8, T4.10 tone labels, T4.14 partial CID per Q8, T4.18 units, T4.19 fallback, T4.21, T4.23);
 feature-status.md describes the user-visible behaviour.
 
 ### M5 — OpenWrt integration
@@ -599,7 +599,7 @@ Move stable conclusions into `docs/voip/*` and leave a pointer here.
 | M2 Bring-up | done | 2026-11-25 | 2026-11-25 | Uncommitted | [8/8 passed](../docs/voip/test-report.md#m2-closure); T2.4 caller number displayed. Extended CID tracked separately. |
 | M2.1 Rust port | done | 2026-11-25 | 2026-11-25 | `feature/rbctl-voip` (workspace); `becbc9e`, `c96803a`, `0b79262` (af_packet) | [Hardware parity and closure](../docs/voip/test-report.md#m21-closure). C prototype retired; T2.16 accepted with SDK build deferred to T5.1. |
 | M3 Single call | done | 2026-11-25 | 2026-11-26 | `feature/rbctl-voip` | T3.1–T3.5 and T3.7 passed live. T3.6 moved: latency growth and echo → T4.20, ≤150 ms target → T6.8 (§13.4). |
-| M4 Two lines + features | in progress | 2026-11-26 | | working tree | T4.1–T4.7, T4.9, T4.11–T4.13, T4.15–T4.17, T4.22–T4.23 live criteria met. T4.8, T4.18, T4.19, T4.21 evaluated. Open: T4.10, T4.14 (parked), T4.20. [Bench queue](../docs/voip/m4-bench.md). |
+| M4 Two lines + features | in progress | 2026-11-26 | | `79cdad2`–`f56d948` | 16 gates passed live. T4.8, T4.10, T4.18, T4.19, T4.21 evaluated; T4.14 accepted partial (Q8 parked). Remaining exit gate: [T4.20 two-clock comparison](../docs/voip/m4-bench.md#t420-live-comparison). |
 | M5 Integration | preparation only | 2026-11-26 | | working tree | [SDK/package handoff](../docs/voip/m5-integration.md). T5.1–T5.7 not run. |
 | M6 Hardening | not started | | | | |
 
@@ -742,6 +742,8 @@ All entries below used an **uncommitted working tree**. The base column identifi
 
 | Date | Section | Change | Reason | Approved by |
 |---|---|---|---|---|
+| 2026-11-26 | §9 M4 exit, T4.10 | Accept both-port sweep and measured cadence/frequency, with individual listening labels only where observed. | No additional sweep needed for v1. | User review |
+| 2026-11-26 | §9 M4 exit, T4.14 | Accept partial: number, withheld and unavailable displayed. Timestamp missing on VX830v despite same handset displaying it on POTS; ordinary name unknown. Q8 stays open, investigation parked. CW CID off by default. | No attribution from a board ACK; type-II signal uncomfortably loud. | User review |
 | 2026-11-26 | §8.1, §9 T4.18 | Corrected TX/RX word mapping; accept per-port raw steps rather than a ±1 dB pass. | Board gain has a measured effect; tip/ring reference setup unavailable. | User |
 | 2026-11-26 | §7, §8.1, §9 M4 | M4 evaluations limited to what the stock peer exposes (D4). Static check (peer.md): CW CID, board gain, stutter dial reachable; visual MWI not; rotary likely; added T4.23 port LED. Gain uses CHANNEL_OPEN, software fallback only. | Board firmware is fixed. | User |
 | 2026-11-26 | §7, §8.1, §9 M3/M4/M6 | T3.6 removed from M3: latency growth and echo kept as M4 gate T4.20, ≤150 ms latency tuning moved to M6 T6.8. M4 rewritten as complete analog-to-SIP ATA (T4.10–T4.22: tone plan, timers, hold, full CID, distinctive ring, multi-line accounts, registration dependency, gain, fax passthrough, pulse-dial and MWI evaluation); advanced services stay deferred. | Close M3 on functional criteria; v1 must behave like a commercial ATA. | User |
@@ -758,6 +760,10 @@ All entries below used an **uncommitted working tree**. The base column identifi
 | 2026-11-25 | — | No deviation; §§1–12 unchanged. | M1 held at the §9 M0 gate. | — |
 
 ### 13.5 Session log
+
+#### 2026-11-26 — M4 checkpoint and boot review
+- Committed module, bench tools and evidence separately. Initial attach now retries (1/2/4/8 s capped, reset on ready); the delayed-board fixture reaches ready without restarting baresip. CID disabled now clears the date too. All 33 host CTests passed; router module cross-built. Real cold boot remains T5.6.
+- §9 exit decisions recorded above. Keep T4.20 in M4, compare timer and board on hardware before selecting the M5 default. T4.16 remains a functional pass; the loud burst remains unexplained. Other review follow-ups: bound the LED worker wait on unload, and simplify dense call paths as touched.
 
 #### 2026-11-26 — Gain disposition and M5 preparation
 - Recorded the T4.18 electrical follow-up. T4.10 and T4.20 remain open; T4.14 attribution is parked. Prepared the [M5 integration handoff](../docs/voip/m5-integration.md) from the feed recipe and local target configuration. No M5 gate run; no change to M5 criteria in §§1–12.

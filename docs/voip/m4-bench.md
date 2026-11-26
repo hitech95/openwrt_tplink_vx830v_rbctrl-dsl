@@ -6,8 +6,27 @@ do not replay these to resolve the earlier "silent or short" ambiguity. See
 [durations and evidence scope](peer.md). The full sweeps already exist; a
 strict both-port ear sign-off must distinguish measured-only entries from
 individual listening observations. For T4.14, PHONE1 already displays CID timestamps
-on POTS. Investigate the VX830v date parameter (peer serializer or isolated
-on-hook CID decode); ordinary caller-name support remains unknown.
+on POTS. T4.10 is accepted as evaluated; T4.14 is accepted partial. Attribution
+of the missing timestamp and ordinary caller-name support are parked under Q8.
+
+## T4.20 live comparison
+
+Run two independent calls concurrently for ten minutes with `timer`, then repeat
+with `board`. Keep accounts, PCMA profile, jitter settings and zero gains the
+same. Keep `cw_cid` off. Start the clock once both calls carry media. For drift,
+keep the handsets off-ear; send distinct quiet markers from the two SIP endpoints
+without returning microphone audio. Timestamp each marker at SIP ingress and at
+its matching DD03 slot on the same router clock. For each slot record first- and
+last-minute median delay, marker counts and the signed difference; note packet
+loss and buffer depth alongside them. Missing markers are not zero delay.
+
+Compare each port separately to the 20 ms criterion. Echo is a separate
+observation: whether each talker hears delayed self-speech, at both ends of
+both calls. Do not recreate the at-ear dual-echo loop; if ordinary conversation
+cannot be checked, report drift alone and leave echo open. Give instructions and
+await an explicit Ready before each live phase. Neither clock has a T4.20 result yet.
+
+## Earlier bench results
 
 **T4.19 evaluated:** [live CED fallback](test-report.md#t419-live-fax-answer-tone-fallback) passed on an existing G.711 call. End-to-end document delivery remains untested.
 
