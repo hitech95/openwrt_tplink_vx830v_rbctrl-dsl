@@ -64,6 +64,11 @@
 typedef struct rbctl_voip_link rbctl_voip_link;
 
 /*
+ Opaque owner of the three nonblocking packet sockets.
+ */
+typedef struct rbctl_voip_socket rbctl_voip_socket;
+
+/*
  Frame writer supplied by the embedder (e.g. AF_PACKET `sendto`).
 
  Must write `len` bytes of `frame` synchronously and return 0, or a
@@ -448,6 +453,38 @@ int rbctl_voip_record_encode(uint8_t *out, const rbctl_voip_record *rec, int fro
  `rec` writable; `p` readable for `len` bytes.
  */
 int rbctl_voip_record_decode(rbctl_voip_record *rec, const uint8_t *p, size_t len, int from_peer);
+
+/*
+ Open a Linux voice transport; returns 0 or negative errno. The three fds
+ are borrowed (do not close); unregister them before freeing the owner.
+ # Safety
+ `iface` is a NUL-terminated interface name. `out`, `mac[6]`, and `fds[3]`
+ must be separate writable buffers. Outputs are valid on success only.
+ */
+int rbctl_voip_socket_open(const char *iface, rbctl_voip_socket **out, uint8_t *mac, int *fds);
+
+/*
+ Write one complete host frame; compatible with the link send callback.
+ # Safety
+ `ctx` is a live socket owner, exclusively accessible during this call;
+ `frame` is readable for `len` bytes.
+ */
+int rbctl_voip_socket_send(void *ctx, const uint8_t *frame, size_t len);
+
+/*
+ Receive one frame, returning its length, 0 when idle, or negative errno.
+ # Safety
+ `s` is a live, exclusively accessible socket owner. `frame` is writable
+ for RBCTL_VOIP_FRAME_MAX bytes and does not overlap `s`.
+ */
+int rbctl_voip_socket_recv(rbctl_voip_socket *s, uint8_t *frame);
+
+/*
+ Close all three fds. NULL is ignored.
+ # Safety
+ `s` must be a unique handle returned by socket_open and not used afterwards.
+ */
+void rbctl_voip_socket_free(rbctl_voip_socket *s);
 
 #ifdef __cplusplus
 }  // extern "C"

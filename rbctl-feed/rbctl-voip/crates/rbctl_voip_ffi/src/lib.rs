@@ -28,6 +28,9 @@ use rbctl_voip_proto::link::{Link, Received, Transport};
 use rbctl_voip_proto::wire::{self, Selector};
 use rbctl_voip_proto::{Error, Result};
 
+mod net;
+pub use net::*;
+
 /// Bytes in one DSP record (BE32 command + 128-byte body).
 pub const RBCTL_VOIP_RECORD_LEN: usize = 132;
 /// Largest untagged Ethernet frame handled, excluding FCS.

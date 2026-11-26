@@ -12,6 +12,7 @@ name = "rbctl_voip_ffi"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+rbctl_voip_net = { workspace = true }
 rbctl_voip_proto = { workspace = true }
 libc = { workspace = true }
 

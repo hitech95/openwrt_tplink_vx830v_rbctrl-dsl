@@ -257,6 +257,7 @@ name = "rbctl_voip_ffi"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "rbctl_voip_net",
  "rbctl_voip_proto",
 ]
 
