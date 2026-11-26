@@ -1,5 +1,352 @@
 # VX830v FOSS voice milestone results
 
+## T4.18 live: raw per-port gain evaluation
+
+Italy 10, one slot at a time, handsets off-ear. A Scarlett headphone driver
+applied a fixed 1500 Hz mouthpiece stimulus, measured on decoded board uplink.
+A separate fixed 1 kHz PCMA marker drove the earpiece, measured on the powered
+Scarlett CH1 measurement mic. No microphone signal was echoed. Each nonzero
+setting was bracketed by zero settings; all runs ended with deactivate/close.
+The initial run without microphone power is excluded. Values below are relative
+to the mean of the adjacent zero runs, not absolute levels or calibrated SPL.
+
+| Changed board word (other zero) | PHONE1 uplink Δ dB | PHONE2 uplink Δ dB | PHONE2 earpiece Δ dB |
+|---|---:|---:|---:|
+| +04 = −6 | 0.00 | +0.09 | −3.54 |
+| +04 = +6 | +0.01 | −0.01 | +2.47 |
+| +08 = −6 | −3.02 | −3.96 | −0.23 |
+| +08 = +6 | +3.01 | +2.96 | +0.64 |
+
+PHONE1 acoustic zero brackets moved by up to 12.75 dB; its RX magnitudes
+are not usable. PHONE2 acoustic zero brackets moved by up to 1.72 dB. TX
+zero-to-zero drift was at most 0.11 dB. These results reverse the previous
+handset-direction interpretation of the board words: TX (toward network) is
++08; RX (toward handset) is +04. Source levels did not approach digital full
+scale at the tested settings; these low-level trials do not establish maximum
+unclipped gain. Per operator decision expose independent **raw steps**, limited
+to −6…+6, rather than claiming ±1 dB accuracy across handsets. Keep both at
+zero by default. T4.18 closed as an evaluation, not a calibrated dB pass.
+
+**Deferred electrical check (2026-11-26):** A repeatable tip-to-ring measurement
+under a known off-hook load would separate line-level gain from handset/mic
+placement. For RX, compare the differential line voltage at each setting to
+zero with the same digital stimulus. For TX, hold an isolated line stimulus
+constant and compare decoded uplink levels. Use a telephone-line-rated isolated
+differential probe or telecom test set, not a grounded scope lead on either
+wire. No suitable setup is available now; no electrical dB/step or clipping
+measurement was made. This is a future line-level check, not a handset SPL test.
+
+## T4.19 live: fax-answer-tone fallback
+
+2026-11-26, PHONE2 off-ear, slot 1, Italy 10. A Scarlett headphone driver
+coupled to the mouthpiece played two synthetic three-second signals. A LAN
+endpoint accepted the PCMA-only call and counted uplink RTP; it returned no
+audio. Baresip used fixed RTP and audio buffers with no PLC/VAD modules loaded.
+
+| Stimulus | Observation |
+|---|---|
+| 1 kHz control | No fax request or RTP_UPDATE; zero frames meeting the CED detector criterion. |
+| 2100 Hz answer tone | 147 consecutive qualifying 20 ms frames at the LAN endpoint. Module reported fax passthrough on; stock peer ACKed DD01 command 11 with status zero. Slot/direction/codec/PTs stayed `1/3/2/8/8`; DTMF relay and event PTs changed from `1/101/101` to `0/0/0`. No matching DD02 fax start/end event was seen. |
+| Hangup | Same SIP dialog carried 3558 PT 8 packets over 71 s, ended with BYE; RTP_DEACTIVE and CHANNEL_CLOSE acknowledged. |
+
+**Closed by the plan's no-fax-machine fallback:** acoustic CED detection and
+in-call mode switching verified on hardware. No T.30 negotiation, fax page,
+ReceiveFAX result, or automatic migration from a non-G.711 codec was tested.
+Temporary endpoint, router runtime and control trace removed; no audio saved.
+
+## T4.14 ordinary caller-ID follow-up: PHONE1 display
+
+The operator reports that this same handset displays a caller-ID timestamp on
+POTS. Its date/time fields stayed blank on the VX830v Italy profile. This is
+an end-to-end timestamp interoperability failure on a timestamp-capable handset.
+Ordinary caller-name capability is still unknown. The POTS signal itself was
+not captured or decoded in this test.
+
+2026-11-26, Italy locale 10, on-hook PHONE1 (line 0), waiting CID disabled.
+One synthetic INVITE supplied different PAI, RPID and From identities. The
+DD01 CID_PLAY record carried the PAI name `OrchidBench1234` and number
+`123456789876543` (both capped at 15 bytes), plus `11262019` (`MMDDhhmm`).
+Econet acknowledged CID_PLAY, RING_START and RING_STOP with status zero.
+SIP trace showed 180 then 486; this was an unanswered display observation,
+not a successful CANCEL assertion. Operator reported **number only, no caller
+name or date/time**; did not separately transcribe the LCD digits this time.
+No audio or type-II burst. Temporary runtime and trace removed.
+
+Together with the earlier private/unavailable and waiting-name observations,
+this characterizes this handset. It does not establish whether the peer omitted
+name/date from the analog FSK or the handset chose not to display them. T4.14
+and Q8 stay partial. For the timestamp, inspect the peer's CID serializer and,
+if available, decode the router's on-hook analog CID message to check the date
+parameter's presence, format and length. No second handset is required to
+establish the display discrepancy.
+
+## Registration loss, unanswered INVITE and unavailable CID
+
+2026-11-26, stock Econet/Italy profile 10, temporary LAN registrar and SIP
+endpoint. PHONE2 was kept off-ear, Scarlett CH2 at its earpiece. No echo,
+waiting-CID signaling or recorded audio. Three independent observations:
+
+| Gate | Evidence | Result |
+|---|---|---|
+| T4.17 | With a registered shared AOR, gated PHONE2/slot 1 used selector 4 (425 Hz; 200 on/200 off/600 on/1000 off ms). A rejected renewal (503) while lifted switched it to selector 2, measured 200/200 ms. During the same outage ungated PHONE1/slot 0 still opened with selector 4, then stopped and closed on-hook. After REGISTER 200, PHONE2 returned to measured normal cadence without a hook cycle or process restart. | Live pass. PHONE1 comparison verified by status-zero board commands, PHONE2 also acoustically. |
+| T4.4 no-response follow-up | While registration kept renewing successfully, the endpoint deliberately ignored all INVITEs to the test extension. Baresip closed with ETIMEDOUT; dial-tone stop to congestion command was 32.78 s on the router. Selector 2 ACKed; CH2 measured 425 Hz, 200/200 ms; slot closed after hook-on. | Live pass, distinct from a SIP 503 final response. |
+| T4.14 unavailable | Ordinary on-hook INVITE on PHONE1 with a nonnumeric From user and no PAI/RPID. Operator identified the display as unavailable/out of area (not a transcription of exact LCD wording). CID, ring start and ring stop ACKed. The 36-byte snapshot did not include the CID number field; `O` encoding is covered by the host test. | Unavailable-display subcase passed; extended name/date remains partial. |
+
+Temporary runtime, endpoint, configs and control trace removed; 72 control
+frames captured, zero kernel drops. This session did not exercise T4.16 or
+repeat the prior loud-noise incident.
+
+## T4.16 live: both-busy admission
+
+2026-11-26, two ports on one SIP AOR, call waiting disabled on both. Off-ear,
+no downlink RTP sent, uplink packets counted and discarded. Two incoming
+dialogs each received 180 then 200. With both Up the third INVITE received
+486 Busy Here directly (no 180, no media); the operator observed no new ring.
+The original dialogs stayed Up and each delivered 187 additional PCMA packets
+across the rejection observation window. Replacing both handsets generated a
+BYE for each original dialog. Services and temporary files removed.
+
+**T4.16 functional gate passed** on this result plus the earlier ring-all,
+first-answer, free-port and off-ear isolation checks. The loud burst previously
+reported with dual echo is an independent unresolved audio incident; this
+signaling test neither reproduced nor explained it. No at-ear dual echo retest.
+
+## T4.22 live MWI and interrupted T4.16 shared-account check
+
+**Off-ear isolation follow-up, 2026-11-26.** Two incoming dialogs, same AOR,
+PHONE2 answered first. Independent synthetic PCMA transmitters discarded all
+microphone RTP; neither echoed it back. Only one marker at a time (700 Hz on
+slot 1 or 1300 Hz on slot 0), with silence windows, handsets separated and CH2
+mic moved between earpieces. Numbers below are digital levels, not calibrated
+SPL. No listening or cough reproduction. No audio recordings.
+
+| Output | Digital board-bound PT 8 | Scarlett measurement |
+|---|---|---|
+| PHONE2 / slot 1 | 272 exact 700 Hz packets, 13484 quiet, 0 foreign/other | Own bin −90.6 dBFS vs −108.6 idle; foreign bin −106.5 vs −107.4 idle. |
+| PHONE1 / slot 0 | 272 exact 1300 Hz packets, 10813 quiet, 0 foreign/other | Own bin −76.6 dBFS vs −98.1 idle; foreign bin −99.2 vs −99.3 idle. |
+
+All 24,841 captured downlink frames accounted for, zero kernel drops; maximum
+decoded peak 328/32768 on either slot. Both SIP dialogs released with BYE.
+A new host fixture also checks four distinct low-level AC markers and peaks
+in both directions through two actual UAs and the shared account, including
+the surviving call after release. 980/980 post-settling fixture frames matched
+their expected PCM block, peak 504/32768. Neither run reproduced cross-feed
+or a level excursion under these conditions. Neither rules out feedback in
+the earlier live echo topology, upstream/analog coupling or an intermittent
+fault. **Keep at-ear dual echo suspended.** Both-busy admission still pending.
+
+2026-11-26. Two physical ports mapped to one UA. A LAN registrar/notifier
+provided a synthetic mailbox, not a voice-recording service. **T4.22 passed
+on PHONE2:** actual `SUBSCRIBE message-summary` and three acknowledged NOTIFYs
+(`no`, `yes`, `no`). Operator heard normal dial tone, stutter on the next lift,
+then normal dial tone again without hanging up when the mailbox was cleared.
+DD01 tone selectors 4, 19 and 4 on slot 1 all returned status zero. No visual
+indicator, mailbox login or audio recording needed.
+
+**T4.16 partial — suspend at-ear dual echo tests.** A new INVITE rang both
+ports; answering PHONE2 stopped PHONE1 and established two-way echo. A second
+INVITE to the same AOR rang the free PHONE1 and established a separate dialog.
+Operator reported possible faint shared audio (room coupling uncertain) and a
+very loud noise on PHONE2 after a cough, requiring hangup. Audio independence
+and the both-busy policy are not verified here. Logs show baresip still running
+after the event, normal slot-1 SIP termination and status-zero deactivation/
+close; no evidence identifies a DSP crash or the cause of the burst. Test
+endpoint echoed each dialog's RTP to its own negotiated destination; both
+test endpoints and temporary data were removed. Before resuming, use headsets
+off-ear, independent low-level synthetic markers, per-slot RTP checks and peak
+metering. T4.17 registration loss/recovery was not run in this session.
+
+## T4.13–T4.15 live: hold, displayed identity and distinctive ring
+
+2026-11-26, Italy locale 10, AArch64 baresip 3.16.0 and a temporary LAN SIP
+endpoint with RTP echo. For this setup the operator identified **PHONE1 / line
+0 as the display handset** and **PHONE2 / line 1 as the analog ringer**. Do not
+use the melody on the display handset to infer a board cadence.
+
+| Gate | Live evidence | Result |
+|---|---|---|
+| T4.13 | One established call, first R gave recall dial tone and SIP `sendonly`; second R restored `sendrecv` and fresh echo. The remote endpoint then offered `inactive`, resumed on a new UDP port with PCMU/PT 0 instead of PCMA/PT 8, and received matching 200/SDP. Both router encoder and decoder changed to PCMU; board RTP_UPDATE (11) acknowledged and fresh speech returned without redial. | Pass |
+| T4.14 | With conflicting PAI/RPID/From, slot 0 received the 15-byte PAI number, PAI name and eight-byte date/time. Operator confirmed the number on the display but no date/time; ordinary caller name not explicitly confirmed. Privacy produced blank name and `P`, reported as private on the handset. For waiting CID, `CID_PLAY` followed by selector 31 both had status zero; operator saw **Internal only**, not the number, and heard a very loud signaling burst plus the waiting tone. Type-II remains opt-in/default off. Unavailable `O` has fixture evidence only. | Partial; no further at-ear type-II replay. Known-capable receiver/decoder needed for Q8. |
+| T4.15 | On analog PHONE2, default entry 0 vs `Alert-Info` parameter `info=internal` → entry 2 produced clearly distinct rings. Both stopped: plain CANCEL and CANCEL with SIP cause 200/completed elsewhere each got 200 CANCEL / 487 INVITE and a status-zero RING_STOP. Earlier answered calls also stopped ringing. | Pass |
+
+No audio recording. Temporary endpoint, router runtime and control trace removed.
+
+## T4.11 and T4.12 live: early media and off-hook warning
+
+2026-11-26. PHONE2, stock peer, Italy locale 10, PCMA to Asterisk 22.5.2.
+**T4.11 pass on combined evidence:** extension 680 sent 180 without SDP;
+operator heard ordinary local ringback. Extension 683 sent 183 with SDP;
+operator heard only the PBX's 800 Hz, 200/200 ms pulses before answer.
+Both switched to returned speech after 200 OK. Dial, busy, congestion, SIT,
+waiting and disconnect had earlier live results; warning heard below.
+
+**T4.12 pass:** used accelerated 6 s first-digit, 4 s post-disconnect and 3 s
+warning timers. No-digit lift to warning RTP activation took 6.007 s; after
+3.003 s the module deactivated media, stopped tone and closed slot 1 before
+hook-on. A key during lockout did not restart dialling. Operator confirmed
+fresh dial tone after replacing and lifting the handset. On extension 684 a
+deliberate one-second 650 Hz **answered-call** marker preceded PBX hangup;
+it was not part of the disconnect sequence. After release the selector-1 busy
+tone lasted 4.003–4.004 s, followed by 3.002–3.003 s of warning and then
+silence/slot close. Two full cycles and one early on-hook during busy were
+observed. No active PBX channels remained. Temporary services, control traces,
+test configuration and signaling logs removed. No new T4.10 ear labels claimed.
+
+## T4.10 dual-port selector sweep
+
+Italy profile 10: ran all 27 documented selectors on both off-hook ports independently, with stop/close after nonzero selectors. Reran PHONE2 on Scarlett CH2 after a known-tone reference (428 Hz, 500/500 ms). All CLI commands exited successfully. Aggregated earpiece frequency/cadence results are in the [peer selector map](peer.md). The earlier absolute RMS threshold missed known low-level tones; a per-frequency post-stop background reference recovered the dial, busy, ringback-like and stutter cadences. The sustained-tone detector does not rule out short transients. All 54 port/selector combinations have been exercised; semantic ear labels are partial, particularly 3/16/17. No group listening response was counted as an individual identification. No raw audio retained.
+
+## T4.8 live: board-leg G.722 bandwidth evaluation
+
+2026-11-26, stock Econet peer, Italy profile 10, both handsets off-hook. The
+Scarlett left headphone driver excited one mouthpiece; CH1 measured the other
+earpiece, then the fixtures were swapped. Direct source check at the headphone:
+1/3/5/6 kHz detected at −56/−53/−58/−70 dBFS, no clipping. Each direction
+used the same source level and placement across PCMA then G.722. No CH2 timing
+reference is required for this spectral comparison. Each test frequency played
+twice. Values below are the 95th percentile of the Hann-windowed FFT-bin
+amplitude in 50 ms frames (dBFS, rounded), **not** calibrated acoustic SPL.
+
+| Excited mouth → measured ear | Board codec | Earpiece 1 / 3 / 5 / 6 kHz | RTP packets forwarded each way in 10 s |
+|---|---|---|---:|
+| PHONE1 → PHONE2 | PCMA/PT 8 | −48 / −31 / −89 / ≤−90 | 500 |
+| PHONE1 → PHONE2 | G.722/PT 9 | −56 / −37 / ≤−90 / ≤−90 | 499 |
+| PHONE2 → PHONE1 | PCMA/PT 8 | −54 / −42 / ≤−90 / ≤−90 | 500 |
+| PHONE2 → PHONE1 | G.722/PT 9 | −60 / −48 / ≤−90 / ≤−90 | 499 |
+
+Separately decoded the excited port's PT 9 board uplink at 16 kHz: 1/3 kHz
+at −29/−31 dBFS (PHONE1) and −31/−35 (PHONE2), but 5/6 kHz at the analysis
+floor (−90.3 dBFS) for both. Both slots activated, deactivated and closed with
+status zero in every run. Raw audio and packet captures were not saved.
+
+**Evaluation decision:** G.722 board framing and narrowband audio work;
+no usable upper-band benefit demonstrated on these handsets. Keep PCMA as
+the default board leg. This does not isolate the limiting element among the
+mouthpiece, analog path and DSP, or rule out a different handset. SIP-side
+G.722 remains independently verified by T4.7.
+
+## M4 live: mandatory SRTP and network G.722
+
+2026-11-26, PHONE2/slot 1, stock Econet peer, AArch64 baresip 3.16.0,
+LAN Asterisk 22.5.2. Two separate answering-extension calls; operator heard
+their spoken phrase returned and hung up each time.
+
+| Gate | Evidence | Result |
+|---|---|---|
+| T4.6 | Router account `mediaenc=srtp-mand`; PBX `media_encryption=sdes`, optimistic fallback disabled. Both SDP offer and answer used `RTP/SAVP`, PCMA/PT 8, `AES_CM_128_HMAC_SHA1_80`. Call established for 26 s with returned speech. | Pass |
+| T4.7 | Separate G.722-only PBX account; offer and answer used PT 9. Router encoder and decoder both reported G722, 16 kHz mono, with `auresamp` on both paths. Board-facing slot-1 DD03 RTP/PT 8: 827 master→peer and 828 peer→master packets, zero kernel drops. Call established for 17 s with returned speech. | Pass |
+
+SDP inspection retained only profile/PT and cipher suite, not inline keys.
+Board monitoring counted matching frame headers only. No audio file or raw
+capture was saved. Both calls ended; temporary PBX, credentials and router
+runtime removed. T4.7 does **not** establish wideband analog response (T4.8).
+
+## M4 live: in-band digits, progress tones, dial map and panel
+
+2026-11-26, VX830v/stock Econet, locale 10, two registered PCMA accounts
+and Asterisk 22.5.2. One router clock for DD02 key release and first LAN INVITE.
+No call audio retained. Temporary accounts, PBX, traces, hotplug symlinks and
+router runtime removed. Both panel devices returned to their initial off/none.
+
+| Gate | Live evidence | Result |
+|---|---|---|
+| T4.1 | Both board legs set to in-band, PBX endpoints `dtmf_mode=inband`. With both calls up, Asterisk detected each port's four requested keys once in order, including `*`. The initial PHONE2 attempt produced only three board releases and three detected digits; a distinct fourth press supplied the missing `*`, not a duplicate. PHONE2 inbound answer/echo rechecked. Earlier live runs cover RFC 4733, INFO and BYE/cleanup. | Pass on combined evidence; both-port in-band gap closed. |
+| T4.4 | PHONE2: genuine final responses 486 Busy Here → selector 1 regular busy, 404 Not Found → generated three-pitch SIT, 503 Service Unavailable → selector 2 fast busy. Operator distinguished all three and each on-hook cleared the indication. | Pass for the three named categories; other mapped status codes covered by host tests, not all replayed live. No-response/transport-loss bench case outstanding. |
+| T4.5 | Exact `600` sent the first INVITE within 1 ms of the last key release on both ports. Ambiguous `603` sent after 3.005 s, explicit `#` sent in 0.81 ms, incomplete `60` gave local unobtainable after 6.006 s with no INVITE. Confirmed cancellation by hanging up ~1.18 s after entering `603`; no subsequent INVITE. | Pass. |
+| T4.23 | Master OpenWrt FXS hotplug: idle registered solid green, ringing 200/200 ms green, active 500/500 ms green. Operator confirmed active indication persisted after the first of two calls ended and returned to idle only after the last. No registered mapped UA while idle → steady red (visual and sysfs); shutdown → both off (sysfs). | Pass. No peer LED command or GPIO changes. |
+
+## M4 autonomous verification pass
+
+2026-11-26, working tree on `d4ec01f`. **31/31 host module CTests**, including
+the optional real baresip 3.16 SDES, G.722/resampler and MWI scenarios. **20/20
+CLI emulator scenarios** (one Cargo integration test); `cargo fmt --check` and
+CLI clippy with warnings denied passed. Built the router module and release
+CLI for AArch64 musl, plus target `srtp`, `mwi`, `auresamp` and `g722` modules
+in scratch staging (G.722 with SpanDSP 0.0.6 and TIFF 4.7.1). No new hardware
+test, installed package, or handset observation in this pass.
+
+The harness now checks frequency pairs and release for in-band keys at the
+opposite SIP endpoint, immediate/short/long digit-map decisions, first-digit
+and disconnect warning/lockout, 12 final SIP failure codes, 180 local ringback
+versus 183 remote RTP, solo flash hold/resume, shared-account ringing and hunt,
+identity precedence/privacy, mapped ring cadence and CANCEL, type-II CID request,
+MWI set/clear and registration recovery, signed gain words, and event- and
+2100-Hz-triggered fax profile updates. CLI checks include G.722 payload forwarding
+and port LED command layout. This evidence does not measure physical gain in dB,
+SLIC wideband response, display behaviour, fax transfer, visual LEDs, or long-call
+drift. See the [M4 bench queue](m4-bench.md) for per-gate dependencies and limits.
+
+## T4.3 live: PHONE2 call waiting, R-key swap and recall
+
+**Pass, 2026-11-26.** On the stock peer (Italy, line 1), Asterisk answered
+call A with Echo and originated B to that same busy SIP account. The operator
+heard the short waiting beep and verified A still echoed. One R press held A
+and answered B (distinct repeating tone); both PBX channels were Up. A second
+R held B and restored fresh speech on the original A. Router hold/resume logs
+and PBX SDP showed `sendonly` for hold and `sendrecv` for resume. Replacing
+PHONE2 released A and physically re-rang the handset for held B; lifting
+resumed B's tone. Final hangup released B. No PBX channels remained. No lamp
+or display indication was used. Temporary test services and logs removed.
+
+## T4.3 call waiting: host preflight
+
+15/15 module CTests passed. Two caller accounts dialled the same occupied
+fixture line: the wait beep was present on its playout, A continued to carry
+fresh bidirectional payloads, and B did not trigger a second physical ring.
+DD02 hook-flash (19) answered B and held A; a second flash restored A. New
+payload signatures verified both changes, including absence of handset samples
+on the held caller. Replacing the receiver with B held rang the same port;
+lifting resumed B. The AArch64 module built. No lamp or CID display is needed.
+Live beep audibility, physical R-key switching and PBX hold SDP remain to verify.
+
+## T4.2 live: two simultaneous independent calls
+
+**Pass, 2026-11-26.** One AArch64 router process registered distinct accounts
+701 (slot 0) and 702 (slot 1) to LAN Asterisk. Both physical handsets reached
+independent calls to the same PCMA echo extension. The operator heard each
+handset's own speech; Asterisk showed both PJSIP channels Up simultaneously.
+After hanging up the first call (702/slot 1), the original 701 channel remained
+Up and returned a fresh phrase without redialling. After final on-hook neither
+channel remained. Slot 1 sent 9494 packets, slot 0 sent 8844; neither player
+missed a timer period. The operator's first handset was observed on slot 1;
+account/slot identities above come from the logs, not the physical labels.
+An earlier operator window expired before any call and is excluded. Temporary
+PBX, credentials and router files removed.
+
+14/14 host CTests passed. The dual fixture drives two accounts per UA and two
+slots per board transport, checks distinct payloads in all four directions and
+requires new payloads on the surviving dialog after hangup. This run is not
+the ten-minute stability and conversational echo check (T4.20).
+
+## T4.9 live: remote disconnect on both ports
+
+2026-11-26, locale 10 (Italy). Asterisk extension 604 answered, played a short
+confirmation tone, then hung up while the operator held the receiver. **Pass on
+both physical ports with the other line idle.** PHONE2 completed two calls and
+PHONE1 three. On both, the operator heard the repeating busy tone after remote
+release, then fresh dial tone after replacing and lifting the receiver, and
+successfully redialled. PHONE2 stayed quiet during the PHONE1 test.
+
+Each call had status-zero replies to `RTP_DEACTIVE(slot) → TONE_PLAY(slot,1)`
+and then `TONE_PLAY(slot,0) → CHANNEL_CLOSE(slot)` on handset replacement.
+No tone commands targeted the opposite slot. The PBX ended with zero active
+calls/channels. Ports were selected sequentially, with a module restart only
+between port batches; continuity of an active second call remains T4.2. The
+temporary router runtime, PBX instance, credentials and control traces were removed.
+
+## M4 start: disconnect feedback and tone characterization
+
+T4.10 partial: warm init at locale 10, four PHONE2 selectors measured, selector
+1 independently heard as normal busy and stopped. [Measurements](peer.md)
+are in the selector lookup section of peer.md. No audio files saved.
+T4.9 host: remote established-call close stops media and requests selector 1
+on the still-open local channel. On-hook stops the tone and closes the slot;
+next off-hook opens it with dial tone. Both call directions tested in the
+two-endpoint fixture; 13/13 module CTests passed. CLI fixture 18/18 scenarios,
+including selector 19 on line 1; Rust clippy clean; both target artifacts built.
+The selector listening check was a CLI command, not an end-to-end hangup test.
+The subsequent live remote-release run on both ports is recorded above.
+
 ## M3 review follow-up (host)
 
 13/13 module CTests passed, including rejection of a runtime tone with a successful subsequent call,

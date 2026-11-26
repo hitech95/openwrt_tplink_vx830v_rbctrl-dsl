@@ -158,7 +158,7 @@ Two legs: `phone ─ SLIC/DSP (Econet) ═ DD03 board leg ═ baresip ─ networ
 | Board codec | Verdict |
 |---|---|
 | G.711 | v1 default. |
-| G.722 | Only useful if the Econet PCM/SLIC path runs at 16 kHz (`wideBandDet`, `ACODEC_Init_G722` hints). Evaluated in M4. |
+| G.722 | [T4.8 evaluated](../docs/voip/test-report.md#t48-live-board-leg-g722-bandwidth-evaluation): PT 9 and two-way narrowband audio work, but no 5/6 kHz benefit demonstrated on the two tested handsets. Retain PCMA by default. |
 | G.726/G.729/iLBC | No benefit on a local link. |
 | T.38 | Not in baresip; fax as G.711 passthrough in v1. |
 
@@ -240,8 +240,8 @@ config line 'line0'
 	option offhook_warning_timeout '60'  # after disconnect / idle off-hook
 	option require_registration '0'
 	option incoming 'ring_all'    # ring_all | hunt
-	option rx_gain '0'            # CHANNEL_OPEN +08, toward handset (peer adds -3)
-	option tx_gain '0'            # CHANNEL_OPEN +04, toward network (peer adds +2)
+	option rx_gain '0'            # raw CHANNEL_OPEN +04, toward handset
+	option tx_gain '0'            # raw CHANNEL_OPEN +08, toward network
 	option mwi '1'
 	list alert_info 'internal=2'  # Alert-Info value = board cadence entry
 
@@ -487,7 +487,7 @@ Prerequisites (implementation, not tests):
 3. **SIP-response → tone map:** 486/600/603 busy; 404/410/484/604 number unobtainable;
    408/480/487-from-remote and no answer as busy; 5xx, timeout, transport failure, unregistered congestion.
    Configurable per account.
-4. **Gain.** Board digital gain via CHANNEL_OPEN body `+04` (transmit) and `+08` (receive); the peer applies
+4. **Gain.** Board digital gain via CHANNEL_OPEN body `+04` (receive) and `+08` (transmit); the peer applies
    fixed offsets +2/−3 (peer.md). Saturating software gain on the 16-bit audio at the board boundary only
    as a fallback if T4.18 shows the board values have no usable effect.
 
@@ -510,12 +510,12 @@ Prerequisites (implementation, not tests):
 | T4.15 | Distinctive ring | `Alert-Info` values mapped (UCI) to board cadence entries give audibly distinct cadences; ring stops on CANCEL, "completed elsewhere" and answer |
 | T4.16 | Multi-line account | incoming rings every line mapped to the account; first off-hook answers, others stop; second incoming rings the free line; both busy → CW or 486 per config |
 | T4.17 | Registration dependency | with `require_registration`, an unregistered line gives congestion (or no dial tone, configured) and recovers when registration returns; without it, local dial tone is unchanged |
-| T4.18 | Gain (CHANNEL_OPEN `+04`/`+08`) | step each word over its range on both lines; level change measured on the loopback (transmit) and acoustically (receive); units and usable range recorded; configured gain within ±1 dB; no clipping artefacts at the maximum. Software fallback only if the board values have no effect |
+| T4.18 | Gain (CHANNEL_OPEN `+04`/`+08`) | Evaluated: independent raw per-port adjustments −6…+6 with zero defaults. Record direction and measured response; handset-independent dB accuracy and maximum unclipped gain deferred by operator decision. |
 | T4.19 | Fax/modem passthrough | on board fax/modem event (DSP 21/22) or CED/ANS detection: fixed jitter buffer, no PLC/VAD, G.711 only; a fax to Asterisk `ReceiveFAX` on the LAN completes (if no fax machine is available, verify the mode switch with a recorded tone, and record the limit) |
 | T4.20 | Call stability on both lines (retained from T3.6) | 10-minute simultaneous calls: master downlink delay in the last minute within 20 ms of the first minute (no growth); no audible echo in either direction on either line |
 | T4.21 | Pulse (rotary) dialling — **evaluated 2026-11-26: unsupported** ([report](../docs/voip/test-report.md#t421--rotary-dialling-early-evaluation)) | with a rotary handset, each digit 1–0 arrives as a DD02 digit event (peer.md: pulse events share the DTMF digit path), mapping of 10 pulses recorded; if nothing arrives, record unsupported (no host-side pulse decoding: the peer reports only debounced hook state) |
 | T4.22 | MWI | `message-summary` NOTIFY waiting → stutter dial tone (TONE_PLAY 19, or VMS_STATUS flag) on mapped lines, cleared when no messages. Visual MWI (FSK/lamp) is unsupported by the peer (peer.md) and not tested |
-| T4.23 | Port LED (SLIC_CONTROL 23 → `/proc/tp_led`) | record the visible effect of sub-operations 2–7 on both ports; if a phone LED responds, drive it from line state (idle/off-hook/ringing/unregistered); otherwise record no effect |
+| T4.23 | Front-panel FXS state via master-side OpenWrt LED hotplug, like DSL | Existing green/red FXS indicators follow aggregate board, registration, ringing and active state. Hanging up one of two calls leaves the active indication; the last hangup restores idle. Peer command 23 is diagnostic only. |
 
 Exit: T4.1–T4.23 pass or carry a recorded evaluation decision (T4.8, T4.14 CW CID, T4.18 units, T4.19 fallback, T4.21, T4.23);
 feature-status.md describes the user-visible behaviour.
@@ -599,8 +599,8 @@ Move stable conclusions into `docs/voip/*` and leave a pointer here.
 | M2 Bring-up | done | 2026-11-25 | 2026-11-25 | Uncommitted | [8/8 passed](../docs/voip/test-report.md#m2-closure); T2.4 caller number displayed. Extended CID tracked separately. |
 | M2.1 Rust port | done | 2026-11-25 | 2026-11-25 | `feature/rbctl-voip` (workspace); `becbc9e`, `c96803a`, `0b79262` (af_packet) | [Hardware parity and closure](../docs/voip/test-report.md#m21-closure). C prototype retired; T2.16 accepted with SDK build deferred to T5.1. |
 | M3 Single call | done | 2026-11-25 | 2026-11-26 | `feature/rbctl-voip` | T3.1–T3.5 and T3.7 passed live. T3.6 moved: latency growth and echo → T4.20, ≤150 ms target → T6.8 (§13.4). |
-| M4 Two lines + features | not started | | | | Scope rewritten as complete ATA feature set (T4.1–T4.22). |
-| M5 Integration | not started | | | | |
+| M4 Two lines + features | in progress | 2026-11-26 | | working tree | T4.1–T4.7, T4.9, T4.11–T4.13, T4.15–T4.17, T4.22–T4.23 live criteria met. T4.8, T4.18, T4.19, T4.21 evaluated. Open: T4.10, T4.14 (parked), T4.20. [Bench queue](../docs/voip/m4-bench.md). |
+| M5 Integration | preparation only | 2026-11-26 | | working tree | [SDK/package handoff](../docs/voip/m5-integration.md). T5.1–T5.7 not run. |
 | M6 Hardening | not started | | | | |
 
 Status values: `not started`, `in progress`, `blocked (<reason>)`, `done`.
@@ -611,6 +611,18 @@ All entries below used an **uncommitted working tree**. The base column identifi
 
 | Test ID | Date | Base revision / tree | Result | Evidence / note |
 |---|---|---|---|---|
+| T4.19 | 2026-11-26 | `d4ec01f` + WT | live fallback verified | [1 kHz negative control and 2100 Hz mode switch on PHONE2](../docs/voip/test-report.md#t419-live-fax-answer-tone-fallback). No fax document transferred. |
+| T4.18 | 2026-11-26 | `d4ec01f` + WT | raw units accepted | [Both ports, measured deltas and rejected acoustic data](../docs/voip/test-report.md#t418-live-raw-per-port-gain-evaluation). Electrical calibration deferred. |
+| T4.17 / T4.4 / T4.14 | 2026-11-26 | `d4ec01f` + WT | pass / follow-up pass / partial | [Real registration loss and recovery, silent INVITE timeout, unavailable caller display](../docs/voip/test-report.md#registration-loss-unanswered-invite-and-unavailable-cid). |
+| T4.16 | 2026-11-26 | `d4ec01f` + WT | functional live pass | [Third INVITE → 486 with both calls preserved](../docs/voip/test-report.md#t416-live-both-busy-admission); prior dual-echo noise remains an open audio investigation. |
+| T4.22 / T4.16 | 2026-11-26 | `d4ec01f` + WT | live pass / partial | [Audible MWI set/clear passed; shared-account routing observed, dual echo stopped after loud noise](../docs/voip/test-report.md#t422-live-mwi-and-interrupted-t416-shared-account-check). T4.17 not run. |
+| T4.13–T4.15 | 2026-11-26 | `d4ec01f` + WT | live pass / partial / pass | [Single-call hold, codec/port change, CID and two analog ring cadences](../docs/voip/test-report.md#t413t415-live-hold-displayed-identity-and-distinctive-ring). |
+| T4.11–T4.12 | 2026-11-26 | `d4ec01f` + WT | live pass | [180/183 distinction, warning timers, lockout and recovery](../docs/voip/test-report.md#t411-and-t412-live-early-media-and-off-hook-warning). |
+| T4.8 | 2026-11-26 | `d4ec01f` + WT | evaluated | [Both handset directions](../docs/voip/test-report.md#t48-live-board-leg-g722-bandwidth-evaluation): G.722/PT 9 works; no measurable 5/6 kHz benefit. |
+| T4.6, T4.7 | 2026-11-26 | `d4ec01f` + WT | live pass | [Separate PHONE2 calls](../docs/voip/test-report.md#m4-live-mandatory-srtp-and-network-g722): mandatory SDES-SRTP; G.722/PT 9 on LAN with PCMA/PT 8 on board. |
+| T4.3 | 2026-11-26 | `d4ec01f` + WT | live pass | [PHONE2 waiting beep, R-key hold/answer/swap, on-hook recall and final release](../docs/voip/test-report.md#t43-live-phone2-call-waiting-r-key-swap-and-recall). |
+| T4.2 | 2026-11-26 | `d4ec01f` + WT | live pass | [Concurrent dual-slot calls](../docs/voip/test-report.md#t42-live-two-simultaneous-independent-calls), independent speech and hangup on stock peer. |
+| T4.9 | 2026-11-26 | `d4ec01f` + WT | live pass | [Five PBX-initiated releases](../docs/voip/test-report.md#t49-live-remote-disconnect-on-both-ports); audible tone, stop/close and redial on both physical ports (other idle). |
 | T4.21 | 2026-11-26 | `4390ec4` + WT | evaluated: unsupported | Rotary on PHONE2: only hook on/off with an acknowledging master; peer never enables pulse detection. [Report](../docs/voip/test-report.md#t421--rotary-dialling-early-evaluation). |
 | T3.7 | 2026-11-26 | `4390ec4` + WT | live pass | 31/31 calls released, same PID, stable idle fds/sockets and RSS. |
 | T3.6 | 2026-11-26 | `4390ec4` + WT | live latency fail | 40 downlink tone onsets, 105–238 ms, 26 above 150 ms; conversational echo still untested. |
@@ -716,7 +728,7 @@ All entries below used an **uncommitted working tree**. The base column identifi
 
 | ID | Question | Raised | Owner | Resolution / pointer |
 |---|---|---|---|---|
-| Q8 | Do transmitted caller name and date/time reach a known-capable receiver on the Italy profile? | 2026-11-25 | v1 CID follow-up | M2 T2.4 verifies number only. Test extended fields separately during incoming-call integration. |
+| Q8 | Why is the ordinary caller-ID timestamp blank on the Italy profile, and is ordinary name display supported? | 2026-11-25 | v1 CID follow-up | [PHONE1 ordinary call](../docs/voip/test-report.md#t414-ordinary-caller-id-follow-up-phone1-display): timestamp present in DD01, blank on VX830v, displayed on POTS with the same handset (operator report). Inspect peer serialization / on-hook analog date parameter. Name capability remains unknown. |
 | Q7 | Can a clean SDK discover and install the package without the local OpenWrt tree's unrelated group-ID collision? | 2026-11-25 | M5 | T5.1; AArch64 recipe/staging verified in T1.13. |
 | Q6 | Does the peer retry a DD02 event after a nonzero ACK, or only after a missing ACK? | 2026-11-25 | M2 | T2.2/T2.7: compare event sequences and delivery after transient receiver backpressure. |
 | Q5 | Does a clean zero final RING_START word work on both physical lines? | 2026-11-25 | M2 | Host word varies; no peer read identified. Verify ring/stop and CID at T2.4. |
@@ -730,6 +742,7 @@ All entries below used an **uncommitted working tree**. The base column identifi
 
 | Date | Section | Change | Reason | Approved by |
 |---|---|---|---|---|
+| 2026-11-26 | §8.1, §9 T4.18 | Corrected TX/RX word mapping; accept per-port raw steps rather than a ±1 dB pass. | Board gain has a measured effect; tip/ring reference setup unavailable. | User |
 | 2026-11-26 | §7, §8.1, §9 M4 | M4 evaluations limited to what the stock peer exposes (D4). Static check (peer.md): CW CID, board gain, stutter dial reachable; visual MWI not; rotary likely; added T4.23 port LED. Gain uses CHANNEL_OPEN, software fallback only. | Board firmware is fixed. | User |
 | 2026-11-26 | §7, §8.1, §9 M3/M4/M6 | T3.6 removed from M3: latency growth and echo kept as M4 gate T4.20, ≤150 ms latency tuning moved to M6 T6.8. M4 rewritten as complete analog-to-SIP ATA (T4.10–T4.22: tone plan, timers, hold, full CID, distinctive ring, multi-line accounts, registration dependency, gain, fax passthrough, pulse-dial and MWI evaluation); advanced services stay deferred. | Close M3 on functional criteria; v1 must behave like a commercial ATA. | User |
 | 2026-11-25 | T2.16 | Accepted hardware-tested dynamic musl CLI for M2.1. Cross-build used rustup's aarch64 std + OpenWrt GCC because the tree has no Rust host toolchain. | Match the OpenWrt packaging model; full SDK package build required at T5.1. | User |
@@ -745,6 +758,42 @@ All entries below used an **uncommitted working tree**. The base column identifi
 | 2026-11-25 | — | No deviation; §§1–12 unchanged. | M1 held at the §9 M0 gate. | — |
 
 ### 13.5 Session log
+
+#### 2026-11-26 — Gain disposition and M5 preparation
+- Recorded the T4.18 electrical follow-up. T4.10 and T4.20 remain open; T4.14 attribution is parked. Prepared the [M5 integration handoff](../docs/voip/m5-integration.md) from the feed recipe and local target configuration. No M5 gate run; no change to M5 criteria in §§1–12.
+
+#### T4.10 — Short-tone listening and measurement follow-up
+- Individually resolved selectors 3/16/17 on PHONE2: three/two/one short ~425 Hz pulses. Raw CH2 recovered the 500/500 ms busy reference and corroborated their cadence. See peer.md. T4.14 remains partial; no independent receiver, decoder or known-good analog CID source available today.
+
+#### 2026-11-26 — T4.16 off-ear isolation diagnostic
+- Independent low-level markers, no echo: both shared-account downlinks reached the correct port, with no unexpected digital payload or peak across 24,841 frames. CH2 found only the intended marker above background at each earpiece. Added a host isolation regression. Earlier loud burst remains unexplained; T4.16 is not closed.
+
+#### T4.10 — Dual-port acoustic sweep
+- Measured the stock selector set on PHONE1 and PHONE2; independently repeated PHONE2 on Scarlett input 2. Updated peer.md with the numeric frequency/cadence map. The acoustic sweep is complete; remaining listening labels require one tone per question. No change to §§1–12.
+
+#### 2026-11-26 — T4.8 evaluated
+- Compared PCMA and G.722 with calibrated source check, both handset directions and decoded board uplink. §6 updated with the measured codec decision. No change to acceptance criteria.
+
+#### 2026-11-26 — T4.1/T4.4/T4.5/T4.23 live batch
+- Both-port in-band digits, three PBX failure indications, timed dial-map decisions and aggregate master LED verified. [Measured timings and coverage limits](../docs/voip/test-report.md#m4-live-in-band-digits-progress-tones-dial-map-and-panel). Next: SDES-SRTP and network G.722 against the PBX. §§1–12 unchanged.
+
+#### 2026-11-26 — T4.23 master-side FXS indicator
+- Updated §9 T4.23 to use the established OpenWrt LED mapping. Added optional hotplug worker/handler; two-call host regression passed, AArch64 module built. Live transition test pending; no router LED settings changed.
+
+#### 2026-11-26 — M4 autonomous ATA feature pass
+- Implemented per-line dial maps/timers, progress tones, registration/MWI, solo flash, identity/cadence policies, shared AOR handling, in-band DTMF, gain words, fax-ready profile, CLI G.722/LED probes and buffer telemetry. Built optional host and target modules. [31 module tests / 20 CLI scenarios](../docs/voip/test-report.md#m4-autonomous-verification-pass); no live gates closed by host tests. [Bench queue](../docs/voip/m4-bench.md). §§1–12 unchanged.
+
+#### T4.3 — Waiting-call and R-key harness
+- Implemented a local 300 ms waiting beep, one waiting/held SIP dialog per line, flash swap and on-hook recall. Host call/media test passed; [physical R-key check pending](../docs/voip/test-report.md#t43-call-waiting-host-preflight).
+
+#### 2026-11-26 — T4.2 live pass
+- Per-port SIP, PCMA and timer state plus shared serialized board transport. Two-account harness and physical concurrent calls passed. Next: T4.3 waiting/flash and hold; T4.20 ten-minute drift/echo remains separate. No change to §§1–12.
+
+#### 2026-11-26 — T4.9 live pass
+- Both ports now give audible disconnect feedback after Asterisk hangs up. Switched line configuration between batches; concurrent calls are not covered. Next: per-line state and media ownership for T4.2. §§1–12 unchanged.
+
+#### 2026-11-26 — M4 tone characterization and disconnect feedback
+- Extended `voicectl tone` to peer-supported selectors, measured four on PHONE2 and confirmed selector 1 by ear. Implemented established-call disconnect tone until on-hook, with a real-SIP fixture checking stop/close/re-lift. [Results](../docs/voip/test-report.md#m4-start-disconnect-feedback-and-tone-characterization). Next: verify remote hangup on hardware and continue the per-line refactor. §§1–12 unchanged.
 
 #### 2026-11-26 — T4.21 rotary evaluation (live)
 - Operator's rotary phone on PHONE2. With an acknowledging monitor, dialling produced only HOOK_OFF/HOOK_ON. Static follow-up: `pulseEnable` is never set by `voip_server`. Recorded unsupported. One unacknowledged run showed three unexplained `#` digit events; not counted. Router tmpfs cleaned.

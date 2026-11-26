@@ -54,6 +54,27 @@ Fields below are relative to the **body after the command**, not the temporary A
 | 0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 15, 16, 17, 19, 31 | 0, 10, 11, 5, 1, 12, 13, 6, 4, 2, 2, 9, 8, 14, 7 |
 | 60; 61 through 70; 71 | 26; 16 through 25 respectively; 27 |
 
+**T4.10 acoustic map (Italy, both ports).** All 27 selectors exercised on each port. PHONE1 used Scarlett CH1; PHONE2 was also rerun independently on Scarlett CH2 after reproducing selector 1 as the reference. Envelope resolution 20 ms; a peak around 422–428 Hz is reported as ~425 Hz below. Exclude leading/trailing capture silence. These are measurements, not inferred OEM service names.
+
+| Selector | Measured on both ports | Interpretation |
+|---|---|---|
+| 0 | STOP control; background/transients rather than a reproducible cadence | Stop, not a generated tone |
+| 1 | ~425 Hz, 500 ms on / 500 off | Busy/disconnect, operator-confirmed |
+| 2, 7 | ~425 Hz, 200 ms on / 200 off | 2 confirmed as fast busy on a 503; 7 acoustically similar, service name unknown |
+| 3 | PHONE2 raw CH2: three ~428 Hz pulses, each ~120 ms, ~80 ms gaps; no repeat in 4 s | Three quick dial-tone-like dots then silence (operator estimate ~1 s total) |
+| 16 | PHONE2 raw CH2: ~428 Hz for ~200 ms, ~100 ms gap, then ~100 ms at ~428 Hz | Two very quick dots then silence. Later weak events near 398 Hz are not counted as target pulses. |
+| 17 | PHONE2 raw CH2: one ~200 ms pulse near 422 Hz | One short pulse then silence |
+| 4 | ~425 Hz, 200 on / 200 off / 600 on / 1000 off (ms) | Italian dial tone |
+| 5 | ~425 Hz, short (~100 ms) and long (~1100 ms) on intervals, narrow interruptions | Interrupted tone; service name unknown |
+| 6 | ~902 Hz continuous during play | Steady higher tone; service name unknown |
+| 9 | ~425 Hz, 1000 ms on / 4000 off | Ringback-like cadence; measured on both ports |
+| 10, 15 | ~425 Hz continuous during play | Same internal ID; steady tone |
+| 19 | ~425 Hz, three ~100 ms pulses, ~100 ms between pulses then ~500 ms pause | Stutter pattern, consistent with MWI path |
+| 31 | Delayed burst sequence (~2 s after request, dominant ~425 Hz in this capture) | Type-II CID operation by code inspection; not evidence of successful CID display or CAS decoding |
+| 60–71 | Single ~500–520 ms bursts. Keypad grid: rows ~697/768/850/943 Hz, columns ~1207/1336/1477 Hz. | 60=`0`, 61–69=`1`–`9`, 70=`*`, 71=`#` by frequency pair. Some lower components, notably 61–63 on PHONE2 CH2, fell below the peak reporting threshold; PHONE1 resolved those pairs. |
+
+Grouped replay was not distinguishable by the operator. Selectors 3/16/17 were replayed individually on PHONE2 and corroborated against raw Scarlett CH2 after verifying the reference busy cadence. The earlier sweeps were insensitive to these one-shots; their durations above are PHONE2 measurements, not independent PHONE1 measurements. Acoustic descriptions are labels, not claims about an undocumented OEM service. No raw audio was saved. Do not extrapolate the map to other locales.
+
 **Locale:** S:408cc0 uses DSP_DEFAULT's selector; S:403940 uses pairs at 421b30 for hardware profile and S:403468 selects country tone/hook tables. Do not confuse this with command 1's module/status path S:408bd4. For host indices **0 through 20 in order**, the observed hardware-profile IDs are **1,3,4,5,6,38,9,11,12,18,19,23,25,34,40,27,28,37,45,31,30** (second word zero throughout). As a cross-check, `slic3.ko`'s `le9622_country_mapping` (`.data+170`) labels these IDs Australia, Belgium, Brazil, Canada, China, Colombia, ETSI, France, Germany, India, Italy, Mexico, New Zealand, US, Peru, Poland, Portugal, Russia, **unmapped 45**, Spain, Taiwan. Numeric selection high confidence; country interpretation medium, actual installed SLIC/profile unknown. A:01b374 passes the profile down the SLIC interface. **T2.4/T2.5:** verify the deployed locale and both lines, synthetic name/number truncation, CID modulation and inter-ring timing, cadence, dial/stop and audible selector meanings. Do not assume the table is a list of electrical certifications.
 
 ### Electrical profile cross-check (ring investigation)
@@ -77,7 +98,7 @@ Not dispatched as host commands: 3, 9, 14, 20, 21, 22, 24, 74. Of these, 20/21/2
 | Feature | Evidence | Reachable via protocol | Confidence |
 |---|---|---|---|
 | **Call-waiting caller ID (type II)** | TONE_PLAY selector 31 → internal tone 7 (S:41134c). In `mtkTonePlay` (S:402838), tone 7 branches to S:402ba4, which calls `adamChanPlayType2Cid(1, line, &cache[line])` on the 304-byte per-line cache at S:422cb8 that CID_PLAY fills. So: CID_PLAY (fill cache, no transmission) then TONE_PLAY 31. | **Yes.** CAS/ACK handshake and display depend on the handset. | High (path); handset behaviour unverified |
-| **Per-line gain** | CHANNEL_OPEN (S:408a80) copies body words `+04`/`+08` into the message. The channel-open operation (S:402e80) builds the `adamChanConfig` parameter with mask 3 and sets byte 4 = `(int8)low_byte(+08) − 3`, byte 5 = `(int8)low_byte(+04) + 2` (S:402f38–402f78). In L:`chanConfigMtk`, bytes 4/5 go to SLIC op `+0x54` = `slic_kpc_audioDigitalGain(listen, speak)` (L:10d30, vtable L:f298). Analog gain (bytes 2/3, op `+0x50`, range −24..24 at L:108f0) is left 0. Offsets `+04`/`+08` carry the OEM endpoint provisioning IDs 0xa/0xb ([controller-startup](controller-startup.md#channel_open-body-0x2c-meaningful-bytes)). | **Yes**, per CHANNEL_OPEN: `+08` → receive (toward handset), `+04` → transmit (toward network). With zero words, effective digital gain is −3 receive / +2 transmit. Units (dB assumed) and range unverified. | High (data flow); units medium |
+| **Per-line gain** | CHANNEL_OPEN (S:408a80, S:402e80) sets byte 4 = `(int8)low_byte(+08) − 3`, byte 5 = `(int8)low_byte(+04) + 2` (S:402f38–402f78). These feed `slic_kpc_audioDigitalGain` (L:10d30, vtable L:f298); analog gain is left 0. | **Yes**. [T4.18 live](test-report.md#t418-live-raw-per-port-gain-evaluation): `+08` changes mouthpiece→network (TX), `+04` changes earpiece output (RX). Use raw units, not dB; the peer's internal offsets are already applied. | High for wire path and uplink direction; absolute acoustic gain uncalibrated |
 | **Rotary / pulse dialling** | L:`_gdiEventTrans` logs `pulse dial, event=%d code=%d` (L:15608) and emits event class 2 / kind 1, the same as the DTMF digit branch (L:153e8). Detection requires `slic_hookThreshold_t.pulseEnable` (offset 40, DWARF). The peer fills that struct for `adamInfcConfigHookTs` with only `flashMin`/`flashMax`/`releaseMin` (S:4036c0–4036d8); no DD01 field reaches `pulseEnable` or `pulseTime`. Digit codes map through S:411c98 (0–9 → `'0'`–`'9'`, 10 → `*`, 11 → `#`). **Live 2026-11-26** (PHONE2, rotary, acknowledging monitor): two dial sequences produced only HOOK_OFF/HOOK_ON, no digit, flash or per-pulse event. | **No.** Pulse breaks are filtered and not reported; no host path enables detection. | High |
 | **Message waiting** | VMS_STATUS (93, S:4087b0): body word 1/2 sets/clears a flag for line 0 (S:422f54), 3/4 for line 1 (S:422f50). The only reader is TONE_PLAY (S:408844, 408e54): with the flag set, selector 4 (dial) becomes 19 → internal 14 (stutter dial). The peer contains an ETSI MWI element builder (`pncap_pie_set_mwi_am`, S:409c78), but its wrapper (S:409744) has no code or data reference except `.pdr`. | **Stutter dial tone: yes** (VMS_STATUS, or TONE_PLAY 19 directly). **Visual MWI (FSK/lamp): no** path found. | High |
 | **G.722 board leg** | RTP_ACTIVE codec selector 3 → ADAM G.722 (see table below). Whether the analog path samples at 16 kHz is physical. | Selectable; benefit is a live measurement (T4.8). | High (selection) |
@@ -86,6 +107,11 @@ Not dispatched as host commands: 3, 9, 14, 20, 21, 22, 24, 74. Of these, 20/21/2
 | Line statistics | 91/92 → internal operations 0x1b/0x1c (FXS statistics get/reset). | Yes (diagnostics) | High (dispatch) |
 
 ## RTP addressing and codec limits
+
+The port-LED row above describes the OEM **peer** command path only. On the
+running master, OpenWrt exposes `green:fxs` and `red:fxs` via `gpio-leds`
+(master GPIOs 17 and 20, active high). Front-panel state uses those LED class
+devices via OpenWrt hotplug. Peer command 23 is not in the panel control path.
 
 | Finding | Static evidence | Confidence |
 |---|---|---|
