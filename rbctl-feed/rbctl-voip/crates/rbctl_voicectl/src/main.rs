@@ -56,6 +56,13 @@ enum Cmd {
     Keypad,
     /// Attach to a running DSP and print events for 300 s.
     Monitor,
+    /// Evaluate SLIC_CONTROL port LED sub-operations (T4.23).
+    Led {
+        #[arg(long, value_parser = clap::value_parser!(u32).range(0..=1))]
+        line: u32,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(2..=7))]
+        op: u32,
+    },
     /// Ring a line, optionally with caller ID (T2.4).
     Ring {
         #[arg(long, value_parser = clap::value_parser!(u32).range(0..=1))]
@@ -67,18 +74,28 @@ enum Cmd {
         #[arg(long, value_parser = parse_cid)]
         cid: Option<(String, String)>,
     },
-    /// Open the line's slot, play dial tone (sel 4) then stop (T2.5).
+    /// Play a peer tone selector for a bounded time, then stop and close.
     Tone {
         #[arg(long, value_parser = clap::value_parser!(u32).range(0..=1))]
         line: u32,
-        /// 4 = dial tone then stop; 0 = only send the stop.
+        /// Peer selector (see docs/voip/peer.md); 4 = dial, 0 = stop only.
         #[arg(long, default_value_t = 4, value_parser = parse_sel)]
         sel: u32,
         #[arg(long = "duration-ms", default_value_t = 6000,
               value_parser = clap::value_parser!(u32).range(1..=20_000))]
         duration_ms: u32,
     },
-    /// Bridge PHONE1 and PHONE2 audio through the master over DD03 (T2.6).
+    /// T4.18: signed raw CHANNEL_OPEN gain words; both default to zero.
+    #[command(about = "Measure one port's gain with a quiet fixed PCMA marker (no echo)")]
+    Gain {
+        #[arg(long, value_parser = clap::value_parser!(u32).range(0..=1))]
+        line: u32,
+        #[arg(long, default_value_t=0, allow_hyphen_values=true, value_parser=clap::value_parser!(i32).range(-6..=6))]
+        tx: i32,
+        #[arg(long, default_value_t=0, allow_hyphen_values=true, value_parser=clap::value_parser!(i32).range(-6..=6))]
+        rx: i32,
+    },
+    /// Bridge PHONE1 and PHONE2 audio through the master over DD03.
     Loop {
         #[arg(long, value_parser = clap::value_parser!(u32).range(0..=0))]
         line: u32,
@@ -92,6 +109,9 @@ enum Cmd {
         /// D.. = TX event PT 101; E = RX event PT 101.
         #[arg(long, hide = true, value_parser = ["A", "B", "C", "D", "E"])]
         profile: Option<String>,
+        /// Evaluate G.722 on the local board leg (T4.8); default is PCMA.
+        #[arg(long)]
+        g722: bool,
     },
 }
 
@@ -107,10 +127,9 @@ fn parse_cid(s: &str) -> Result<(String, String), String> {
 }
 
 fn parse_sel(s: &str) -> Result<u32, String> {
-    match s {
-        "0" => Ok(0),
-        "4" => Ok(4),
-        _ => Err("selector must be 4 or 0".into()),
+    match s.parse::<u32>() {
+        Ok(n @ (0..=7 | 9..=10 | 15..=17 | 19 | 31 | 60..=71)) => Ok(n),
+        _ => Err("peer selectors: 0–7, 9–10, 15–17, 19, 31, 60–71".into()),
     }
 }
 
@@ -155,6 +174,15 @@ const BOOT: [Step; 6] = [
 
 /// What to do once attach completed.
 enum After {
+    Gain {
+        line: u32,
+        tx: i32,
+        rx: i32,
+    },
+    Led {
+        line: u32,
+        op: u32,
+    },
     Ready {
         watch: bool,
     },
@@ -173,6 +201,7 @@ enum After {
     Loop {
         duration: u32,
         profile: Option<u8>,
+        g722: bool,
     },
 }
 
@@ -261,7 +290,18 @@ fn run(s: &mut Session, locale: Option<u32>, timeout: u32, after: After) -> CliR
                 sel,
                 duration,
             } => return tone_test(s, *line, *sel, *duration),
-            After::Loop { duration, profile } => return loop_test(s, *duration, *profile),
+            After::Gain { line, tx, rx } => return gain_test(s, *line, *tx, *rx),
+            After::Led { line, op } => {
+                return s.record(
+                    &Record::words(Command::SlicControl, &[*line, *op]).map_err(errno)?,
+                    "port-led",
+                )
+            }
+            After::Loop {
+                duration,
+                profile,
+                g722,
+            } => return loop_test(s, *duration, *profile, *g722),
         }
     }
     println!("ready: elapsed_ms={}", s.now_ms() - start);
@@ -418,13 +458,14 @@ fn tone_test(s: &mut Session, line: u32, sel: u32, duration: u32) -> CliResult<(
         }),
     };
     let mut rc = Ok(());
-    if sel == 4 {
+    if sel != 0 {
         if stopped() {
             return Err(libc::EINTR);
         }
         rc = s.record(&open, "channel-open");
         if rc.is_ok() && !stopped() {
-            rc = s.record(&tone(4), "tone selector=4");
+            println!("tone probe line={line} selector={sel} duration_ms={duration}");
+            rc = s.record(&tone(sel), "tone-play");
         }
         if rc.is_ok() {
             let end = s.now_ms() + u64::from(duration);
@@ -489,7 +530,7 @@ fn media(slot: u32, profile: Option<u8>) -> MediaConfig {
     m
 }
 
-fn bridge(s: &mut Session, duration: u32) -> CliResult<()> {
+fn bridge(s: &mut Session, duration: u32, payload_type: u8) -> CliResult<()> {
     let (mut rtp, mut rtcp) = ([0u32; 2], [0u32; 2]);
     let (mut dd03, mut accepted) = (0u32, 0u32);
     let end = s.now_ms() + u64::from(duration);
@@ -515,12 +556,12 @@ fn bridge(s: &mut Session, duration: u32) -> CliResult<()> {
                     continue;
                 }
                 let d = m.datagram;
-                // Forward only PCMA RTP (version 2, PT 8) and any RTCP,
+                // Forward only the requested RTP PT and any RTCP,
                 // unchanged except for the destination slot.
                 if m.selector == Selector::Rtp
                     && (d.len() < 12
                         || d.first().map(|b| b >> 6) != Some(2)
-                        || d.get(1).map(|b| b & 127) != Some(8))
+                        || d.get(1).map(|b| b & 127) != Some(payload_type))
                 {
                     continue;
                 }
@@ -564,7 +605,116 @@ fn bridge(s: &mut Session, duration: u32) -> CliResult<()> {
     }
 }
 
-fn loop_test(s: &mut Session, duration: u32, profile: Option<u8>) -> CliResult<()> {
+fn gain_test(s: &mut Session, slot: u32, tx: i32, rx: i32) -> CliResult<()> {
+    // Sample one port only. Never return microphone audio to the earpiece.
+    let rc = (|| {
+        s.record(
+            &Record::words(
+                Command::ChannelOpen,
+                &[slot, rx as u32, tx as u32, 1, 0, 0, 0, 0, 0, 1, 0],
+            )
+            .map_err(errno)?,
+            "gain-open",
+        )?;
+        s.record(
+            &Record {
+                command: Command::RtpActive,
+                body: Body::Media(media(slot, None)),
+            },
+            "gain-active",
+        )?;
+        // 1 kHz, 8 samples per cycle, peak ~500 counts (-36 dBFS), A-law.
+        let cycle = [0xd5, 0xc3, 0xca, 0xc3, 0xd5, 0x43, 0x4a, 0x43];
+        let mut pkt = [0u8; 172];
+        pkt[0] = 128;
+        pkt[1] = 8;
+        pkt[8..12].copy_from_slice(&0x18421842u32.to_be_bytes());
+        for (i, b) in pkt[12..].iter_mut().enumerate() {
+            *b = cycle[i % 8];
+        }
+        let mut buf = [0u8; FRAME_MAX];
+        let end = s.now_ms() + 3500;
+        let mut n = 0u16;
+        let mut powers = Vec::new();
+        let mut peak = 0u32;
+        while !stopped() {
+            let now = s.now_ms();
+            if now >= end {
+                break;
+            }
+            let Some(frame) = s.next_frame(&mut buf, end - now)? else {
+                break;
+            };
+            match s.receive(frame) {
+                Ok(Received::Media(m))
+                    if u32::from(m.slot) == slot
+                        && m.selector == Selector::Rtp
+                        && m.datagram.len() == 172
+                        && m.datagram[0] == 128
+                        && m.datagram[1] & 127 == 8 =>
+                {
+                    // Coherent 1500 Hz bin, 30 cycles per 160-sample block.
+                    let (mut re, mut im) = (0., 0.);
+                    for (i, b) in m.datagram[12..].iter().enumerate() {
+                        let a = b ^ 85;
+                        let seg = (a >> 4) & 7;
+                        let l = i32::from(a & 15) * 16;
+                        let v = if seg == 0 {
+                            l + 8
+                        } else {
+                            (l + 264) << (seg - 1)
+                        };
+                        peak = peak.max(v as u32);
+                        let x = f64::from(if a & 128 == 0 { -v } else { v });
+                        let angle = std::f64::consts::TAU * 0.1875 * i as f64;
+                        re += x * angle.cos();
+                        im += x * angle.sin();
+                    }
+                    if n >= 25 {
+                        powers.push(re.hypot(im) / 80.);
+                    }
+                    pkt[2..4].copy_from_slice(&n.to_be_bytes());
+                    pkt[4..8].copy_from_slice(&(u32::from(n) * 160).to_be_bytes());
+                    s.send_media(slot as u16, Selector::Rtp, &pkt)?;
+                    n += 1;
+                }
+                Ok(Received::Event) => {
+                    while let Some(raw) = s.pop() {
+                        if let Ok(e) = Record::decode(&raw, Direction::FromPeer) {
+                            if e.command == Command::HookOn && e.word(0) == slot {
+                                return Err(libc::EINTR);
+                            }
+                        }
+                    }
+                }
+                Err(e) if !e.is_ignorable() => return Err(errno(e)),
+                _ => {}
+            }
+        }
+        if stopped() || powers.len() < 80 {
+            return Err(libc::ENODATA);
+        }
+        powers.sort_by(f64::total_cmp);
+        println!(
+            "gain line={slot} tx={tx} rx={rx} frames={n} tx1500_dbfs={:.2} input_peak={peak}",
+            20. * (powers[powers.len() / 2].max(0.01) / 32768.).log10()
+        );
+        Ok(())
+    })();
+    s.abandon();
+    let off = s.record(
+        &Record::words(Command::RtpDeactive, &[slot]).map_err(errno)?,
+        "gain-off",
+    );
+    s.abandon();
+    let close = s.record(
+        &Record::words(Command::ChannelClose, &[slot]).map_err(errno)?,
+        "gain-close",
+    );
+    close.and(off).and(rc)
+}
+
+fn loop_test(s: &mut Session, duration: u32, profile: Option<u8>, g722: bool) -> CliResult<()> {
     let (mut opened, mut active) = (0u32, 0u32);
     let mut rc = Ok(());
     for slot in 0..2u32 {
@@ -578,9 +728,15 @@ fn loop_test(s: &mut Session, duration: u32, profile: Option<u8>) -> CliResult<(
         rc = s.record(&open, "channel-open");
         if rc.is_ok() && !stopped() {
             active |= 1 << slot;
+            let mut config = media(slot, profile);
+            if g722 {
+                config.codec = 3;
+                config.tx_pt = 9;
+                config.rx_pt = 9;
+            }
             let r = Record {
                 command: Command::RtpActive,
-                body: Body::Media(media(slot, profile)),
+                body: Body::Media(config),
             };
             rc = s.record(&r, "rtp-active");
         }
@@ -589,7 +745,7 @@ fn loop_test(s: &mut Session, duration: u32, profile: Option<u8>) -> CliResult<(
         rc = if stopped() {
             Err(libc::EINTR)
         } else {
-            bridge(s, duration)
+            bridge(s, duration, if g722 { 9 } else { 8 })
         };
     }
     for slot in (0..2u32).rev() {
@@ -649,7 +805,7 @@ fn main() -> ExitCode {
     init_logging();
     let interruptible = matches!(
         cli.cmd,
-        Cmd::Ring { .. } | Cmd::Tone { .. } | Cmd::Loop { .. }
+        Cmd::Ring { .. } | Cmd::Tone { .. } | Cmd::Loop { .. } | Cmd::Gain { .. }
     );
     if matches!(cli.cmd, Cmd::Loop { .. }) && cli.locale.is_some() {
         eprintln!("loop does not accept --locale");
@@ -663,6 +819,8 @@ fn main() -> ExitCode {
         Cmd::Events => After::Ready { watch: true },
         Cmd::Keypad => After::Keypad,
         Cmd::Monitor => After::Monitor,
+        Cmd::Gain { line, tx, rx } => After::Gain { line, tx, rx },
+        Cmd::Led { line, op } => After::Led { line, op },
         Cmd::Ring {
             line,
             duration_ms,
@@ -684,10 +842,12 @@ fn main() -> ExitCode {
         Cmd::Loop {
             duration_ms,
             profile,
+            g722,
             ..
         } => After::Loop {
             duration: duration_ms,
             profile: profile.and_then(|p| p.bytes().next()),
+            g722,
         },
     };
     // Ring only reprograms the profile when --locale is given explicitly.

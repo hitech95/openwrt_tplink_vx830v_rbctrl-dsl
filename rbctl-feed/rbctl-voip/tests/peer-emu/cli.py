@@ -32,11 +32,16 @@ def scenario(exe, mode):
         ring = mode.startswith('ring')
         tone = mode.startswith('tone')
         loop = mode.startswith('loop')
+        pt = 9 if mode=='loop-g722' else 8
         if loop:
             cmd=[exe,'loop','--device','fixture','--line','0','--to','1','--duration-ms','200']
+            if pt==9: cmd.append('--g722')
+        if mode=='led':cmd=[exe,'led','--device','fixture','--line','1','--op','6']
         if tone:
             cmd[1] = 'tone'
-            cmd += ['--line','0','--sel','0' if mode=='tone-stop' else '4','--duration-ms','60']
+            line = int(mode == 'tone-selector')
+            selector = {'tone-stop': 0, 'tone-selector': 19}.get(mode, 4)
+            cmd += ['--line',str(line),'--sel',str(selector),'--duration-ms','60']
         if ring:
             cmd[1] = 'ring'
             cmd += ['--line','1','--duration-ms','60']
@@ -77,10 +82,10 @@ def scenario(exe, mode):
                     # Both are legal: attach state after ACK; SLIC result before ACK.
                     if sub == 27:
                         a.send(reply)
-                    state = int(not (keypad or mode=='monitor' or tone or ring or loop or warm)) if sub==27 else (0xffffffff if mode=='slic-error' else 0)
+                    state = int(not (keypad or mode in ('monitor','led') or tone or ring or loop or warm)) if sub==27 else (0xffffffff if mode=='slic-error' else 0)
                     event(2 if sub == 27 else 1, state)
                     ack_event()
-                    if (keypad or mode == 'monitor' or ring or tone or loop) and sub == 27:
+                    if (keypad or mode in ('monitor','led') or ring or tone or loop) and sub == 27:
                         break
                     if mode == 'slic-error' and dsp == 1:
                         break
@@ -96,20 +101,22 @@ def scenario(exe, mode):
             if loop:
                 for port in (0,1):
                     op=a.recv(2048); assert struct.unpack_from('>II',op,24)==(8,port); a.send(peer.reply(op))
-                    op=a.recv(2048); assert struct.unpack_from('>I',op,24)==(10,) and struct.unpack_from('>5I',op,44)==(port,3,2,8,8)
+                    op=a.recv(2048); assert struct.unpack_from('>I',op,24)==(10,) and struct.unpack_from('>5I',op,44)==(port,3,3 if pt==9 else 2,pt,pt)
                     assert struct.unpack_from('>5I',op,68)==(20,20,1,101,101)
                     if mode=='loop-reject' and port==1:
                         a.send(frame(0xdd01,22,int.from_bytes(op[16:20],'big'),struct.pack('>I',1)))
                     else: a.send(peer.reply(op))
-                if mode=='loop':
+                if mode!='loop-reject':
                     for port in (0,1):
                         for sel in (3,4):
-                            payload=struct.pack('>BBHII',128,8,5,160,port+1)+bytes([0xd5])*160 if sel==3 else bytes.fromhex('80c9000100000001')
+                            payload=struct.pack('>BBHII',128,pt,5,160,port+1)+bytes([0xd5])*160 if sel==3 else bytes.fromhex('80c9000100000001')
                             a.send(frame(0xdd03,25,0,struct.pack('>HH',port,sel)+payload))
                             sent=a.recv(2048); assert sent[:12]==BOARD+HOST and sent[12:16]==bytes.fromhex('dd031119') and sent[24:]==struct.pack('>HH',1-port,sel)+payload
                 for port in (1,0):
                     for cmd_id in (12,31):
                         op=a.recv(2048); assert struct.unpack_from('>II',op,24)==(cmd_id,port); a.send(peer.reply(op))
+            if mode=='led':
+                op=a.recv(2048);assert op[24:]==struct.pack('>III',23,1,6)+bytes(120);a.send(peer.reply(op))
             if tone:
                 def expect(words, timeout=2):
                     a.settimeout(timeout)
@@ -117,9 +124,9 @@ def scenario(exe, mode):
                     assert packet[15] == 22 and packet[24:] == struct.pack('>'+'I'*len(words),*words).ljust(132,b'\0')
                     a.send(peer.reply(packet))
                 if mode != 'tone-stop':
-                    expect([8,0,0,0,1,0,0,0,0,0,1,0]); expect([13,0,4])
-                expect([13,0,0])
-                if mode != 'tone-stop': expect([31,0],5)
+                    expect([8,line,0,0,1,0,0,0,0,0,1,0]); expect([13,line,selector])
+                expect([13,line,0])
+                if mode != 'tone-stop': expect([31,line],5)
             if ring:
                 if mode == 'ring-cid':
                     prof = a.recv(2048)
@@ -164,8 +171,9 @@ def scenario(exe, mode):
             if watch:
                 out = ''.join(lines) + out
             if loop:
-                assert (proc.returncode==0)==(mode=='loop'),(out,err)
-                if mode=='loop': assert 'RTP 0->1=1 1->0=1' in out
+                assert (proc.returncode==0)==(mode!='loop-reject'),(out,err)
+                if mode!='loop-reject': assert 'RTP 0->1=1 1->0=1' in out
+            elif mode=='led': assert proc.returncode==0 and 'port-led: DD01/16 status=0' in out
             elif tone:
                 assert proc.returncode == 0 and 'tone selector=0: DD01/16 status=0' in out, (out,err)
             elif ring:
@@ -192,6 +200,6 @@ def scenario(exe, mode):
 
 
 if __name__ == '__main__':
-    for name in ('init','events','cached-only','slic-error','reject','keypad','keypad-bad','monitor','ring','ring-lost-ack','ring-cid','tone','tone-stop','loop','loop-reject','warm','warm-reject'):
+    for name in ('init','events','cached-only','slic-error','reject','keypad','keypad-bad','monitor','ring','ring-lost-ack','ring-cid','tone','tone-stop','tone-selector','loop','loop-g722','led','loop-reject','warm','warm-reject'):
         scenario(sys.argv[1],name)
         print(name, 'passed')

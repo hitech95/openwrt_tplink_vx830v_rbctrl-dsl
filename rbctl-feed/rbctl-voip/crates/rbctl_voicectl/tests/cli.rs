@@ -21,5 +21,5 @@ fn cli_scenarios_against_peer_emulator() {
         "{stdout}\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(stdout.matches(" passed").count(), 17, "{stdout}");
+    assert_eq!(stdout.matches(" passed").count(), 20, "{stdout}");
 }

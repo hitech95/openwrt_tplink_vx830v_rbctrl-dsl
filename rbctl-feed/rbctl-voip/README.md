@@ -72,6 +72,16 @@ rbctl-voicectl loop --line 0 --to 1      # PHONE1 <-> PHONE2 audio
 `RUST_LOG=debug` adds logs on stderr. Stdout is a protocol transcript that
 never contains dialled digits, caller identity or audio.
 
+## Tone characterization (M4)
+
+For M4 tone characterization, initialize the idle board at the desired locale,
+then use `rbctl-voicectl tone --line 1 --sel 1 --duration-ms 5000`. Selector 0
+only stops; 31 invokes the peer's type-II CID path. The full selector lookup
+and acoustic results are in `docs/voip/peer.md`. With the mic on the earpiece,
+`python3 -B tests/live/tone_probe.py ROUTER REMOTE_CLI PIPEWIRE_MIC --line 1 4 1 2 3`
+prints estimated peaks and on/off intervals, without saving raw audio. Stop any
+other board owner first. Confirm tone names separately with the receiver at the ear.
+
 ## Baresip integration (M3)
 
 See the [single-line module, host tests and router configuration](modules/rbctl_voip/README.md)
