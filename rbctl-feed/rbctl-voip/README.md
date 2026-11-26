@@ -72,6 +72,11 @@ rbctl-voicectl loop --line 0 --to 1      # PHONE1 <-> PHONE2 audio
 `RUST_LOG=debug` adds logs on stderr. Stdout is a protocol transcript that
 never contains dialled digits, caller identity or audio.
 
+## Baresip integration (M3)
+
+See the [single-line module, host tests and router configuration](modules/rbctl_voip/README.md)
+for analog handset to SIP call integration using the Rust C ABI.
+
 ## OpenWrt
 
 `Makefile` builds with the feed's `rust-package.mk` (as rbctl-dsl does),
