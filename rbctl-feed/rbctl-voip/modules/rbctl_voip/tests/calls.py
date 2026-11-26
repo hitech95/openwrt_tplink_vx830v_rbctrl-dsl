@@ -105,6 +105,7 @@ def run(binary, mods, shim, hangup):
                 for m in extra: print(f'module {m}.so',file=cfg)
                 if hangup=='g722': print('ausrc_srate 8000\nauplay_srate 8000',file=cfg)
                 if hangup=='policy':
+                    print(f'rbctl_voip_cid{line} 0',file=cfg)
                     print(f'rbctl_voip_digitmap{line} 20[2-4]|31xT\nrbctl_voip_inband{line} 1\nrbctl_voip_tx_gain{line} -2\nrbctl_voip_rx_gain{line} 3',file=cfg)
                 if hangup=='shortmap':print(f'rbctl_voip_digitmap{line} 202T|2021\nrbctl_voip_short_digit{line} 1',file=cfg)
                 if hangup=='fax':print(f'rbctl_voip_fax_profile{line} 1\naudio_jitter_buffer_type fixed\naudio_buffer_mode fixed',file=cfg)
@@ -314,7 +315,10 @@ def run(binary, mods, shim, hangup):
         else:
             wait(lambda: 5 in y.ids() and any(len(set(p))>2 for p in x.played))
         cid=next(body for cmd,body in y.commands if cmd==4)
-        assert cid[69:73]==b'101\0' and struct.unpack_from('>I',cid,112)[0]==2
+        if hangup=='policy':
+            assert cid == struct.pack('>I',y.line) + bytes(len(cid)-4)
+        else:
+            assert cid[69:73]==b'101\0' and struct.unpack_from('>I',cid,112)[0]==2
         y.event(18,1)
         wait(lambda: 6 in y.ids() and 10 in y.ids())
         if hangup=='g722':

@@ -110,6 +110,8 @@ static int ring(struct phone_line *p, struct call *call);
 
 static int select_audio(struct phone_line *p, struct ua *ua)
 {
+	/* A shared account has only one device default. Select it immediately
+	 * before creating/accepting the dialog on the same event-loop turn. */
 	const char *dev=p->line ? "phone1" : "phone0";
 	int err=account_set_ausrc_dev(ua_account(ua),dev);
 	return err ? err : account_set_auplay_dev(ua_account(ua),dev);
@@ -422,9 +424,16 @@ static void prepare_identity(struct phone_line *p,const struct sip_msg *msg)
 static int send_cid(struct phone_line *p)
 {
 	rbctl_voip_record cid = {.command=4,.body.cid=p->incoming_id};
-	if (!p->cid_enabled) { memset(&cid.body.cid,0,sizeof(cid.body.cid)); cid.body.cid.line=p->line; }
-	time_t now=time(NULL); struct tm tm;
-	if (localtime_r(&now,&tm)) strftime((char *)cid.body.cid.date,9,"%m%d%H%M",&tm);
+	if (!p->cid_enabled) {
+		memset(&cid.body.cid, 0, sizeof(cid.body.cid));
+		cid.body.cid.line = p->line;
+	}
+	else {
+		time_t now = time(NULL);
+		struct tm tm;
+		if (localtime_r(&now, &tm))
+			strftime((char *)cid.body.cid.date, 9, "%m%d%H%M", &tm);
+	}
 	return phone_command(cid);
 }
 
