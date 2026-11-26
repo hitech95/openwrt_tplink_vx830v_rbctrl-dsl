@@ -18,7 +18,7 @@ endforeach()
 
 option(RBCTL_HARNESS "Allow selection of the inherited Unix datagram fixture" OFF)
 option(HAVE_THREADS "Match libre's C11 threads configuration" ON)
-add_library(rbctl_voip MODULE module.c board.c attach.c call.c audio.c)
+add_library(rbctl_voip MODULE module.c board.c attach.c call.c audio.c digitmap.c panel.c)
 if(HAVE_THREADS)
   target_compile_definitions(rbctl_voip PRIVATE HAVE_THREADS)
 endif()
@@ -45,7 +45,25 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/registration.py" "${BARESIP_EXE}"
       "${BARESIP_MODULE_DIR}" "$<TARGET_FILE:rbctl_voip>")
     set_tests_properties(baresip_registration_smoke PROPERTIES TIMEOUT 15)
-    foreach(side caller callee board-clock reject-tone lost-ack send-failure)
+    if(EXISTS "${BARESIP_MODULE_DIR}/mwi.so")
+      add_test(NAME baresip_mwi_registration COMMAND "${Python3_EXECUTABLE}" -B
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/mwi.py" "${BARESIP_EXE}" "${BARESIP_MODULE_DIR}" "$<TARGET_FILE:rbctl_voip>")
+      set_tests_properties(baresip_mwi_registration PROPERTIES TIMEOUT 20)
+    endif()
+    foreach(scenario identity failures early)
+      add_test(NAME baresip_signalling_${scenario} COMMAND "${Python3_EXECUTABLE}" -B
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/signalling.py" "${BARESIP_EXE}"
+        "${BARESIP_MODULE_DIR}" "$<TARGET_FILE:rbctl_voip>" "${scenario}")
+      set_tests_properties(baresip_signalling_${scenario} PROPERTIES TIMEOUT 30)
+    endforeach()
+    set(call_cases caller callee board-clock reject-tone lost-ack send-failure dual waiting policy timers regblock solo shared shared-isolation hunt shortmap longmap postdisc fax)
+    if(EXISTS "${BARESIP_MODULE_DIR}/srtp.so")
+      list(APPEND call_cases srtp)
+    endif()
+    if(EXISTS "${BARESIP_MODULE_DIR}/g722.so" AND EXISTS "${BARESIP_MODULE_DIR}/auresamp.so")
+      list(APPEND call_cases g722)
+    endif()
+    foreach(side IN LISTS call_cases)
       add_test(NAME baresip_call_${side}_hangup COMMAND "${Python3_EXECUTABLE}" -B
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/calls.py" "${BARESIP_EXE}"
         "${BARESIP_MODULE_DIR}" "$<TARGET_FILE:rbctl_voip>" ${side})

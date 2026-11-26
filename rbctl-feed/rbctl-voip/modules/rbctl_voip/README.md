@@ -1,4 +1,4 @@
-# rbctl_voip — single-line baresip module
+# rbctl_voip — baresip module for analog phone ports
 
 `module.c` owns the baresip 3.16 module lifecycle. `board.c`/`board.h` own the
 Rust protocol link; the transport supplies its MAC and synchronous send callback.
@@ -51,6 +51,25 @@ in the default module build.
 
 ## Live call checks (T3.2–T3.4)
 
+**Two-line configuration (T4.2):** use one module/board owner and two distinct
+accounts. Set `rbctl_voip_account0` and `rbctl_voip_account1` in `config` to
+their exact SIP AORs, e.g. `sip:701@pbx.example` and `sip:702@pbx.example`.
+In each matching `accounts` entry append the corresponding device pair:
+
+```text
+<sip:701@pbx.example>;audio_codecs=PCMA/8000/1;audio_source=rbctl_voip,phone0;audio_player=rbctl_voip,phone0
+<sip:702@pbx.example>;audio_codecs=PCMA/8000/1;audio_source=rbctl_voip,phone1;audio_player=rbctl_voip,phone1
+```
+
+Add the PBX authentication parameters locally. Each line owns its digits, audio
+device and RTP slot (0 or 1). To share an account, put the same AOR in both
+mapping keys and define only one account. Both idle ports ring; the first answer
+selects its audio device and stops the other ringer. Set `rbctl_voip_hunt0 1`
+and `rbctl_voip_hunt1 1` to ring just the first free port. On a connected line, a second caller
+produces a short waiting beep. R holds the active caller and answers or resumes
+the other; on-hook with a held caller rings the handset back. With no AOR mappings the original
+`rbctl_voip_line` and `rbctl_voip,phone` single-line setup still works.
+
 Use the non-harness AArch64 module, one registered test account and a second
 reachable extension/softphone on the LAN PBX. The earlier registration-only
 PBX had no dialplan; configure internal routes in **both** directions. Use a
@@ -88,6 +107,46 @@ one valid, new board PCMA packet triggers one downlink packet, including
 ringback before a SIP source exists. No board PCMA means no playout ticks in
 this experimental mode. The default `timer` retains the measured M3 cadence.
 The old `vx830v,phone` test configs must use `rbctl_voip,phone` as above.
+
+## M4 bench controls
+
+### Front-panel indicator
+
+The optional OpenWrt `rbctl-voip-led` package installs a worker and a `voip`
+hotplug handler. The module samples both ports together and sends only state
+transitions. Board unavailable → red; otherwise ringing/waiting on either port
+→ fast green blink, off-hook/call → slow green blink, any mapped UA registered
+→ solid green, otherwise red. Worker EOF turns both off. The handler uses
+`/lib/functions/leds.sh`, defaults to `green:fxs`/`red:fxs`, and honours
+`system.led_fxs.sysfs`/`system.led_fxs_fault.sysfs` overrides. It does not
+modify UCI or the GPIO mapping. No helper installed means no panel writes.
+
+### Per-line options
+
+These are **baresip config** keys; append `0` or `1` for the physical port
+(e.g. `rbctl_voip_digitmap1 20x|31[0-5]T`). UCI rendering is an M5 task.
+
+| `rbctl_voip_` key stem | Values and defaults |
+|---|---|
+| `digitmap` | Up to 16 `|`-separated alternatives of up to 32 digits. Literals, `x`, sets/ranges (`[2-7*]`); final `.` repeats the preceding atom zero or more times, `+` one or more. Final `T` requires a timeout. Default `[0-9*]+`; `#` explicitly sends the collected digits. Invalid maps reject module startup. |
+| `first_digit`, `short_digit`, `long_digit` | Seconds (1–600); defaults 15, 4, 10. Exact unambiguous match dials now; complete but extendable match dials after short timeout; incomplete prefix becomes unobtainable on long timeout. |
+| `offhook_warning`, `howler_duration` | Seconds (1–600), defaults 60 and 15. Progress/disconnect → bounded local warning → closed slot/lockout until hook-on. No first digit goes straight to warning. |
+| `busy_sel`, `congestion_sel`, `disconnect_sel` | Defaults 1, 2, 1. Change for locale after T4.10; selector 2 is a fast cadence, not yet confirmed as congestion by ear. Unobtainable uses a generated SIT. |
+| `inband` | 0 (default) delegates digits to the account RFC 4733/INFO mode. 1 selects board relay-off and emits touch-tone pairs into outgoing PCM during DD02 press/release. For the PBX test set the Asterisk endpoint to `dtmf_mode=inband`. |
+| `require_registration` | 0 default. 1 provides congestion when unregistered and restores dial tone on REGISTER OK. |
+| `tx_gain`, `rx_gain` | Per-port raw steps −6…+6, default 0. TX = mouthpiece → network (`+08`), RX = network → earpiece (`+04`). E.g. `rbctl_voip_tx_gain1 -2` attenuates PHONE2 uplink. Applied at the next CHANNEL_OPEN after loading config; no universal dB or acoustic clipping guarantee. |
+| `cid`, `cw_cid`, `call_waiting`, `mwi`, `hunt` | Boolean; defaults 1, 0, 1, 1, 0. Enable `cw_cid` only for a type-II test. For MWI load `module_app mwi.so`, enable account `mwi=yes`, and provision a PBX mailbox. |
+| `alert_info`, `alert_entry` | Match one whole Alert-Info value or its `info=` parameter, case insensitive. Entry 0–9, default 0. Example `rbctl_voip_alert_info1 internal` and `rbctl_voip_alert_entry1 2`. |
+| `fax_profile` | 0 default. For T4.19 use 1, a G.711-only account, `audio_jitter_buffer_type fixed`, `audio_buffer_mode fixed`, and omit PLC, VAD and speech-processing modules. The module reacts to DSP 21/22 and sustained 2100 Hz in board PCM; it bypasses digit relay via RTP_UPDATE. This is a preconfigured passthrough profile, not a T.38 gateway or automatic renegotiation from arbitrary codecs. |
+
+For T4.6 load `module srtp.so` and set `mediaenc=srtp-mand` on the test
+account; require SDES on the PBX and verify SAVP/crypto without retaining keys.
+For T4.7 load `module g722.so` and `module auresamp.so`, set
+`ausrc_srate 8000`, `auplay_srate 8000`, and pin the test account to
+`audio_codecs=G722/16000/1`. Router staging also needs compatible SpanDSP and
+libtiff for this G.722 build. Neither option changes native board PT 8.
+
+See the [gate-by-gate bench list](../../../../docs/voip/m4-bench.md) for what is still unproven.
 
 The audio device bridges PCMA/PT 8
 on the board to 8 kHz mono signed PCM in baresip. On-hook/release queues RTP off

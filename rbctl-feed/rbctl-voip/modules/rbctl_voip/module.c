@@ -4,6 +4,7 @@
 #include <baresip.h>
 #include "attach.h"
 #include "phone.h"
+#include "panel.h"
 
 static int module_init(void)
 {
@@ -23,11 +24,13 @@ static int module_init(void)
 	if (err) return err;
 	err = voice_attach_start(device, locale);
 	if (err) phone_close();
+	else panel_start();
 	return err;
 }
 
 static int module_close(void)
 {
+	panel_close();
 	voice_attach_stop();
 	phone_close();
 	return 0;

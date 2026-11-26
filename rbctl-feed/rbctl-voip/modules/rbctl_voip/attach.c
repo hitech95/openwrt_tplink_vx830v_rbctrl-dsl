@@ -72,7 +72,8 @@ static struct {
 	unsigned front, queued;
 	bool busy;
 	unsigned inflight;
-	bool ring_maybe_on, slot_maybe_open;
+	unsigned inflight_slot;
+	bool ring_maybe_on[PHONE_LINES], slot_maybe_open[PHONE_LINES];
 } a;
 
 /* Separate lifetime from an individual socket/link session. */
@@ -88,11 +89,12 @@ static void close_session(void)
 {
 	/* On unload or loss of an ACK the peer may already have applied a
 	 * ringing/open command. No event loop remains to await cleanup ACKs. */
-	if (a.phase == READY && (a.ring_maybe_on || a.slot_maybe_open)) {
+	for (unsigned slot=0; a.phase==READY && slot<PHONE_LINES; ++slot) {
+		if (!a.ring_maybe_on[slot] && !a.slot_maybe_open[slot]) continue;
 		const unsigned stop[] = {6, 12, 31};
 		for (size_t i = 0; i < sizeof(stop)/sizeof(stop[0]); ++i) {
 			uint8_t raw[RBCTL_VOIP_RECORD_LEN];
-			rbctl_voip_record rec = {.command=stop[i], .body.words={phone_slot()}};
+			rbctl_voip_record rec = {.command=stop[i], .body.words={slot}};
 			rbctl_voip_abandon(a.board.link);
 			if (rbctl_voip_record_encode(raw,&rec,0) >= 0)
 				(void)rbctl_voip_request(a.board.link,RBCTL_VOIP_SUB_RECORD,raw,sizeof(raw),tmr_jiffies());
@@ -209,6 +211,11 @@ static int submit_step(void)
 
 bool phone_board_ready(void) { return a.phase == READY; }
 
+static unsigned command_slot(const rbctl_voip_record *rec)
+{
+	return rec->command==10 || rec->command==11 ? rec->body.media.slot : rec->body.words[0];
+}
+
 static int dispatch(void)
 {
 	int first_error = 0;
@@ -216,6 +223,7 @@ static int dispatch(void)
 		uint8_t raw[RBCTL_VOIP_RECORD_LEN];
 		int rc = rbctl_voip_record_encode(raw, &a.pending[a.front], 0);
 		a.inflight = a.pending[a.front].command;
+		a.inflight_slot = command_slot(&a.pending[a.front]);
 		if (rc >= 0)
 			rc = rbctl_voip_request(a.board.link, RBCTL_VOIP_SUB_RECORD,
 					       raw, sizeof(raw), tmr_jiffies());
@@ -226,8 +234,8 @@ static int dispatch(void)
 			if (!first_error) first_error = -rc;
 			continue;
 		}
-		if (a.inflight == 5) a.ring_maybe_on = true;
-		if (a.inflight == 8) a.slot_maybe_open = true;
+		if (a.inflight == 5) a.ring_maybe_on[a.inflight_slot] = true;
+		if (a.inflight == 8) a.slot_maybe_open[a.inflight_slot] = true;
 		a.busy = true;
 		schedule();
 	}
@@ -236,15 +244,16 @@ static int dispatch(void)
 
 int phone_command(rbctl_voip_record rec)
 {
+	if (command_slot(&rec) >= PHONE_LINES) return EINVAL;
 	if (!phone_board_ready()) return ENODEV;
 	if (a.queued == 24) return ENOBUFS;
 	a.pending[(a.front + a.queued++) % 24] = rec;
 	return dispatch();
 }
 
-int phone_play_packet(const uint8_t *data, size_t len)
+int phone_play_packet(unsigned slot, const uint8_t *data, size_t len)
 {
-	return phone_board_ready() ? -rbctl_voip_send_media(a.board.link, phone_slot(), RBCTL_VOIP_RTP, data, len) : ENODEV;
+	return phone_board_ready() ? -rbctl_voip_send_media(a.board.link, slot, RBCTL_VOIP_RTP, data, len) : ENODEV;
 }
 
 static int receive_frame(uint8_t *frame, size_t len)
@@ -281,8 +290,14 @@ static int receive_frame(uint8_t *frame, size_t len)
 		 * ring or activation invalidates dependent work for this call. */
 		if (cmd == 6 || cmd == RTP_DEACTIVE || cmd == CHANNEL_CLOSE) return EREMOTEIO;
 		if (cmd == 5 || cmd == 8 || cmd == 10) {
-			a.front = a.queued = 0;
-			phone_board_lost();
+			unsigned failed = a.inflight_slot, keep = 0;
+			for (unsigned i=0; i<a.queued; ++i) {
+				rbctl_voip_record *r=&a.pending[(a.front+i)%24];
+				if (command_slot(r) != failed)
+					a.pending[(a.front+keep++)%24]=*r;
+			}
+			a.queued=keep;
+			phone_line_lost(failed);
 		}
 		(void)dispatch();
 		return 0;
@@ -294,8 +309,8 @@ static int receive_frame(uint8_t *frame, size_t len)
 		return -rbctl_voip_request(a.board.link, RBCTL_VOIP_SUB_ATTACH, NULL, 0, tmr_jiffies());
 	}
 	if (a.phase == READY && rc == RBCTL_VOIP_CONTROL) {
-		if (a.inflight == 6) a.ring_maybe_on = false;
-		if (a.inflight == 31) a.slot_maybe_open = false;
+		if (a.inflight == 6) a.ring_maybe_on[a.inflight_slot] = false;
+		if (a.inflight == 31) a.slot_maybe_open[a.inflight_slot] = false;
 		a.busy = false;
 		tmr_cancel(&a.timer);
 		(void)dispatch(); /* Individual errors are logged; the link remains usable. */

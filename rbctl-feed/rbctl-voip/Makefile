@@ -92,3 +92,18 @@ endef
 
 $(eval $(call RustBinPackage,rbctl-voicectl))
 $(eval $(call BuildPackage,rbctl-voicectl))
+
+define Package/rbctl-voip-led
+  SECTION:=net
+  CATEGORY:=Network
+  SUBMENU:=Telephony
+  TITLE:=OpenWrt front-panel FXS LED hotplug integration
+endef
+
+define Package/rbctl-voip-led/install
+	$(INSTALL_DIR) $(1)/usr/libexec $(1)/etc/hotplug.d/voip
+	$(INSTALL_BIN) ./files/fxs-notify.sh $(1)/usr/libexec/rbctl-fxs-notify
+	$(INSTALL_DATA) ./files/led_fxs.sh $(1)/etc/hotplug.d/voip/50-led-fxs
+endef
+
+$(eval $(call BuildPackage,rbctl-voip-led))
