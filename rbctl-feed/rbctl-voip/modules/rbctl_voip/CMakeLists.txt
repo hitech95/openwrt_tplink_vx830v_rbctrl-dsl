@@ -69,7 +69,7 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
         "${BARESIP_MODULE_DIR}" "$<TARGET_FILE:rbctl_voip>" ${side})
       set_tests_properties(baresip_call_${side}_hangup PROPERTIES TIMEOUT 30)
     endforeach()
-    foreach(scenario running missing-state missing-start missing-locale reject-default)
+    foreach(scenario running late-board missing-state missing-start missing-locale reject-default)
       add_test(NAME baresip_attach_${scenario} COMMAND "${Python3_EXECUTABLE}" -B
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/registration.py" "${BARESIP_EXE}"
         "${BARESIP_MODULE_DIR}" "$<TARGET_FILE:rbctl_voip>" "${scenario}")

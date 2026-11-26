@@ -81,7 +81,8 @@ static struct {
 	struct tmr timer;
 	char device[16];
 	unsigned locale;
-	bool recovering;
+	bool enabled;
+	unsigned delay_ms;
 } retry;
 static int start_session(const char *device, unsigned locale);
 
@@ -118,8 +119,18 @@ static void close_session(void)
 void voice_attach_stop(void)
 {
 	tmr_cancel(&retry.timer);
-	retry.recovering = false;
+	retry.enabled = false;
 	close_session();
+}
+
+static void reconnect(void *unused);
+
+static void schedule_retry(void)
+{
+	if (!retry.enabled)
+		return;
+	tmr_start(&retry.timer, retry.delay_ms, reconnect, NULL);
+	retry.delay_ms = MIN(retry.delay_ms * 2, 8000u);
 }
 
 static void reconnect(void *unused)
@@ -128,17 +139,16 @@ static void reconnect(void *unused)
 	int err = start_session(retry.device, retry.locale);
 	if (err) {
 		warning("rbctl_voip: re-attach open failed (%m); retrying\n", err);
-		tmr_start(&retry.timer, 2000, reconnect, NULL);
+		schedule_retry();
 	}
 }
 
 static void fail(int err)
 {
 	warning("rbctl_voip: %s failed (%m)\n", a.phase == READY ? "call control" : a.phase == STARTUP ? "startup" : "attach", err);
-	retry.recovering |= a.phase == READY;
 	close_session();
 	phone_board_lost();
-	if (retry.recovering) tmr_start(&retry.timer, 1000, reconnect, NULL);
+	schedule_retry();
 }
 
 static void timer_handler(void *arg);
@@ -191,7 +201,7 @@ static int submit_step(void)
 		return ETIMEDOUT;
 	if (a.cursor == a.count) {
 		a.phase = READY;
-		retry.recovering = false;
+		retry.delay_ms = 1000;
 		tmr_cancel(&a.timer);
 		info("rbctl_voip: board ready (%s, locale %u)\n",
 		     a.dsp_state ? "cold" : "warm", a.locale);
@@ -409,10 +419,14 @@ static int start_session(const char *device, unsigned locale)
 
 int voice_attach_start(const char *device, unsigned locale)
 {
-	if (!device || strlen(device) >= sizeof(retry.device)) return EINVAL;
-	if (a.phase != DOWN || retry.recovering) return EALREADY;
+	if (!device || !*device || strlen(device) >= sizeof(retry.device) || locale > 20)
+		return EINVAL;
+	if (a.phase != DOWN || retry.enabled) return EALREADY;
 	strcpy(retry.device, device);
 	retry.locale = locale;
 	tmr_init(&retry.timer);
-	return start_session(device, locale);
+	retry.enabled = true;
+	retry.delay_ms = 1000;
+	reconnect(NULL);
+	return 0;
 }

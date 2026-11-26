@@ -30,7 +30,7 @@ def response(request):
 
 
 def main(binary, modules, shim, scenario='stopped'):
-    if scenario not in ('stopped', 'running', 'missing-state', 'missing-start', 'missing-locale', 'reject-default'):
+    if scenario not in ('stopped', 'running', 'late-board', 'missing-state', 'missing-start', 'missing-locale', 'reject-default'):
         raise ValueError(scenario)
     warm = scenario == 'running'
     locale = 7 if warm else 10
@@ -70,7 +70,7 @@ def main(binary, modules, shim, scenario='stopped'):
             board.send(frame[6:12] + responder.mac + b'\xdd\x02' + hdr +
                        struct.pack('>H', crc(hdr + bytes(2) + body)) + body)
         with board, inherited, (root / 'run.log').open('w+') as log:
-            duration = '7' if scenario.startswith('missing-') else '2'
+            duration = '8' if scenario == 'late-board' else '7' if scenario.startswith('missing-') else '2'
             proc = subprocess.Popen([binary, '-4', '-c', '-f', tmp, '-t', duration], cwd=tmp,
                                     stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                     pass_fds=(inherited.fileno(),),
@@ -82,9 +82,15 @@ def main(binary, modules, shim, scenario='stopped'):
                     readable, _, _ = select.select([sock, board], [], [], 0.1)
                     if board in readable:
                         frame = board.recv(2048)
+                        if attach_seen and frame[15] == 0x1a and (scenario.startswith('missing-') or scenario == 'reject-default'):
+                            continue  # Keep the negative fixture offline after its first failure.
                         reply = responder.reply(frame)
                         if reply:
                             if frame[15] == 0x1b:
+                                if scenario == 'late-board' and not attach_seen:
+                                    attach_seen = True
+                                    board.send(reply)  # No DSP state until the next attach.
+                                    continue
                                 attach_seen = True
                                 if warm or scenario == 'missing-state':
                                     board.send(reply)
@@ -131,9 +137,11 @@ def main(binary, modules, shim, scenario='stopped'):
                 state = 'running' if warm else 'stopped'
                 attach_ok = event_ack and f'rbctl_voip: attached (DSP {state})' in output
             ready = 'rbctl_voip: board ready' in output
-            if scenario in ('stopped', 'running'):
+            if scenario in ('stopped', 'running', 'late-board'):
                 path = 'warm' if warm else 'cold'
                 startup_ok = f'rbctl_voip: board ready ({path}, locale {locale})' in output
+                if scenario == 'late-board':
+                    startup_ok &= 'rbctl_voip: attach failed (Connection timed out' in output
             elif scenario == 'missing-state':
                 startup_ok = not ready
             else:
