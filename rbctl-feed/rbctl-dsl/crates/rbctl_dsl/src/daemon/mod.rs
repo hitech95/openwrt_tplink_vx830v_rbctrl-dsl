@@ -200,6 +200,10 @@ pub(crate) struct Daemon {
     last_apply: Option<Instant>,
     /// One TC-layer hotplug emission per Up session.
     tc_emitted: bool,
+    /// Last line state observed from a successful board poll.
+    line_up: bool,
+    /// Emit a diagnostic when the line remains continuously silent.
+    nosignal_watchdog: bool,
     /// When the line has been continuously in NoSignal (watchdog dwell).
     nosignal_since: Option<Instant>,
     /// Whether the current silent episode already logged its warning
@@ -216,6 +220,7 @@ impl Daemon {
         notify_script: Option<&str>,
         overrides: &CliOverrides,
         monitor: bool,
+        nosignal_watchdog: bool,
     ) -> Result<Self, i32> {
         // 0. Single-instance guard — before touching the board, the IPC
         //    socket, or ubus. A concurrent instance would steal the control
@@ -300,6 +305,8 @@ impl Daemon {
             links_auto_corrected: Default::default(),
             last_apply: None,
             tc_emitted: false,
+            line_up: false,
+            nosignal_watchdog,
             nosignal_since: None,
             nosignal_warned: false,
         };
@@ -383,8 +390,10 @@ impl Daemon {
                 self.on_worker_event(ev);
             }
 
-            // NoSignal watchdog — recover a line that trains nowhere.
-            self.watchdog_tick();
+            // Optional NoSignal watchdog — diagnostic only.
+            if self.nosignal_watchdog {
+                self.watchdog_tick();
+            }
 
             // Signals → commands.
             if RELOAD.swap(false, Ordering::SeqCst) {
@@ -436,7 +445,7 @@ impl Daemon {
 
     // ── event handlers (the gate) ────────────────────────────────────────
 
-    /// NoSignal watchdog — detection and diagnostics only, never action.
+    /// NoSignal watchdog — optional diagnostics only, never action.
     ///
     /// An *open* modem retries training on its own (field pcaps show
     /// minutes of NoSignal↔Initializing cycling with zero host traffic),
@@ -513,14 +522,41 @@ impl Daemon {
                 self.config_applied = false;
                 self.links_provisioned.clear();
                 self.vlans_owned.clear();
+                self.line_up = false;
+                for link in self.cfg.data_links() {
+                    let vlan = link.transport_vlan();
+                    if vlan::vlan_iface_exists(&self.parent, vlan) {
+                        vlan::vlan_iface_updown(&self.parent, vlan, false);
+                    }
+                }
                 // Keep links_auto_corrected: the board (if it comes back)
                 // still holds the swapped link type, not the config one.
             }
             WorkerEvent::LineState { status, data_path, modulation } => {
+                self.line_up = status.is_up();
                 let event = link_status_to_event(status);
                 log::info!("line state: {status:?} → {event:?}");
+                // Bring the data plane up before hotplug can start PPP; for
+                // shutdown transitions, let hotplug stop PPP before lowering
+                // the transport interfaces.
+                if status.is_up() && !self.monitor {
+                    for link in self.cfg.data_links() {
+                        let vlan = link.transport_vlan();
+                        if vlan::vlan_iface_exists(&self.parent, vlan) {
+                            vlan::vlan_iface_updown(&self.parent, vlan, true);
+                        }
+                    }
+                }
                 if let Some(script) = self.notify_script.as_deref() {
                     hotplug::emit_status(script, event);
+                }
+                if !status.is_up() && !self.monitor {
+                    for link in self.cfg.data_links() {
+                        let vlan = link.transport_vlan();
+                        if vlan::vlan_iface_exists(&self.parent, vlan) {
+                            vlan::vlan_iface_updown(&self.parent, vlan, false);
+                        }
+                    }
                 }
                 if status.is_up() {
                     self.on_line_up(data_path, modulation);
@@ -548,6 +584,12 @@ impl Daemon {
                         log::info!("{}.{} already exists — reusing", self.parent, vlan)
                     }
                     Err(e) => log::warn!("VLAN create {}.{}: {e}", self.parent, vlan),
+                }
+                // Link provisioning can complete before or after the first
+                // line-state event. Reconcile here too so an already-trained
+                // line does not leave a newly-created VLAN down indefinitely.
+                if !self.monitor {
+                    vlan::vlan_iface_updown(&self.parent, vlan, self.line_up);
                 }
             }
         }
@@ -854,6 +896,12 @@ impl Daemon {
         // Teardown through the gate: monitor mode never configured the
         // board, so it must not tear it down either.
         if !self.monitor {
+            for link in self.cfg.data_links() {
+                let vlan = link.transport_vlan();
+                if vlan::vlan_iface_exists(&self.parent, vlan) {
+                    vlan::vlan_iface_updown(&self.parent, vlan, false);
+                }
+            }
             // Deprovision the board side first (both del opcodes per vlan:
             // we may hold queued-not-materialized nodes of either type),
             // then the line.
@@ -894,10 +942,17 @@ pub fn run(
     notify_script: Option<&str>,
     overrides: &CliOverrides,
     monitor: bool,
+    nosignal_watchdog: bool,
 ) -> i32 {
     install_signal_handlers();
 
-    let daemon = match Daemon::startup(config_iface, notify_script, overrides, monitor) {
+    let daemon = match Daemon::startup(
+        config_iface,
+        notify_script,
+        overrides,
+        monitor,
+        nosignal_watchdog,
+    ) {
         Ok(d) => d,
         Err(code) => return code,
     };
