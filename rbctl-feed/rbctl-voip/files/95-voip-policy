@@ -1,0 +1,2 @@
+#!/bin/sh
+/usr/bin/ucode /usr/libexec/rbctl-voip-migrate.uc

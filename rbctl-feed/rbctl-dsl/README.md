@@ -4,18 +4,20 @@ OpenWrt package for the EcoNet xDSL board configuration daemon. Communicates
 with the board over raw Ethernet (`0x88B5`) and manages transport VLAN
 interfaces via netlink.
 
+**Status:** validated on the VX830v with board-side service VLAN tagging and a working PPPoE session. This daemon handles xDSL; the same [OpenWrt feed](../README.md) separately provides the [two-port VoIP service](../rbctl-voip/README.md).
+
 ## Build
 
 ```sh
 # In the OpenWrt buildroot:
-make package/rbctl-dsl/compile V=s
+make package/feeds/rbctl/rbctl-dsl/compile V=s
 ```
 
 Output: `bin/packages/<arch>/rbctl/rbctl-dsl-<version>.apk`
 
 ## Runtime dependencies
 
-The `.apk` declares `+libuci +libubox +libnl-tiny`. The ubus stack is pure Rust
+The package recipe declares `+libuci +libnl-tiny`. The ubus stack is pure Rust
 (`ubus-zero`) — no `libubus.so` needed.
 
 ## Usage

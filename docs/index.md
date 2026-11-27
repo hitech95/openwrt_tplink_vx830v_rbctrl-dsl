@@ -1,4 +1,6 @@
-# remote_board — Reverse Engineering Documentation
+# VX830v xDSL and VoIP documentation
+
+For the OpenWrt packages, start with the [feed guide](../rbctl-feed/README.md). For analog telephony, see [voice features and OEM comparison](voip/feature-status.md) or the [VoIP engineering index](voip/index.md). The architecture overview below describes the xDSL control and data paths.
 
 Analysis of the `remote_board` ELF binary, its shared library `libcmm.so`, and
 the DSL board they manage. **Two architectures are in play** (confirmed from the
@@ -134,6 +136,7 @@ loop (`msg_serveForever`) with its own ack/retransmit.
 ### Reference (in `docs/`)
 | Document | Topic |
 |----------|-------|
+| [voip/index.md](voip/index.md) | **AArch64 VoIP analysis** — master processes, DSP bridge, SIP/CMSIP and open-source replacement research |
 | [rbctl-dsl.md](rbctl-dsl.md) | **The Rust daemon (newcomer guide)** — workspace layout, crates & deps, startup & runtime lifecycle, request flow, with diagrams |
 | [e2e.md](e2e.md) | **E2E test harness** — the real MIPS board firmware vs the real daemon under qemu-user, on a host: architecture, scenarios E1–E8, running & CI guide |
 | [safety-audit.md](safety-audit.md) | **Type/memory-safety audit (pre-P4)** — every `unsafe` site, fixes applied, SDK verification gate |

@@ -1,0 +1,16 @@
+[package]
+name = "rbctl_voip_net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AF_PACKET transport for the VX830v voice link (one socket per EtherType)"
+publish = false
+
+[dependencies]
+af_packet = { workspace = true }
+libc = { workspace = true }
+rbctl_voip_proto = { workspace = true }
+
+[lints]
+workspace = true

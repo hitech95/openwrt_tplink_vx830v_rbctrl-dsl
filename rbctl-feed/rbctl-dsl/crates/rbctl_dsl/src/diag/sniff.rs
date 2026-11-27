@@ -81,9 +81,11 @@ pub fn sniff(config_iface: &str, dump_file: Option<&str>) {
         }
 
         count += 1;
+        // sll_pkttype: 4 = PACKET_OUTGOING (our TX echoed to the ETH_P_ALL
+        // socket); 0..=3 = HOST/BROADCAST/MULTICAST/OTHERHOST (received).
         let direction = match pkt.pkt_type {
-            0 => "OUT",
-            1 => "IN ",
+            4 => "OUT",
+            0..=3 => "IN ",
             _ => "???",
         };
 

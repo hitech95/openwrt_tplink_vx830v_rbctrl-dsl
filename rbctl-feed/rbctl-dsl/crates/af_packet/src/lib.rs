@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `AF_PACKET` raw Ethernet socket for Linux.
 //!
 //! Creates a `SOCK_RAW` socket bound to a specific network interface. A
@@ -91,10 +92,11 @@ pub struct RawSocket {
 pub struct RxPacket<'a> {
     pub data: &'a [u8],
     pub src_mac: [u8; 6],
-    /// `sockaddr_ll.sll_pkttype` — wire direction and special types.
-    /// `0` = PACKET_OUTGOING (our own TX echoed back), `1` = PACKET_INCOMING,
-    /// `2` = PACKET_BROADCAST, `3` = PACKET_MULTICAST. Sniff tools use this to
-    /// label TX vs RX.
+    /// `sockaddr_ll.sll_pkttype` — wire direction and special types
+    /// (`<linux/if_packet.h>`): `0` = PACKET_HOST (addressed to us),
+    /// `1` = PACKET_BROADCAST, `2` = PACKET_MULTICAST, `3` = PACKET_OTHERHOST,
+    /// `4` = PACKET_OUTGOING (our own TX echoed back to an `ETH_P_ALL`
+    /// socket). Sniff tools use this to label TX vs RX.
     pub pkt_type: u8,
 }
 
@@ -199,6 +201,23 @@ impl RawSocket {
         self.local_mac
     }
 
+    /// Switch the socket to non-blocking mode (`O_NONBLOCK`), so it can be
+    /// driven by an external `poll()`/event loop. `recv` then returns
+    /// `ErrorKind::WouldBlock` when no frame is queued.
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        let fd = self.fd.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let flags = if nonblocking {
+            flags | libc::O_NONBLOCK
+        } else {
+            flags & !libc::O_NONBLOCK
+        };
+        check(unsafe { libc::fcntl(fd, libc::F_SETFL, flags) })
+    }
+
     pub fn set_timeout(&self, timeout: Duration) -> io::Result<()> {
         let tv = libc::timeval {
             tv_sec: timeout.as_secs() as _,
@@ -266,6 +285,14 @@ impl RawSocket {
             src_mac: sa.sll_addr[..6].try_into().unwrap(),
             pkt_type: sa.sll_pkttype as u8,
         })
+    }
+}
+
+/// Expose the descriptor for `poll()`/`epoll`; ownership stays with the
+/// `RawSocket`.
+impl AsRawFd for RawSocket {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.fd.as_raw_fd()
     }
 }
 

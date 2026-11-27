@@ -3,7 +3,7 @@ name = "af_packet"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "MIT"
 description = "AF_PACKET raw Ethernet socket for Linux (libc-only, no external C deps)"
 publish = false
 

@@ -9,7 +9,7 @@ PKG_NAME:=rbctl-dsl
 PKG_VERSION:=0.5.1
 PKG_RELEASE:=2
 
-PKG_LICENSE:=GPL-2.0-only
+PKG_LICENSE:=GPL-2.0-only MIT
 PKG_MAINTAINER:=rbctl-dsl contributors
 
 # Trigger the Rust host toolchain bootstrap (rustc + cargo) on first build.
@@ -24,16 +24,9 @@ RUST_PKG_LOCKED:=1
 CARGO_PKG_PROFILE:=release
 
 include $(INCLUDE_DIR)/package.mk
-# External feed: reference rust-package.mk via $(TOPDIR)/feeds/ rather than the
-# relative path used by in-tree feed packages (../../lang/rust/...).
-include $(TOPDIR)/feeds/packages/lang/rust/rust-package.mk
-
-# Force panic=abort: the Rust feed's rust-values.mk sets
-# CARGO_PROFILE_RELEASE_PANIC=unwind globally, which drags in ~120 KB of unwind
-# tables (.eh_frame / .eh_frame_hdr / .gcc_except_table). For a procd-supervised
-# daemon that is restarted on crash, abort-on-panic is both smaller and the
-# desired failure model (Cargo.toml already requests panic="abort"). Appending
-# the same env var later wins in the shell command line (VAR=a VAR=b cmd → b).
+# Use OpenWrt's in-tree Rust package helper. Recent snapshots provide this in
+# include/; the packages-feed copy is for buildroots predating that integration.
+include $(TOPDIR)/include/rust-package.mk
 CARGO_PKG_CONFIG_VARS+=CARGO_PROFILE_RELEASE_PANIC=abort
 
 # Steer the vendored -sys crates at the SDK target staging so they link the
@@ -48,6 +41,14 @@ export LIBNL_TINY_DIR:=$(STAGING_DIR)/usr
 # --target selects the aarch64-musl ABI (no __float128), -isystem points at
 # the musl stdint.h / bits/*.h in the SDK toolchain.
 export BINDGEN_EXTRA_CLANG_ARGS:=--target=$(RUSTC_TARGET_ARCH) -isystem $(TOOLCHAIN_DIR)/include
+
+# OpenWrt snapshots cache this value under a make-variable name containing
+# CURDIR. This external feed path contains spaces, which makes that variable
+# assignment invalid; compute the same reproducible git timestamp directly.
+PKG_SOURCE_DATE_EPOCH:=$(shell $(TOPDIR)/scripts/get_source_date_epoch.sh "$(CURDIR)")
+
+# Local workspace, no source download. The SDK helper supplies --offline and
+# --locked; prefetch the locked dependencies into the SDK Cargo cache first.
 
 # OpenWrt's default Build/Prepare only copies ./src/ into PKG_BUILD_DIR, but
 # this package is a Cargo workspace (Cargo.toml + crates/ at the root, not

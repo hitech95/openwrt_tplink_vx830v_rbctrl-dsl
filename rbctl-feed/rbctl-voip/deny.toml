@@ -1,0 +1,35 @@
+# cargo-deny policy (T2.11). Run: cargo deny check licenses bans sources
+#
+# The library is linked into baresip next to OpenSSL 3 (Apache-2.0); the
+# combination is distributed under GPLv3 via our "or later" grant. Every
+# crate must therefore be GPLv3-compatible. GPL-2.0-only is NOT allowed:
+# it would pin the combination to GPLv2, which is incompatible with
+# Apache-2.0.
+
+[graph]
+all-features = true
+
+[licenses]
+# Only licences actually present in the graph; extend deliberately (BSD,
+# ISC and Zlib are also GPLv3-compatible) when a new dependency needs it.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "GPL-2.0-or-later",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# Workspace crates are unpublished; still check their declared licence.
+ignore = false
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
