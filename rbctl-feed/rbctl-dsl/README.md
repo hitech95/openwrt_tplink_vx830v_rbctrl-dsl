@@ -47,7 +47,16 @@ Common options for `daemon` / `selftest` / `sniff`:
 `daemon` additionally accepts `--notify <path>`, `--syslog`, and UCI overrides
 (`--annex`, `--line-mode`, `--tone`, `--xfer-mode`, `--vpi`, `--vci`,
 `--encaps`, `--payload`, `--bitswap`, `--sra`, `-t/--transport-vlan`,
-`--link-index`, `--link-vid`, `--link-pbit`).
+`--link-index`, `--link-vid`, `--link-pbit`). The optional
+`--nosignal-watchdog` flag enables a one-per-episode warning when the line
+remains continuously silent for 30 seconds; it is disabled by default and
+never changes line state or sends board commands. The init script enables it
+at boot when `network.dsl.nosignal_watchdog` is set to `1`:
+
+```
+config dsl 'dsl'
+    option nosignal_watchdog '1'
+```
 
 ### Data links (UCI)
 
@@ -65,7 +74,8 @@ config ptm
 With no sections, a single implicit untagged PTM link at index 0 is
 provisioned. Links are queued while the line is down and materialized
 by the board at showtime (the OEM flow — validated end-to-end by the
-E2E harness and on-target with a working PPPoE session).
+E2E harness and on-target with a working PPPoE session). Host-side
+transport VLANs remain down until the line reaches showtime.
 
 ### Selftest
 
