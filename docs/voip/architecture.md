@@ -2,7 +2,11 @@
 
 [VoIP index](index.md) · [Proxy](master-proxy.md) · [CMSIP](cmsip.md) · [Replacement](replacement.md)
 
-## Scope and evidence
+## OpenWrt replacement startup (M5)
+
+`/etc/init.d/voip` renders `/etc/config/voip` into a private generation under `/var/run/voip`, switches `current` to that generation, and asks procd to start baresip. The `rbctl_voip` module owns the board link, retries attachment until the board is ready, and publishes the `voip` ubus object. The board can start with both accounts and ports disabled. Account/line changes reload in the running process, waiting for idle lines if necessary; a board-setting change restarts the instance. See the [integration notes](m5-integration.md) and [live verification](test-report.md#m5-review-verification).
+
+## Stock firmware: scope and evidence
 
 This document covers the AArch64 Linux master board. Binary observations use
 Ghidra and the extracted firmware at `vx830v/squashfs-root/`; absolute Ghidra

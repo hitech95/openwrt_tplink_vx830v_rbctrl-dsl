@@ -85,3 +85,26 @@ command values 10, 11 and 12, managing per-channel RTP/RTCP sockets. Their
 full struct layouts, semantic names, IPv6 details, port policy and behavior
 on errors need verification before implementing a replacement. UDP media
 handling is distinct from SIP signaling.
+
+### What clocks the stock downlink?
+
+For ordinary RTP the trigger is **network UDP readability**. In the AArch64
+`voip_server_proxy` downstream worker (`4040e4`), the `select` at `404448`
+has a null timeout; it is not a 20 ms timer. The ready RTP socket is read at
+`404598`, and the DD03 sender is called at `404624` with the datagram length
+plus the four-byte slot/selector prefix. The original RTP sequence, timestamp
+and encoded audio pass through. Board→network media runs in a separate worker;
+the downstream send does not wait for a packet from the board.
+
+The [OEM worker fixture](../../examples/voip_qemu/workers.py#L132-L141) also
+received the wrapped RTP **before** injecting the first board RTP on the first
+call. Rechecked under QEMU on 2026-11-26. This tests the trigger and packet
+contents, not OEM real-time scheduling or hardware latency.
+
+On the [Econet side](peer.md#rtp-addressing-and-codec-limits), the IPv4 relay
+delivers to a loopback RTP endpoint for the configured ADAM stream. This
+separates packet arrival from analog sample playout; the relay evidence does
+not identify the DSP's sample-clock source or its active jitter-buffer policy.
+Our baresip module instead consumes decoded audio and forms fresh board RTP.
+Its [board-clock result](test-report.md#t420-board-clock-two-line-drift-trial)
+validates pacing that extra stage, not an OEM one-packet-out-per-uplink rule.

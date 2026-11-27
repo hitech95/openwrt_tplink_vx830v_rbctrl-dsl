@@ -1,5 +1,212 @@
 # VX830v FOSS voice milestone results
 
+## M5 review verification
+
+- **A6 (VX830v, LuCI r7 / service r6):** saved hunt, short/long timers 7/12 seconds, required registration and `internal=2` through the account editor. With both ports assigned, both sets of runtime keys contained the selected values. Reopened the editor, cleared the mapping and unchecked the registration flag: UCI removed the mapping and wrote `0`. Original configuration restored and hash verified; board ready, no calls. Hunt order is fixed (PHONE1 then PHONE2) and explained in the editor.
+
+- **T5.3, T5.7 (VX830v, 2026-11-27):** upgraded the module, LED, service and LuCI from r5 to router-verified r6 APKs on the existing image. With no accounts enabled, changed IT to ETSI. A **new** baresip process (5385) logged `board ready (warm, locale 6)`. Restored the original UCI file and reloaded. An unauthenticated JSON-RPC `voip.dial` to `/ubus` returned `-32002 Access denied`.
+- **T5.8, T5.11 (target ucode, QEMU):** `tests/m5-policy.py` verified incomplete/disabled accounts and dangling/unassigned lines, malformed identity rejection without secret disclosure, and legacy migration including conflicting dial plans and idempotence. The installed LuCI validation RPC returned `error: user` for a malformed enabled account.
+- **T5.10 (Linux host):** `BARESIP_PREFIX=<SDK-derived 4.9.0 prefix> scripts/check.sh` passed Rust/ABI checks and all **33/33** module tests from the real repository path. The unchanged immediate double-FLASH test also passed five consecutive runs. A second FLASH can precede the answer to the hold re-INVITE: defer resume until libre finishes that transaction.
+- **T5.12 and deferred reload (AArch64 QEMU):** `tests/m5-smoke.py` verified third-party INVITE received 403 without ringing; disabling the filter produced 180 and a board ring. An account reload while a call existed retained the old account and call, reported pending, then registered the replacement after hangup. This exercised the rendered/ubus path, not a live UCI commit during an answered call.
+- **T5.9 (LuCI on the VX830v):** the account editor refused `bad user`. Created a temporary valid account with registration disabled, picked it by SIP address for PHONE2, enabled it and verified the runtime AOR and idle line. Deleted the still-referenced account via LuCI: its line reference disappeared and the board stayed ready. Selected Unassigned on PHONE1; unticking Enabled, Caller ID, Call waiting and MWI wrote four explicit `0` options in UCI.
+- **T5.13 (VX830v):** established a call to a workstation SIP fixture, committed a new account user and dispatched `reload_config`. While pending, the dialog ID, connected line and old AOR were unchanged. After hangup, pending cleared and the replacement AOR appeared without manual retry.
+- **A3 / T4.13 handset recheck — pass (VX830v, baresip 4.9.0, service r6, 2026-11-27):** PHONE1 dialed `702#`; PHONE2 answered. Using PHONE2's R button, the operator confirmed recall dial tone on hold and speech in both directions after resume without redial. On the same PCMA dialog, ubus recorded PHONE2 `connected → held → connected`, with `CALL_HOLD` at 34 s and `CALL_RESUME` at 43 s. Both lines returned to idle after hangup. This complements the immediate double-FLASH host regression.
+- Original IT config restored byte-for-byte, no pending UCI changes or calls. Only **T5.1** on a clean image remains, deferred. T5.6 has separate r5 reboot evidence below.
+
+## T5.6 live: registered account across reboot (2026-11-27)
+
+With both phones on-hook and no active calls, provisioned a temporary PCMA
+account to a private LAN Asterisk 22.5.2 PJSIP registrar. Confirmed 200 OK and
+`registered=true` before reboot. Rebooted the VX830v without changing the image.
+On return, the same temporary AOR again reported `registered=true`; the board
+reported ready and the one enabled line was idle. Boot's initial board attach
+timed out twice before the retry succeeded in the same baresip process. No call
+was placed during this reboot check. Restored `/etc/config/voip` byte-for-byte
+to the disabled-account default (SHA-256 `285f07c3ad3a071c58f7abaf5a48c9914719764a634d26d14e6de235a849c496`), verified no calls, then stopped the local registrar. No reboot is pending.
+
+## T5.3 / T5.6 completion rerun (2026-11-27)
+
+Using updated r5 packages on the `r36953+1633-0ab51fb9c1` VX830v. Upgraded the
+extension, service, LED helper, full metapackage and LuCI package; `apk` ran all
+post-upgrade hooks successfully, kept the voice config hash unchanged and left
+the board ready. T5.3: with both test accounts disabled and no calls, changed
+`locale=IT` to `ETSI`, committed and reloaded. Rendered profile changed from host
+index 10 to 6, the board remained ready, config processing completed and UCI was
+restored/byte-compared to IT. Baresip PID remained the same: procd's generation
+data refresh did not prove a board re-init on r5. See the r6 result above.
+
+T5.6: rebooted with accounts disabled, IT selected, and no active calls. The
+same image revision returned; baresip started, the first two attach attempts
+timed out, the third attached in the same process, and ubus reported board
+ready with both lines disabled. The original config hash matched after boot.
+This run proves boot retry only; the separate provisioned-account test above covers registration.
+
+## Updated VX830v buildroot rerun (SDK r38588)
+
+Repeated `scripts/check.sh`: all Rust tests, C ABI/header smoke, Clippy,
+license, QEMU differential and rustdoc passed. The six target APKs rebuilt
+under `/home/nicolo/openwrt` using the active mediatek/filogic Cortex-A53
+configuration, Rust 1.99.1 toolchain, baresip/libre 4.9.0, libubox ABI
+20261103 and libubus ABI 20261028. APKs verify with this buildroot's public
+key. They require the **new** ABI and are not for the currently running
+VX830v firmware.
+
+Managed-module QEMU smoke passed against the new target binaries and reported
+registered replacement-account state without reattaching the board.
+Native baresip 4.9 host integration passed 32/33; only the immediate solo
+hold/resume audio scenario fails. Delay 0.5 s or 2 s between the two simulated
+FLASH events makes that media assertion pass, so an outstanding hold SDP
+exchange is likely when the immediate resume is sent. No production timer or
+test expectation changed to hide this behavior.
+
+The new full image manifest contains baresip and rbctl services, but still
+includes OpenSSL; the stock libre 4.9 package links to `libssl.so.3` and
+`libcrypto.so.3`. mbedTLS remains present for other users. No image was flashed.
+
+## T5.4–T5.5 live: ubus call control and events (2026-11-27)
+
+Ran one synthetic loopback SIP call from `ubus dial` on line 0 to a temporary
+PCMA endpoint on the LAN. It returned 180, answered with PCMA 200, and the
+router reported `connected`/`PCMA`. `ubus hangup` sent BYE; the remote endpoint
+answered 200 and the line cleared. The local ubus listener observed outgoing,
+established and closed events. This exercises the master-side ubus and SIP path,
+not an operator handset call (the preceding T5.2/two-phone test covers that
+path). Original UCI was restored and hash-checked; zero calls remain.
+
+## M5 live: handset dial, ring and speech (2026-11-27)
+
+On the booted VX830v image (`r36953+1633-0ab51fb9c1`, baresip 4.9.0),
+PHONE1 had dial tone and dialed `702#`; PHONE2 rang. The first call was
+answered with SIP 200 OK but closed immediately: baresip tried the generic
+`rbctl_voip,phone` audio device and returned ENODEV. With distinct mapped
+accounts, setting the device name alone was insufficient: baresip uses the
+account device only if the account also specifies the audio module.
+
+Retried with the corrected renderer's per-account `audio_source` and
+`audio_player` in the runtime accounts file. Both call legs selected their
+numbered source and player (`phone0`, `phone1`); ubus showed connected PCMA
+on both slots at 55 seconds. The operator confirmed clear speech in both
+directions. After hangup both ports returned to idle with zero calls. The
+original UCI config was restored and byte-compared; the board remained ready.
+This was one local handset-to-handset call, not a provider call
+or an echo/latency test. Tester images/packages predating this renderer fix
+do not include it.
+
+## M5 live: new image boot and account reload (2026-11-27)
+
+VX830v `r36953+1633-0ab51fb9c1`, kernel 6.18.64. `voip` was enabled and
+running after boot. The first attach timed out; the same baresip process then
+attached to the stopped DSP and reached cold ready, locale 10. The shipped
+account was disabled, with no active calls and both lines disabled.
+
+T5.2: enabled a temporary shared PCMA account pointing at a synthetic UDP LAN
+registrar, committed UCI and reloaded `voip`. The registrar answered REGISTER,
+ubus reported registered and both slots idle; FXS brightness was green 1/red 0.
+The baresip PID and boot-log board-ready count were unchanged. Restored and
+byte-compared the original UCI file, reloaded, and verified board ready/no
+accounts/both lines disabled. No INVITE, speech or provider authentication was
+tested. Boot retry observed; registered cold boot with a provisioned account
+remains a separate T5.6 check.
+
+## Updated buildroot rerun — 2026-11-27 (no router access)
+
+Rebuilt the feed after a package clean in an isolated writable overlay of the
+configured `~/openwrt` VX830v buildroot (`e6ce654d6c`, telephony `06feffc2`,
+mediatek/filogic, GCC 15.3.0, baresip/libre 4.9.0). Enabled the full
+metapackage for this invocation only. All six APKs (extension, service, LED,
+full, debug CLI, LuCI) passed `apk verify` with the buildroot public key.
+The extension requires `libubox20261103` and `libubus20261028`; the previous
+firmware has `libubox20260721` and `libubus20260628`. The identical r4 release
+number does not imply compatibility. No firmware image or old tester archive
+was replaced.
+
+Rust `scripts/check.sh` passed, including the host suites, C/header smoke,
+Clippy, license checks and the 19-record QEMU differential. The managed
+AArch64 QEMU smoke passed with the updated target libraries and an emulated
+board. Baresip warns that `audio_jitter_buffer_delay` is deprecated.
+
+Native loopback CTests against 4.9.0: **32/33 passed**, including G.722 and
+mandatory SRTP, after correcting the registration fixture's stale 3.16 banner
+assertion. `baresip_call_solo_hangup` consistently timed out at its post-resume
+two-way audio check, including when run alone. Its fixture sends the second
+FLASH as soon as local hold commands finish. Establish whether the hold SDP
+exchange has completed at that instant; don't count the local channel reopen
+as restored speech. This rerun is not a T5.1 clean-image install or a live
+handset result.
+
+## M5 preflight: OpenWrt integration
+
+**2026-11-27 tester bundle follow-up:** built libre and baresip 3.16.0 for
+AArch64 and packaged the five required modules. The [offline tester bundle](tester-apk.md)
+resolves all 12 APKs on the VX830v, including four unchanged dependencies
+from signed OpenWrt indexes. Installed into an isolated tmpfs APK root seeded
+with the target's installed-package database, scripts disabled. Packaged
+baresip loaded the voice module, codecs, resampler and SRTP on the router
+using loopback, no SIP account and no board access. Installed size (package
+metadata): 10,432,272 bytes; starting free overlay: 7.7 MiB. No persistent
+install, clean-image boot, or new call claimed. T5.1 remains open for those
+installation checks, not for missing telephony packages in this bundle.
+
+**T5.1 bench install attempt (2026-11-27): blocked at dependency resolution.**
+Built a signed `rbctl-voip-0.1.0-r2.apk` for `aarch64_cortex-a53` using the
+service recipe's install step and OpenWrt's host `apk mkpkg`. This was a local
+targeted build, not a clean SDK run. Rebuilt against the VX830v's libubox
+revision `e7608b69` (`libubox.so.20260721`; local staging had `20260708`) and
+verified the module needs `libubus.so.20260628`. The target snapshot
+`r35484+502-11a859cca7` verified the APK with a temporary public-key directory.
+`apk add` then refused it: current indexes provided libre2 4.9.0 instead of
+3.16.0 and no baresip or required baresip modules. No package or service was
+installed. Supply the matching telephony package set, preferably in a clean
+image with adequate space, before rerunning. APK SHA-256:
+`24e32b4bd5671c82b9f00d8422c98a984a000624c647d6324922454130abb40d`.
+
+The production AArch64 module builds with libubus/libubox. The package metadata
+lists the service, CLI and optional LED helper. The host module suite passed
+33/33. The [managed smoke](../../rbctl-feed/rbctl-voip/tests/m5-smoke.py) runs
+the target renderer, baresip, ubusd and ubus CLI under QEMU with an emulated
+board and loopback SIP. A replacement AOR registered (200 OK) without a second
+board attach. Per-line dial, call enumeration, refusal to reload during a call,
+and hangup were exercised. These are preflight results; T5.1–T5.7 require a
+matching SDK, clean image and the [live checks](m5-integration.md).
+
+## T4.20: board-clock two-line drift trial
+
+Same PCMA calls, markers and 2–8 packet jitter profile as the timer trial below;
+only the playout clock changed. The collector identified the source on each slot
+from its markers. Both calls ran concurrently for 600 s. An earlier setup attempt
+reached only one extension; it did not start the measurement and is excluded.
+
+| Board slot (extension) | First-minute median | Last-minute median | Growth |
+|---|---:|---:|---:|
+| 0 (602) | 56.872 ms | 59.049 ms | +2.178 ms |
+| 1 (601) | 46.886 ms | 49.050 ms | +2.164 ms |
+
+**Downlink drift passed on both lines** (limit 20 ms). All 600 markers per
+line matched from SIP ingress to DD03 egress, including all 60 in each end
+window; neither capture reported kernel drops. Receivers stayed off-ear with
+no returned microphone audio, so conversational echo remains unverified.
+
+## T4.20: timer-clock two-line drift trial
+
+Two independent simultaneous PCMA calls completed 600 s, timer clock, LAN jitter
+profile 2–8, low-level one-way synthetic markers once per second, receivers
+off-ear. SIP ingress on `br-lan` and DD03 egress on `lan0.500` used the router's
+clock. No uplink audio was echoed. The actual dial mapping was 601 → slot 1,
+602 → slot 0, confirmed by both the SIP account log and distinct board markers.
+
+| Board slot | First minute, matched / 60 (median) | Last minute, matched / 60 (median) | Observed growth |
+|---|---:|---:|---:|
+| 0 (602) | 12 / 60 (115.7 ms) | 60 / 60 (189.6 ms) | +73.9 ms |
+| 1 (601) | 12 / 60 (109.6 ms) | 60 / 60 (189.4 ms) | +79.7 ms |
+
+**Partial baseline:** the initial collector assumed the opposite mapping and
+discarded the mismatched egress timestamps. A corrected collector running from
+second 48 matched 552 markers per line, with no wrong-slot markers or kernel
+capture drops. Both observed increases exceed 20 ms; these are not full
+first-minute medians and do not establish a formal comparison with complete
+coverage. The module reported zero missed periods and at most 1 ms callback
+lateness at 30,000 packets per slot. Conversational echo was not tested.
+
 ## T4.18 live: raw per-port gain evaluation
 
 Italy 10, one slot at a time, handsets off-ear. A Scarlett headphone driver

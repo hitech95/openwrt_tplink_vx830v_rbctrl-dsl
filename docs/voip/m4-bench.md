@@ -24,7 +24,9 @@ Compare each port separately to the 20 ms criterion. Echo is a separate
 observation: whether each talker hears delayed self-speech, at both ends of
 both calls. Do not recreate the at-ear dual-echo loop; if ordinary conversation
 cannot be checked, report drift alone and leave echo open. Give instructions and
-await an explicit Ready before each live phase. Neither clock has a T4.20 result yet.
+await an explicit Ready before each live phase. [Board pacing passed drift](test-report.md#t420-board-clock-two-line-drift-trial)
+on both slots (+2.2 ms each). Timer showed +74/+80 ms with partial first-minute
+coverage. Only the conversational echo check remains for this gate.
 
 ## Earlier bench results
 

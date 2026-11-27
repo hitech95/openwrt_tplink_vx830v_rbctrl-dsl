@@ -9,12 +9,14 @@ no live packet capture or on-device behavior has been validated yet.
 
 | Document | Contents |
 |---|---|
+| [Feature status and OEM comparison](feature-status.md#stock-firmware-oem-vs-openwrt) | What works on OpenWrt, what stock firmware exposes, and which features are still missing or unverified |
 | [architecture.md](architecture.md) | Processes, startup, socket ownership, dependencies, and scope |
 | [master-proxy.md](master-proxy.md) | Master proxy, local DSP records, raw Ethernet and RTP relay |
 | [board-link.md](board-link.md) | Host-derived board protocol, checksum vectors, DSP command inventory and hardware conformance gate |
 | [Offline QEMU checks](board-link.md#reproducible-offline-checks-no-oem-shell-needed) | Execute the original AArch64 client and proxy routines against local socket pairs |
 | [Stock proxy worker transcript](worker-transcript.md) | Normal proxy startup, two-line control and media, RTCP observation, retries and local reattachment under QEMU |
 | [DTMF](dtmf.md) | Handset key encoding, digit collection vs in-call signaling, and QEMU evidence for CMSIP SIP INFO |
+| [Software-generated tones](software-tones.md) | Production ATA waveforms, call-state triggers, direction, and regional limitations |
 | [Controller startup and outgoing calls](controller-startup.md) | DSP reply ordering, channel affinity and open record, dial tone/first digit, and SIP/media serializers |
 | [cmsip.md](cmsip.md) | Modified PJSUA, local CMSIP protocol, and disclosed source |
 | [map.md](map.md) | Binary inventory, Ghidra project paths, addresses and provenance |
