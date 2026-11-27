@@ -86,6 +86,7 @@ impl XferMode {
     ///   both are accepted here and the final check runs against the
     ///   *trained* modulation.
     /// - Future modes slot in here, e.g. G.fast (G.9701) is PTM-only.
+    #[allow(dead_code)]
     pub fn compatible_with(self, m: Modulation) -> bool {
         match m {
             Modulation::Vdsl2 | Modulation::Multimode => true,

@@ -6,8 +6,6 @@
 
 use std::io;
 use std::os::raw::c_void;
-use std::ptr;
-
 use tinyln_rs_sys::{nl_msg, nlmsghdr};
 
 use crate::check;
