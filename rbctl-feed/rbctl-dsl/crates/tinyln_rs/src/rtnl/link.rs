@@ -153,14 +153,10 @@ impl RtnlLink {
         self.send(&msg)
     }
 
-    /// Bring an interface up.
-    pub fn set_up(&mut self, name: &str) -> io::Result<()> {
-        self.set_flags(ifindex(name)?, IFF_UP, IFF_UP)
-    }
-
-    /// Bring an interface down.
-    pub fn set_down(&mut self, name: &str) -> io::Result<()> {
-        self.set_flags(ifindex(name)?, 0, IFF_UP)
+    /// Bring an interface up or down.
+    pub fn set_updown(&mut self, name: &str, up: bool) -> io::Result<()> {
+        let flags = if up { IFF_UP } else { 0 };
+        self.set_flags(ifindex(name)?, flags, IFF_UP)
     }
 
     fn set_flags(&mut self, idx: i32, flags: u32, change: u32) -> io::Result<()> {

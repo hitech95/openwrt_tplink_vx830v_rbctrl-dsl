@@ -103,7 +103,7 @@ impl Selftest {
         }
         log::info!("bringing up {iface} (was {state:?})...");
         let mut rtnl = RtnlLink::new().map_err(|e| format!("rtnl: {e}"))?;
-        rtnl.set_up(iface).map_err(|e| format!("set_up {iface}: {e}"))?;
+        rtnl.set_updown(iface, true).map_err(|e| format!("set_up {iface}: {e}"))?;
         std::thread::sleep(Duration::from_millis(200));
         Ok(())
     }
@@ -133,8 +133,8 @@ impl Selftest {
             if !mgmt_link::iface_exists(&name) {
                 return Err(format!("{name} was not created"));
             }
-            rtnl.set_up(&name).map_err(|e| format!("set_up: {e}"))?;
-            rtnl.set_down(&name).map_err(|e| format!("set_down: {e}"))?;
+            rtnl.set_updown(&name, true).map_err(|e| format!("set_up: {e}"))?;
+            rtnl.set_updown(&name, false).map_err(|e| format!("set_down: {e}"))?;
             Ok(format!("create→up→down→del {name} (parent idx {parent_idx})"))
         })();
 

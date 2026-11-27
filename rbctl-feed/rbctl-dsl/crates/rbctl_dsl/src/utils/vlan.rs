@@ -9,7 +9,7 @@ pub fn vlan_iface_exists(parent: &str, vlan_id: u16) -> bool {
     crate::utils::mgmt_link::iface_exists(&format!("{parent}.{vlan_id}"))
 }
 
-/// Create a host-side VLAN sub-interface (`parent.vlan_id`) and bring it up.
+/// Create a host-side VLAN sub-interface (`parent.vlan_id`) and bring it down.
 ///
 /// Tolerates `EEXIST` so the call is idempotent after a daemon restart.
 /// Returns `Ok(true)` when the interface was created by this call, and
@@ -24,8 +24,17 @@ pub fn create_vlan_iface(parent: &str, vlan_id: u16) -> Result<bool, String> {
         Err(e) => return Err(format!("add_vlan {name}: {e}")),
     };
 
-    rtnl.set_up(&name).map_err(|e| format!("set_up {name}: {e}"))?;
+    rtnl.set_updown(&name, false).map_err(|e| format!("set_down {name}: {e}"))?;
     Ok(existed)
+}
+
+/// Bring a host-side VLAN sub-interface (`parent.vlan_id`) up or down.
+pub fn vlan_iface_updown(parent: &str, vlan_id: u16, up: bool) {
+    let name = format!("{parent}.{vlan_id}");
+    match RtnlLink::new().and_then(|mut r| r.set_updown(&name, up)) {
+        Ok(()) => log::info!("updown {name}: {up}"),
+        Err(e) => log::warn!("updown {name}: {up}: {e}"),
+    }
 }
 
 /// Delete a host-side VLAN sub-interface. Silently ignores already-gone
