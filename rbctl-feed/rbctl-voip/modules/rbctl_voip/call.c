@@ -8,11 +8,14 @@
 #include <baresip.h>
 #include "phone.h"
 #include "digitmap.h"
+#include "manage.h"
 
 /* A dialog never changes its FXS owner. Callbacks may reenter via ua_hangup. */
 struct phone_line {
 	struct digitmap map;
 	struct tmr timer;
+	struct tmr resume_timer;
+	bool resume_pending;
 	unsigned first_ms, short_ms, long_ms, warn_ms, lock_ms;
 	int tx_gain, rx_gain;
 	unsigned busy_sel, congestion_sel, disconnect_sel;
@@ -38,6 +41,24 @@ struct phone_line {
 	size_t n;
 };
 static struct phone_line lines[PHONE_LINES];
+static struct tmr reload_timer;
+static bool reload_pending;
+
+bool voice_reload_pending(void) { return reload_pending; }
+static bool lines_busy(void)
+{
+	for (unsigned i=0;i<PHONE_LINES;++i)
+		if (lines[i].offhook || lines[i].call || lines[i].other || lines[i].open) return true;
+	return false;
+}
+static void apply_when_idle(void *unused)
+{
+	(void)unused;
+	if (lines_busy()) { tmr_start(&reload_timer,250,apply_when_idle,NULL); return; }
+	reload_pending=false;
+	int err=voice_reload();
+	if (err) warning("rbctl_voip: queued reload failed (%m)\n",err);
+}
 
 static int words(struct phone_line *p, unsigned cmd)
 {
@@ -79,6 +100,7 @@ static int media_on(struct phone_line *p)
 
 static void release(struct phone_line *p)
 {
+	tmr_cancel(&p->resume_timer); p->resume_pending=false;
 	tmr_cancel(&p->timer); p->timeout=TIME_NONE; p->reg_blocked=false; p->solo_hold=false; p->fax_active=false;
 	phone_audio_mode(p->line,false,false);
 	if (phone_board_ready()) {
@@ -127,14 +149,23 @@ static int resume(struct phone_line *p, struct call *c)
 	return err;
 }
 
+static void solo_resume(void *arg)
+{
+	struct phone_line *p=arg;
+	if (!p->resume_pending || !p->solo_hold || !p->call || !call_refresh_allowed(p->call)) return;
+	p->resume_pending=false;
+	if (tone(p,0) || resume(p,p->call) || media_on(p)) { hangup(p); return; }
+	p->solo_hold=false; phone_audio_mode(p->line,true,false);
+}
+
 static void flash(struct phone_line *p)
 {
 	if (!p->connected) return;
 	phone_digit(p->line,0);
 	if (!p->other) {
 		if (p->solo_hold) {
-			if (tone(p,0) || resume(p,p->call) || media_on(p)) { hangup(p); return; }
-			p->solo_hold=false; phone_audio_mode(p->line,true,false);
+			p->resume_pending=!p->resume_pending;
+			solo_resume(p);
 		} else {
 			if (call_hold(p->call,true)) return;
 			audio_set_source(call_audio(p->call),NULL,NULL);
@@ -251,6 +282,7 @@ static void on_timeout(void *arg)
 	default: break;
 	}
 	if (err) hangup(p);
+	voice_changed();
 }
 
 static int start_collecting(struct phone_line *p)
@@ -293,7 +325,7 @@ uint64_t phone_rx_buffer_ms(unsigned slot)
 	return c ? audio_jb_current_value(call_audio(c)) : 0;
 }
 
-void phone_hook(const rbctl_voip_record *r)
+static void handle_hook(const rbctl_voip_record *r)
 {
 	unsigned slot = r->body.words[0];
 	if (slot >= PHONE_LINES || !lines[slot].enabled) return;
@@ -366,6 +398,12 @@ void phone_hook(const rbctl_voip_record *r)
 		}
 	}
 	if (err) { warning("rbctl_voip: handset action failed (%m)\n",err); hangup(p); }
+}
+
+void phone_hook(const rbctl_voip_record *r)
+{
+	handle_hook(r);
+	voice_changed();
 }
 
 static void copy_name(uint8_t *dst,const struct pl *name)
@@ -447,11 +485,11 @@ static int ring(struct phone_line *p, struct call *call)
 	return err;
 }
 
-static void sip_event(enum ua_event ev, struct bevent *event, void *arg)
+static void sip_event(enum bevent_ev ev, struct bevent *event, void *arg)
 {
 	(void)arg;
 	struct ua *ua = bevent_get_ua(event);
-	if (ev == UA_EVENT_SIPSESS_CONN && bevent_get_msg(event)) ua=uag_find_msg(bevent_get_msg(event));
+	if (ev == BEVENT_SIPSESS_CONN && bevent_get_msg(event)) ua=uag_find_msg(bevent_get_msg(event));
 	if (!ua) return;
 	struct call *call=bevent_get_call(event);
 	struct phone_line *p=NULL;
@@ -463,8 +501,8 @@ static void sip_event(enum ua_event ev, struct bevent *event, void *arg)
 		if (!p || (q->connected && q->cw && !q->other && !q->solo_hold)) p=q;
 	}
 	if (!p) return;
-	if ((ev==UA_EVENT_SIPSESS_CONN || ev==UA_EVENT_CALL_INCOMING) && nf) p=free_lines[0];
-	if (ev==UA_EVENT_MWI_NOTIFY) {
+	if ((ev==BEVENT_SIPSESS_CONN || ev==BEVENT_CALL_INCOMING) && nf) p=free_lines[0];
+	if (ev==BEVENT_MWI_NOTIFY) {
 		const char *s=bevent_get_text(event);
 		while (s && *s) {
 			size_t n=strcspn(s,"\r\n");
@@ -486,7 +524,7 @@ static void sip_event(enum ua_event ev, struct bevent *event, void *arg)
 		}
 		return;
 	}
-	if (ev==UA_EVENT_REGISTER_OK) {
+	if (ev==BEVENT_REGISTER_OK) {
 		for (unsigned i=0;i<PHONE_LINES;++i) {
 			struct phone_line *q=&lines[i];
 			if (q->enabled && mapped_ua(q)==ua && q->reg_blocked && q->offhook && !q->call) {
@@ -495,7 +533,7 @@ static void sip_event(enum ua_event ev, struct bevent *event, void *arg)
 		}
 		return;
 	}
-	if (ev==UA_EVENT_REGISTER_FAIL || ev==UA_EVENT_UNREGISTERING) {
+	if (ev==BEVENT_REGISTER_FAIL || ev==BEVENT_UNREGISTERING) {
 		for (unsigned i=0;i<PHONE_LINES;++i) {
 			struct phone_line *q=&lines[i];
 			if (q->enabled && q->require_reg && mapped_ua(q)==ua &&
@@ -506,11 +544,13 @@ static void sip_event(enum ua_event ev, struct bevent *event, void *arg)
 		}
 		return;
 	}
-	if (ev == UA_EVENT_SIPSESS_CONN) {
+	if (ev == BEVENT_SIPSESS_CONN) {
 		const struct sip_msg *msg=bevent_get_msg(event);
 		if (!msg) return;
 		bevent_stop(event);
-		if (!phone_board_ready() || ((p->call || p->offhook) && !(p->cw && p->connected && !p->solo_hold && p->offhook && !p->other)))
+		if (!ua_req_check_origin(ua,msg))
+			(void)sip_treply(NULL,uag_sip(),msg,403,"Forbidden");
+		else if (!phone_board_ready() || ((p->call || p->offhook) && !(p->cw && p->connected && !p->solo_hold && p->offhook && !p->other)))
 			(void)sip_treply(NULL,uag_sip(),msg,486,"Busy Here");
 		else {
 			if (nf) for (unsigned i=0;i<nf;++i) prepare_identity(free_lines[i],msg);
@@ -521,7 +561,7 @@ static void sip_event(enum ua_event ev, struct bevent *event, void *arg)
 	}
 	if (!call) return;
 	int err = 0;
-	if (ev == UA_EVENT_CALL_INCOMING) {
+	if (ev == BEVENT_CALL_INCOMING) {
 		if (phone_board_ready() && p->cw && p->connected && !p->solo_hold && p->offhook && !p->other) {
 			p->other=call; p->other_held=false;
 			phone_wait_beep(p->line,true);
@@ -542,28 +582,32 @@ static void sip_event(enum ua_event ev, struct bevent *event, void *arg)
 		for (unsigned i=0;i<PHONE_LINES;++i) {
 			struct phone_line *q=&lines[i];
 			if (q->call==call || q->other==call) {
-				if (p && ev==UA_EVENT_CALL_CLOSED && q->ringing) release(q);
+				if (p && ev==BEVENT_CALL_CLOSED && q->ringing) release(q);
 				else if (!p) p=q;
 			}
 		}
 		if (!p) return;
 	}
-	if (ev==UA_EVENT_CALL_INCOMING) { if (err) hangup(p); return; }
-	if (p->other==call && ev==UA_EVENT_CALL_CLOSED) {
+	if (ev==BEVENT_CALL_INCOMING) { if (err) hangup(p); return; }
+	if (p->other==call && ev==BEVENT_CALL_CLOSED) {
 		p->other=NULL; p->other_held=false; phone_wait_beep(p->line,false); return;
 	}
 	else if (p->call != call) return;
-	else if (ev==UA_EVENT_CALL_REMOTE_SDP && p->connected && p->media && !p->solo_hold) {
+	else if (ev==BEVENT_CALL_REMOTE_SDP && p->resume_pending) {
+		/* Let libre finish the hold transaction before sending a new offer. */
+		tmr_start(&p->resume_timer,0,solo_resume,p);
+	}
+	else if (ev==BEVENT_CALL_REMOTE_SDP && p->connected && p->media && !p->solo_hold) {
 		/* SIP codecs/ports belong to baresip. Refresh the unchanged local
 		 * PCMA leg; never copy a PBX address or payload mapping into DD01. */
 		err=media_record(p,11);
 	}
-	else if (ev == UA_EVENT_CALL_RINGING || ev == UA_EVENT_CALL_PROGRESS || ev == UA_EVENT_CALL_ESTABLISHED) {
+	else if (ev == BEVENT_CALL_RINGING || ev == BEVENT_CALL_PROGRESS || ev == BEVENT_CALL_ESTABLISHED) {
 		err=media_on(p);
-		if (!err) phone_audio_mode(p->line,true,ev == UA_EVENT_CALL_RINGING);
-		if (!err && ev == UA_EVENT_CALL_ESTABLISHED) p->connected = true;
+		if (!err) phone_audio_mode(p->line,true,ev == BEVENT_CALL_RINGING);
+		if (!err && ev == BEVENT_CALL_ESTABLISHED) p->connected = true;
 	}
-	else if (ev == UA_EVENT_CALL_CLOSED) {
+	else if (ev == BEVENT_CALL_CLOSED) {
 		if (p->other && p->offhook) {
 			bool held=p->other_held;
 			p->call=p->other; p->other=NULL; p->other_held=false;
@@ -598,14 +642,19 @@ static void sip_event(enum ua_event ev, struct bevent *event, void *arg)
 	if (err) { warning("rbctl_voip: call setup failed (%m)\n",err); hangup(p); }
 }
 
-void phone_line_lost(unsigned slot) { if (slot<PHONE_LINES) hangup(&lines[slot]); }
+void phone_line_lost(unsigned slot) { if (slot<PHONE_LINES) { hangup(&lines[slot]); voice_changed(); } }
 void phone_board_lost(void) { for (unsigned i=0;i<PHONE_LINES;++i) phone_line_lost(i); }
+
+/* Policy parsing is synchronous on the libre loop. During reload read the
+ * candidate generation, without replacing baresip's process-wide config. */
+static struct conf *candidate;
+static struct conf *policy_conf(void) { return candidate ? candidate : conf_cur(); }
 
 static int line_number(unsigned line,const char *name,int fallback,int lo,int hi,int *out)
 {
 	char key[64], value[32], *end=NULL;
 	re_snprintf(key,sizeof(key),"rbctl_voip_%s%u",name,line);
-	int err=conf_get_str(conf_cur(),key,value,sizeof(value));
+	int err=conf_get_str(policy_conf(),key,value,sizeof(value));
 	if (err==ENOENT) { *out=fallback; return 0; }
 	if (err) return err;
 	errno=0; long n=strtol(value,&end,10);
@@ -617,7 +666,7 @@ static int policy_init(struct phone_line *p)
 {
 	char key[48], map[256]="[0-9*]+";
 	re_snprintf(key,sizeof(key),"rbctl_voip_digitmap%u",p->line);
-	int err=conf_get_str(conf_cur(),key,map,sizeof(map));
+	int err=conf_get_str(policy_conf(),key,map,sizeof(map));
 	if (err && err!=ENOENT) return err;
 	if ((err=digitmap_parse(&p->map,map))) return err;
 	struct { const char *key; unsigned *ms; int def; } timers[]={
@@ -651,35 +700,160 @@ static int policy_init(struct phone_line *p)
 		*tones[i].selector=(unsigned)n;
 	}
 	re_snprintf(key,sizeof(key),"rbctl_voip_alert_info%u",p->line);
-	err=conf_get_str(conf_cur(),key,p->alert_match,sizeof(p->alert_match));
+	err=conf_get_str(policy_conf(),key,p->alert_match,sizeof(p->alert_match));
 	if (err && err!=ENOENT) return err;
 	int entry; err=line_number(p->line,"alert_entry",0,0,9,&entry);
 	if (!err) p->alert_entry=(unsigned)entry;
 	return err;
 }
-int phone_init(unsigned line)
+static int load_lines(struct phone_line *dst)
 {
-	memset(lines,0,sizeof(lines));
 	for (unsigned i=0;i<PHONE_LINES;++i) {
-		struct phone_line *p=&lines[i];
+		struct phone_line *p=&dst[i];
 		p->line=i;
 		tmr_init(&p->timer);
+		tmr_init(&p->resume_timer);
 		int err=policy_init(p);
 		if (err) return err;
-		int rc=conf_get_str(conf_cur(), i ? "rbctl_voip_account1" : "rbctl_voip_account0", p->aor,sizeof(p->aor));
+		int rc=conf_get_str(policy_conf(), i ? "rbctl_voip_account1" : "rbctl_voip_account0", p->aor,sizeof(p->aor));
 		if (rc && rc!=ENOENT) return rc;
 		p->enabled=*p->aor!='\0';
 	}
-	bool mapped=lines[0].enabled || lines[1].enabled;
+	return 0;
+}
+
+int phone_init(unsigned line)
+{
+	tmr_init(&reload_timer);
+	uint32_t managed=0;
+	(void)conf_get_u32(conf_cur(),"rbctl_voip_managed",&managed);
+	memset(lines,0,sizeof(lines));
+	int err=load_lines(lines);
+	if (err) return err;
+	bool mapped=managed || lines[0].enabled || lines[1].enabled;
 	if (!mapped) lines[line].enabled=true;
-	int err=phone_audio_init(mapped ? PHONE_LINES : line);
+	err=phone_audio_init(mapped ? PHONE_LINES : line);
 	if (!err) err=bevent_register(sip_event,NULL);
 	if (err) phone_audio_close();
 	return err;
 }
 void phone_close(void)
 {
+	tmr_cancel(&reload_timer); reload_pending=false;
 	bevent_unregister(sip_event);
 	phone_board_lost();
 	phone_audio_close();
+}
+
+const char *voice_line_state(unsigned slot)
+{
+	const struct phone_line *p=&lines[slot];
+	if (!p->enabled) return "disabled";
+	if (p->recall) return "recall";
+	if (p->ringing) return "ringing";
+	if (p->solo_hold) return "held";
+	if (p->other && !p->other_held) return "waiting";
+	if (p->connected) return "connected";
+	if (p->call) return "outgoing";
+	if (p->collecting) return p->n ? "collecting" : "dialtone";
+	if (p->timeout==TIME_LOCK) return "howler";
+	if (p->timeout==TIME_WARN) return "disconnected";
+	return p->offhook ? "lockout" : "idle";
+}
+
+struct call *voice_call(unsigned slot,bool secondary)
+{
+	return secondary ? lines[slot].other : lines[slot].call;
+}
+
+int voice_control(unsigned slot,const char *uri)
+{
+	if (slot>=PHONE_LINES || !lines[slot].enabled) return EINVAL;
+	struct phone_line *p=&lines[slot];
+	if (!uri) {
+		if (!p->call) return ENOENT;
+		hangup(p);
+	}
+	else {
+		if (strncmp(uri,"sip:",4) && strncmp(uri,"sips:",5)) return EINVAL;
+		if (strlen(uri)>512 || strpbrk(uri,"\r\n\t ")) return EINVAL;
+		if (!phone_board_ready() || p->call || p->other) return EBUSY;
+		struct ua *ua=mapped_ua(p);
+		if (!ua || (p->require_reg && !ua_isregistered(ua))) return ENOENT;
+		release(p);
+		p->ua=ua;
+		int err=open_slot(p);
+		if (!err) err=select_audio(p,ua);
+		if (!err) err=ua_connect(ua,&p->call,NULL,uri,VIDMODE_OFF);
+		if (err) { release(p); return err; }
+	}
+	voice_changed();
+	return 0;
+}
+
+/* The managed process owns its complete UA list. Stage new UAs without
+ * registration; never tear down an active call or discard the previous UAs
+ * on a parse/allocation error. */
+struct ua_batch { struct ua *items[32]; unsigned n; };
+static int stage_ua(const struct pl *pl,void *arg)
+{
+	struct ua_batch *b=arg;
+	char line[1024];
+	if (pl->l>=sizeof(line) || b->n>=RE_ARRAY_SIZE(b->items)) return E2BIG;
+	pl_strcpy(pl,line,sizeof(line));
+	int err=ua_alloc(&b->items[b->n],line);
+	if (!err) ++b->n;
+	return err;
+}
+
+int voice_reload(void)
+{
+	uint32_t managed=0;
+	if (conf_get_u32(conf_cur(),"rbctl_voip_managed",&managed) || !managed) return ENOTSUP;
+	char root[256], file[300];
+	int err=conf_path_get(root,sizeof(root));
+	if (err) return err;
+	re_snprintf(file,sizeof(file),"%s/config",root);
+	err=conf_alloc(&candidate,file);
+	struct phone_line fresh[PHONE_LINES]={0};
+	if (!err) err=load_lines(fresh);
+	candidate=mem_deref(candidate);
+	if (err) return err;
+	struct ua_batch old={0}, next={0};
+	for (struct le *le=uag_list()->head;le;le=le->next) {
+		if (old.n>=RE_ARRAY_SIZE(old.items)) return E2BIG;
+		old.items[old.n++]=le->data;
+	}
+	re_snprintf(file,sizeof(file),"%s/accounts",root);
+	err=conf_parse(file,stage_ua,&next);
+	for (unsigned i=0;!err && i<PHONE_LINES;++i) {
+		if (!fresh[i].enabled) continue;
+		bool found=false;
+		for (unsigned j=0;j<next.n;++j)
+			found |= !strcmp(fresh[i].aor,account_aor(ua_account(next.items[j])));
+		if (!found) err=EINVAL;
+	}
+	if (err) {
+		while (next.n) ua_destroy(next.items[--next.n]);
+		return err;
+	}
+	if (lines_busy()) {
+		/* Candidate parsed successfully; keep old UAs and all call ownership.
+		 * The published generation is the latest requested configuration. */
+		while (next.n) ua_destroy(next.items[--next.n]);
+		if (!reload_pending) info("rbctl_voip: reload queued until lines idle\n");
+		reload_pending=true; tmr_start(&reload_timer,250,apply_when_idle,NULL);
+		return 0;
+	}
+	reload_pending=false; tmr_cancel(&reload_timer);
+	for (unsigned i=0;i<PHONE_LINES;++i) for (unsigned j=0;j<PHONE_LINES;++j)
+		if (fresh[i].enabled && fresh[i].mwi && lines[j].messages && !strcmp(lines[j].aor,fresh[i].aor))
+			fresh[i].messages=true;
+	while (old.n) ua_destroy(old.items[--old.n]);
+	memcpy(lines,fresh,sizeof(lines));
+	for (unsigned i=0;i<next.n;++i)
+		if (account_regint(ua_account(next.items[i])) && ua_register(next.items[i]))
+			warning("rbctl_voip: registration submission failed\n");
+	voice_changed();
+	return 0;
 }

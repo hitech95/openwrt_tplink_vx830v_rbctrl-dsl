@@ -1,6 +1,6 @@
 # rbctl_voip — baresip module for analog phone ports
 
-`module.c` owns the baresip 3.16 module lifecycle. `board.c`/`board.h` own the
+`module.c` owns the baresip 4.9 module lifecycle. `board.c`/`board.h` own the
 Rust protocol link; the transport supplies its MAC and synchronous send callback.
 `attach.c` registers nonblocking board fds with libre and starts DD01 init and
 attach. It waits for both attach status and the DD02 DSP state (in either order).
@@ -15,7 +15,7 @@ The default transport uses `lan0.500`; override with `rbctl_voip_device`.
 
 ## Build on Linux
 
-From the `rbctl-voip` workspace, with baresip and libre 3.16.0 headers installed:
+From the `rbctl-voip` workspace, with baresip and libre 4.9.0 headers installed:
 
 ```sh
 cargo build --locked -p rbctl_voip_ffi
@@ -35,9 +35,18 @@ Run `ctest --test-dir target/m3-module --output-on-failure` after building.
 and release/rebind against the real Rust archive. For `baresip_registration_smoke`,
 configure with `-DRBCTL_HARNESS=ON -DBUILD_TESTING=ON` and
 `-DCMAKE_PREFIX_PATH=/path/to/host-install` or set `BARESIP_EXE`
-and `BARESIP_MODULE_DIR` explicitly. Use baresip/libre 3.16.0 and build the
-`account`, `menu`, and `g711` modules. On hosts using C11 threads, libre and
-baresip can be configured with `-DHAVE_THREADS:BOOL=ON`.
+and `BARESIP_MODULE_DIR` explicitly. For the full suite, unpack the SDK's re and baresip **4.9.0** source tarballs, install the host OpenSSL and SpanDSP development packages, then build both into one prefix:
+
+```sh
+cmake -S re-4.9.0 -B build-re -DCMAKE_INSTALL_PREFIX="$prefix" -DHAVE_THREADS=ON
+cmake --build build-re --parallel && cmake --install build-re
+cmake -S baresip-4.9.0 -B build-bs -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_PREFIX_PATH="$prefix" \
+  -DMODULES='account;menu;g711;g722;auresamp;mwi;srtp' -DHAVE_THREADS=ON
+cmake --build build-bs --parallel && cmake --install build-bs
+BARESIP_PREFIX="$prefix" scripts/check.sh  # from rbctl-voip/
+```
+
+The LuCI account editor exposes `interdigit_timeout`, `interdigit_long_timeout`, `require_registration` and one `alert_info` mapping. Line `cw_cid`, `first_digit_timeout`, `offhook_warning_timeout` and `howler_duration` are configuration-only. Hunt uses physical port order. CLI `dial` is a test hook; it does not ring an on-hook handset first.
 
 The smoke test uses a temporary config, a synthetic account, and a UDP registrar
 on 127.0.0.1. Its board peer uses an inherited Unix datagram socket pair

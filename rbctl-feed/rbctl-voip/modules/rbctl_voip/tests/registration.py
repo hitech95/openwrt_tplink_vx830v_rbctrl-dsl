@@ -147,7 +147,7 @@ def main(binary, modules, shim, scenario='stopped'):
             else:
                 reason = 'Remote I/O error' if scenario == 'reject-default' else 'Connection timed out'
                 startup_ok = not ready and f'rbctl_voip: startup failed ({reason}' in output
-            if not (proc.returncode == 0 and registered and 'baresip v3.16.0' in output
+            if not (proc.returncode == 0 and registered and 'baresip v4.9.0' in output
                     and any('m3@127.0.0.1:' in line and '200 OK' in line and '[1 binding]' in line
                             for line in output.splitlines())
                     and attach_seen and attach_ok and startup_ok and seen == expected

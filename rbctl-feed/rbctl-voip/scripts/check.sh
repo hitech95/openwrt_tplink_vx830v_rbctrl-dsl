@@ -31,4 +31,18 @@ python3 -B tests/qemu/diff.py target/debug/examples/oracle_vectors || rc=$?
 echo "== T2.18 rustdoc (missing docs are errors)"
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 
+if [ -n "${BARESIP_PREFIX:-}" ]; then
+  prefix=$(realpath "$BARESIP_PREFIX")
+  for mod in account menu g711 g722 auresamp srtp mwi; do
+    test -f "$prefix/lib/baresip/modules/$mod.so" || { echo "Missing host module: $mod" >&2; exit 1; }
+  done
+  cmake -S modules/rbctl_voip -B target/host-4.9 -DRBCTL_HARNESS=ON -DBUILD_TESTING=ON \
+    -DBARESIP_INCLUDE_DIR="$prefix/include" -DRE_INCLUDE_DIR="$prefix/include/re" \
+    -DBARESIP_EXE="$prefix/bin/baresip" -DBARESIP_MODULE_DIR="$prefix/lib/baresip/modules" \
+    -DVOICE_ARCHIVE="$PWD/target/debug/librbctl_voip_ffi.a"
+  cmake --build target/host-4.9 --parallel
+  LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ctest --test-dir target/host-4.9 --output-on-failure
+else
+  echo 'SKIP module tests: set BARESIP_PREFIX to a full baresip/libre 4.9.0 host install'
+fi
 echo "All host checks passed."

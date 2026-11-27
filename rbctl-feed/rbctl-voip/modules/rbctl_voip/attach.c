@@ -5,6 +5,7 @@
 #include <baresip.h>
 #include "attach.h"
 #include "board.h"
+#include "manage.h"
 #include "phone.h"
 
 #ifdef RBCTL_HARNESS
@@ -64,6 +65,7 @@ static struct {
 	uint64_t expires;
 	enum phase phase;
 	bool ack;
+	char peer[18];
 	int dsp_state;
 	unsigned locale, cursor, count;
 	struct step steps[2 * SLOTS + 3 + SLOTS];
@@ -83,8 +85,18 @@ static struct {
 	unsigned locale;
 	bool enabled;
 	unsigned delay_ms;
+	uint32_t timeout_s;
 } retry;
 static int start_session(const char *device, unsigned locale);
+
+const char *voice_board_state(void)
+{
+	if (a.phase==READY) return "ready";
+	if (a.phase!=DOWN) return "init";
+	return retry.enabled ? "error" : "down";
+}
+
+const char *voice_board_peer(void) { return a.peer; }
 
 static void close_session(void)
 {
@@ -137,6 +149,7 @@ static void reconnect(void *unused)
 {
 	(void)unused;
 	int err = start_session(retry.device, retry.locale);
+	voice_changed();
 	if (err) {
 		warning("rbctl_voip: re-attach open failed (%m); retrying\n", err);
 		schedule_retry();
@@ -148,6 +161,7 @@ static void fail(int err)
 	warning("rbctl_voip: %s failed (%m)\n", a.phase == READY ? "call control" : a.phase == STARTUP ? "startup" : "attach", err);
 	close_session();
 	phone_board_lost();
+	voice_changed();
 	schedule_retry();
 }
 
@@ -201,6 +215,7 @@ static int submit_step(void)
 		return ETIMEDOUT;
 	if (a.cursor == a.count) {
 		a.phase = READY;
+		voice_changed();
 		retry.delay_ms = 1000;
 		tmr_cancel(&a.timer);
 		info("rbctl_voip: board ready (%s, locale %u)\n",
@@ -270,6 +285,9 @@ static int receive_frame(uint8_t *frame, size_t len)
 {
 	rbctl_voip_media media;
 	int rc = rbctl_voip_receive(a.board.link, frame, len, &media);
+	if (a.phase == INIT && rc == RBCTL_VOIP_CONTROL && len>=14)
+		re_snprintf(a.peer,sizeof(a.peer),"%02x:%02x:%02x:%02x:%02x:%02x",
+			frame[6],frame[7],frame[8],frame[9],frame[10],frame[11]);
 	if (a.phase == READY && rc == RBCTL_VOIP_MEDIA) phone_audio_rx(&media);
 	uint8_t raw[RBCTL_VOIP_RECORD_LEN];
 	while (!rbctl_voip_pop(a.board.link, raw)) {
@@ -407,7 +425,7 @@ static int start_session(const char *device, unsigned locale)
 	if (!err) {
 		a.phase = INIT;
 		a.dsp_state = -1;
-		a.expires = tmr_jiffies() + 5000;
+		a.expires = tmr_jiffies() + 1000 * retry.timeout_s;
 		err = -rbctl_voip_request(a.board.link, RBCTL_VOIP_SUB_INIT, NULL, 0, tmr_jiffies());
 	}
 	if (err)
@@ -422,6 +440,9 @@ int voice_attach_start(const char *device, unsigned locale)
 	if (!device || !*device || strlen(device) >= sizeof(retry.device) || locale > 20)
 		return EINVAL;
 	if (a.phase != DOWN || retry.enabled) return EALREADY;
+	retry.timeout_s=5;
+	int rc=conf_get_u32(conf_cur(),"rbctl_voip_init_timeout",&retry.timeout_s);
+	if ((rc && rc!=ENOENT) || !retry.timeout_s || retry.timeout_s>120) return EINVAL;
 	strcpy(retry.device, device);
 	retry.locale = locale;
 	tmr_init(&retry.timer);

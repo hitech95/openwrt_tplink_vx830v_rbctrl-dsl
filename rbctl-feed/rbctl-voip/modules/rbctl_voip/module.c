@@ -5,6 +5,16 @@
 #include "attach.h"
 #include "phone.h"
 #include "panel.h"
+#include "manage.h"
+
+static struct tmr accounts_timer;
+
+static void load_accounts(void *arg)
+{
+	(void)arg;
+	int err=voice_reload();
+	if (err) warning("rbctl_voip: initial account load failed (%m)\n",err);
+}
 
 static int module_init(void)
 {
@@ -24,12 +34,26 @@ static int module_init(void)
 	if (err) return err;
 	err = voice_attach_start(device, locale);
 	if (err) phone_close();
-	else panel_start();
+	else {
+		err=voice_bus_start();
+		if (err) { voice_attach_stop(); phone_close(); }
+		else {
+			panel_start();
+			uint32_t managed=0;
+			tmr_init(&accounts_timer);
+			/* The stock mwi module must complete its startup timer before a
+			 * fast registrar populates its subscription list. */
+			if (!conf_get_u32(conf_cur(),"rbctl_voip_managed",&managed) && managed)
+				tmr_start(&accounts_timer,5,load_accounts,NULL);
+		}
+	}
 	return err;
 }
 
 static int module_close(void)
 {
+	voice_bus_close();
+	tmr_cancel(&accounts_timer);
 	panel_close();
 	voice_attach_stop();
 	phone_close();
