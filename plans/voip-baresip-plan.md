@@ -225,12 +225,12 @@ config account 'acc1'
 	option dtmf 'rfc4733'         # rfc4733 | info | inband
 	option srtp 'off'             # off | optional | mandatory
 	option display_name ''
-	option digitmap '[0-9*#]+'
+	option digitmap '[0-9*]+'     # default; # sends the collected digits
 	option interdigit_timeout '4'
 	option interdigit_long_timeout '10'
 	option require_registration '0'
 	option incoming 'ring_all'    # hunt selects the first free physical port
-	list alert_info 'internal=2'
+	list alert_info 'internal=2'  # optional; at most one entry per account
 	option check_origin '1'       # match the registrar's observed IP
 
 config line 'line0'
@@ -399,10 +399,7 @@ Docs: [foss-design.md](../docs/voip/foss-design.md), [board-link.md](../docs/voi
 
 **Licence constraint (D6, §11):** the VoIP library is loaded into baresip,
 which links OpenSSL 3 (Apache-2.0), so every crate it links must be compatible
-with GPL-2.0-or-later/GPLv3. `af_packet` is currently **GPL-2.0-only**
-(rbctl workspace licence). Before reuse, relicense `af_packet` as
-`GPL-2.0-or-later` (same authors; still usable by GPL-2.0-only rbctl-dsl), or
-move it to a shared crate under that licence. `rbctl_proto` is not reused.
+with GPLv3. The shared `af_packet` crate was relicensed **MIT** in `becbc9e` and can be used by both workspaces. `rbctl_proto` is not reused.
 
 **Workspace** `rbctl-feed/rbctl-voip/` (replaces the CMake C tree once parity is proven):
 
@@ -571,12 +568,11 @@ that describe the **physical port or the handset on it** belong to the `line`.
 
 | Option | Owner | Note |
 |---|---|---|
-| `incoming` (`ring_all`/`hunt`) | account | ring-group behaviour |
-| Hunt order | account ring group | physical port order; no custom ordering in this release |
+| `incoming` (`ring_all`/`hunt`) | account | Hunt rings the first free assigned port in physical order (PHONE1, then PHONE2). There is no `hunt_order` option. |
 | `digitmap` | account | |
 | `interdigit_timeout`, `interdigit_long_timeout` | account | part of the dial plan |
 | `require_registration` | account | depends on that account's registration |
-| `alert_info` (`value=entry`) | account | provider-specific strings; cadence entries are board capability |
+| `alert_info` (`value=entry`) | account | Optional single mapping from a provider token to a board cadence (0–9); multiple entries are rejected. |
 | `dtmf`, `codec`, `srtp`, registration options, MWI subscription | account | unchanged |
 | `account` | line | single link |
 | `enabled`, `port` | line | |
@@ -595,7 +591,7 @@ config account 'acc1'
 	option interdigit_timeout '4'
 	option interdigit_long_timeout '10'
 	option require_registration '0'
-	list   alert_info 'internal=2'      # Alert-Info value = board cadence entry
+	list   alert_info 'internal=2'      # one mapping only
 
 config line 'line0'
 	option enabled '1'
@@ -627,7 +623,7 @@ their account. When lines of one account disagree, keep the lowest port's value 
 | A3 | Fix single-call flash hold/resume on baresip 4.9 (`baresip_call_solo_hangup`). | T5.10; T4.13 hold rechecked live |
 | A4 | Host regression on baresip 4.9:<br>• document building the host prefix;<br>• fix `LINK_DEPENDS`/version-script for paths with spaces;<br>• run the module suite from `scripts/check.sh` or CI when the prefix is present. | T5.10 from the real repo path |
 | A5 | Record the baresip 4.9.0 move:<br>• D3/R6 deviation in §13.4;<br>• §5/§11 updated: feed baresip vs private lite runtime, mbedTLS (Apache-2.0) under GPL-2.0-or-later → GPLv3 combination. | plan consistent with shipped packages |
-| A6 | UCI schema split above: `render.uc`, LuCI (account tab: ring group, hunt order, dial plan, inter-digit timers, registration requirement, Alert-Info; port tab: per-port options only), `uci-defaults` migration, §8.1 and §8.2 updated. | T5.11 |
+| A6 | UCI schema split above: `render.uc`, LuCI (account tab: ring group with fixed port order, dial plan, inter-digit timers, registration requirement, Alert-Info; port tab: per-port options only), `uci-defaults` migration, §8.1 and §8.2 updated. | T5.11 |
 | A7 | Open M5 gates: T5.7, T5.1 on a **clean** image, T5.6 reboot with a **registered** account. | recorded in test-report.md |
 
 **B. Should fix in M5.1**
@@ -688,7 +684,7 @@ Docs: board-link.md §boot dependencies (OEM failure modes to avoid), worker-tra
 
 - `rbctl-voip` (library, modules, CLI, scripts): **GPL-2.0-or-later**; SPDX header `GPL-2.0-or-later` in every source file, `LICENSE` = GPLv2 text with the "or later" notice.
 - Full libre links OpenSSL 3.x; lite uses mbedTLS crypto. Both include Apache-2.0 code; the GPL-2.0-or-later grant permits distributing the combined process under GPLv3. baresip/libre are BSD-3.
-- `rbctl-*` crates remain GPL-2.0-only. Exception from M2.1: the shared `af_packet` crate must be relicensed GPL-2.0-or-later before the VoIP library links it; `cargo deny` enforces the allow list.
+- The DSL workspace remains GPL-2.0-only except for the shared `af_packet` crate, relicensed MIT in `becbc9e`. The VoIP crates are GPL-2.0-or-later; `cargo deny` checks their dependency licence allowlist.
 - No OEM code or binaries are included in the package or tests committed to the repo; OEM binaries are used only locally as test oracles.
 
 ## 12. Risks
@@ -722,8 +718,8 @@ Move stable conclusions into `docs/voip/*` and leave a pointer here.
 | M2.1 Rust port | done | 2026-11-25 | 2026-11-25 | `feature/rbctl-voip` (workspace); `becbc9e`, `c96803a`, `0b79262` (af_packet) | [Hardware parity and closure](../docs/voip/test-report.md#m21-closure). C prototype retired; T2.16 accepted with SDK build deferred to T5.1. |
 | M3 Single call | done | 2026-11-25 | 2026-11-26 | `feature/rbctl-voip` | T3.1–T3.5 and T3.7 passed live. T3.6 moved: latency growth and echo → T4.20, ≤150 ms target → T6.8 (§13.4). |
 | M4 Two lines + features | closed with carry-over | 2026-11-26 | 2026-11-26 | `79cdad2`–`f56d948` + bench results | 16 gates passed live. T4.8, T4.10, T4.18, T4.19, T4.21 evaluated; T4.14 partial (Q8 parked). T4.20 partial: board-clock drift passed both lines; conversational echo remains unverified and is carried into M6. |
-| M5 Integration | in progress | 2026-11-26 | | working tree | T5.2–T5.7 exercised on hardware. T5.1 needs a clean image. |
-| M5.1 Review follow-ups + UCI split | in progress | 2026-11-27 | | working tree | [Review verification and remaining bench checks](../docs/voip/test-report.md#m5-review-verification). |
+| M5 Integration | awaiting T5.1 (deferred) | 2026-11-26 | | feature/rbctl-voip | T5.2–T5.7 passed on hardware; clean-image installation has not been tested. |
+| M5.1 Review follow-ups + UCI split | awaiting T5.1 (deferred) | 2026-11-27 | | feature/rbctl-voip | T5.8–T5.13 passed; A7 shares the M5 clean-image gate. [Review evidence](../docs/voip/test-report.md#m5-review-verification). |
 | M6 Hardening | not started | | | | |
 
 Status values: `not started`, `in progress`, `blocked (<reason>)`, `done`.
@@ -735,6 +731,12 @@ All entries below used an **uncommitted working tree**. The base column identifi
 | Test ID | Date | Base revision / tree | Result | Evidence / note |
 |---|---|---|---|---|
 | T5.3 / T5.7 | 2026-11-27 | VX830v r6 service | pass | [Fresh process confirmed warm ETSI init; unauthenticated HTTP dial denied](../docs/voip/test-report.md#m5-review-verification). |
+| T5.8 | 2026-11-27 | Target ucode / QEMU | pass | Incomplete accounts and unassigned/dangling lines skipped; malformed user rejected without disclosing credentials. |
+| T5.9 | 2026-11-27 | LuCI / VX830v | pass | Created, assigned and deleted an account; invalid user rejected, ports unassigned safely, unticked flags stored as `0`. |
+| T5.10 | 2026-11-27 | Linux host / baresip 4.9.0 | pass | 33/33 tests passed from the repository path containing spaces, including immediate double-FLASH. |
+| T5.11 | 2026-11-27 | Target ucode / QEMU | pass | Non-conflicting migration preserved rendered policy; lowest port won conflicting dial plans; second migration was a no-op. |
+| T5.12 | 2026-11-27 | AArch64 QEMU / registered account | pass | INVITE from a different source IP got 403 with no ring; disabling origin filtering produced 180 and a board ring command. |
+| T5.13 | 2026-11-27 | VX830v r6 service | pass | Account change stayed pending during the established call; new AOR applied automatically after hangup. [Detailed T5.8–T5.13 results](../docs/voip/test-report.md#m5-review-verification). |
 | T5.6 | 2026-11-27 | VX830v r5 service | pass | [Registered account across reboot](../docs/voip/test-report.md#t56-live-registered-account-across-reboot-2026-11-27). |
 | T5.1 | 2026-11-27 | SDK r38588 overlay on VX830v | package upgrade pass; clean-image gate open | r5 packages ran post-upgrade hooks and preserved config. Existing firmware already had full stack; this does not demonstrate install onto a clean image. |
 | T5.4 / T5.5 | 2026-11-27 | VX830v `r36953+1633-0ab51fb9c1` | loopback pass | [ubus dial/hangup, PCMA call state and outgoing/established/closed events](../docs/voip/test-report.md#t54t55-live-ubus-call-control-and-events-2026-11-27). No real handset/provider in this check. |

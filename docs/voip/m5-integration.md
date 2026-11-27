@@ -42,16 +42,20 @@ ringing or add another account. Apply with `uci commit voip` then
 `/etc/init.d/voip reload` (or OpenWrt `reload_config` to dispatch UCI changes).
 Runtime generations are private under `/var/run/voip`; idle account/line changes
 are staged before replacing UAs. During a call the old accounts stay active;
-`ubus call voip status` reports `reload_pending` until the latest validated generation is applied after both lines go idle. Changing board settings restarts
-the instance. The ubus `reload` method reads the already-rendered generation.
+`ubus call voip status` reports `reload_pending` until the latest validated generation is applied after both lines go idle. **Board changes are not queued:** applying a new locale, VLAN or playout clock restarts baresip and disconnects active calls. Apply those changes when both lines are idle. The ubus `reload` method reads the already-rendered generation.
 
 `manage_vlan=1` reuses the existing management VLAN or asks netifd to claim the
 dotted device with protocol `none`; no address is assigned by the voice service.
 `firewall_zone` defaults empty. Setting a zone publishes IPv4 SIP and RTP input
-rules through procd's firewall data. Each account defaults to `check_origin=1`: accept inbound calls only from the actual registrar peer IP. Providers with separate inbound SBCs and direct-IP accounts may require `check_origin=0`; restrict ingress at the firewall in that case. This is SIP source filtering, not RTP authentication. Board codec/ptime remain PCMA/20 ms; network
+rules through procd's firewall data. Board codec/ptime remain PCMA/20 ms; network
 codecs may be PCMA, PCMU or G722. FLASH timing is fixed by the stock DSP.
-One Alert-Info mapping per account; a distinct registration route uses `outbound`
+Each account accepts at most one `alert_info` entry, e.g. `list alert_info 'internal=2'`; a second entry is rejected. A distinct registration route uses `outbound`
 (no independent simultaneous registrar and outbound-proxy override).
+
+### Troubleshooting
+
+- **Registered, but incoming calls never ring:** if the provider sees `403 Forbidden`, compare the INVITE source IP with the registrar IP. Providers with separate inbound proxies or DNS SRV pools may legitimately use different addresses. In **Telephony → SIP accounts → Edit**, **Accept incoming calls only from the registrar IP** (`check_origin`) is on by default. If the provider confirms this topology, restrict SIP ingress to its published signaling addresses at the firewall before clearing the checkbox. This setting checks SIP source IPs, not caller ID or RTP.
+- **Voice won't start after a manual UCI edit:** an incomplete account is skipped, but a malformed value such as a SIP user containing a space fails the render. A failed reload keeps the running configuration; on the next boot there is no running instance to retain. Correct the field reported by `/etc/init.d/voip reload`, commit the correction, and start the service if it is down. LuCI rejects malformed values before saving.
 
 ### Country profile
 
