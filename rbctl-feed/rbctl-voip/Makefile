@@ -143,3 +143,45 @@ define Package/baresip-mod-rbctl-voip/install
 endef
 
 $(eval $(call BuildPackage,baresip-mod-rbctl-voip))
+
+define Package/rbctl-voip
+  SECTION:=net
+  CATEGORY:=Network
+  SUBMENU:=Telephony
+  TITLE:=Two-line voice service for the VX830v stock voice board
+  DEPENDS:=+baresip-mod-rbctl-voip +rbctl-voip-led +ubus +uci +ucode +ucode-mod-uci +ucode-mod-fs +ca-bundle +baresip-mod-g711 +baresip-mod-g722 +baresip-mod-auresamp +baresip-mod-mwi +baresip-mod-srtp
+  CONFLICTS:=rbctl-voip-lite rbctl-voip-service-lite
+  EXTRA_DEPENDS:=$(if $(CONFIG_USE_APK),!rbctl-voip-service-lite (>=0))
+endef
+
+define Package/rbctl-voip/conffiles
+/etc/config/voip
+endef
+
+define Package/rbctl-voip/install
+	$(INSTALL_DIR) $(1)/usr/libexec $(1)/etc/config $(1)/etc/init.d $(1)/usr/share/rpcd/acl.d
+	$(INSTALL_DATA) ./files/render.uc $(1)/usr/libexec/rbctl-voip-render.uc
+	$(INSTALL_DATA) ./files/voip-policy.uc $(1)/usr/libexec/
+	$(INSTALL_DATA) ./files/migrate.uc $(1)/usr/libexec/rbctl-voip-migrate.uc
+	$(INSTALL_DIR) $(1)/etc/uci-defaults
+	$(INSTALL_BIN) ./files/95-voip-policy $(1)/etc/uci-defaults/
+	$(INSTALL_CONF) ./files/voip.config $(1)/etc/config/voip
+	$(INSTALL_BIN) ./files/voip.init $(1)/etc/init.d/voip
+	$(INSTALL_DATA) ./files/voip.acl.json $(1)/usr/share/rpcd/acl.d/rbctl-voip.json
+endef
+
+$(eval $(call BuildPackage,rbctl-voip))
+
+define Package/rbctl-voip-full
+  SECTION:=net
+  CATEGORY:=Network
+  SUBMENU:=Telephony
+  TITLE:=Complete VX830v voice service with panel LEDs
+  DEPENDS:=+rbctl-voip
+endef
+
+define Package/rbctl-voip-full/install
+	true
+endef
+
+$(eval $(call BuildPackage,rbctl-voip-full))

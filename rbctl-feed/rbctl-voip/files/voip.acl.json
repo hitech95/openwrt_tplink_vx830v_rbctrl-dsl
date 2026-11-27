@@ -1,0 +1,7 @@
+{
+  "rbctl-voip": {
+    "description": "Inspect voice lines and manage SIP calls",
+    "read": { "ubus": { "voip": [ "status", "lines", "calls" ] } },
+    "write": { "ubus": { "voip": [ "dial", "hangup", "reload" ] } }
+  }
+}

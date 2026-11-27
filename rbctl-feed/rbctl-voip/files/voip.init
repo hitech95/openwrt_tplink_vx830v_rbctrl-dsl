@@ -1,0 +1,91 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-or-later
+START=96
+USE_PROCD=1
+RUN=/var/run/voip
+PROFILE=full
+[ ! -f /usr/libexec/rbctl-voip-lite.profile ] || PROFILE=lite
+
+publish() {
+	rm -f "$RUN/.next"
+	ln -s "$1" "$RUN/.next" && mv -Tf "$RUN/.next" "$RUN/current"
+}
+
+configure() {
+	local mode="$1" new old enabled
+	umask 077
+	config_load voip || return 1
+	config_get_bool enabled board enabled 1
+	if [ "$enabled" = 0 ]; then
+		[ "$mode" != reload ] || procd_kill voip
+		return 0
+	fi
+	mkdir -p "$RUN" && chmod 0700 "$RUN" || return 1
+	new=$(mktemp -d "$RUN/gen.XXXXXX") || return 1
+	if ! /usr/bin/ucode /usr/libexec/rbctl-voip-render.uc "$new" /etc/config "$PROFILE"; then
+		rm -rf "$new"; return 1
+	fi
+	old=$(readlink "$RUN/current")
+	if [ "$mode" = reload ] && [ -n "$old" ] && cmp -s "$old/board" "$new/board" && procd_running voip; then
+		if cmp -s "$old/config" "$new/config" && cmp -s "$old/accounts" "$new/accounts"; then
+			rm -rf "$new"; return 0
+		fi
+		publish "$new" || { rm -rf "$new"; return 1; }
+		if ! ubus call voip reload >/dev/null; then
+			publish "$old" && rm -rf "$new"
+			return 1
+		fi
+	else
+		publish "$new" || { rm -rf "$new"; return 1; }
+		if [ "$mode" = reload ]; then
+			# Submit a new procd generation (changed data restarts the instance).
+			rc_procd instance || return 1
+		else
+			instance
+		fi
+	fi
+	case "$old" in "$RUN"/gen.*) rm -rf "$old";; esac
+}
+
+instance() {
+	local dev zone rule proto port exe=/usr/bin/baresip tls=tcp:5061
+	dev=$(cat "$RUN/current/device")
+	# netifd creates dotted VLAN devices on demand. Claim the shared VLAN
+	# through an unmanaged (no IP) interface only if not already up.
+	if [ "$(cat "$RUN/current/manage_vlan")" = 1 ] && ! ip link show up dev "$dev" 2>/dev/null | grep -q .; then
+		json_init; json_add_string name rbctl_voice; json_add_string proto none
+		json_add_string device "$dev"; json_add_boolean auto 1
+		ubus call network add_dynamic "$(json_dump)" >/dev/null || logger -t voip 'board VLAN not ready'
+	fi
+	procd_open_instance
+	if [ "$PROFILE" = lite ]; then
+		exe=/usr/lib/rbctl-voip-lite/baresip; tls=''
+		procd_set_param env LD_LIBRARY_PATH=/usr/lib/rbctl-voip-lite
+	fi
+	# procd compares the command's environment when deciding to restart.
+	procd_append_param env RBCTL_BOARD_GENERATION="$(readlink "$RUN/current")"
+	procd_set_param command "$exe" -4 -c -f "$RUN/current"
+	procd_open_data
+	json_add_string generation "$(readlink "$RUN/current")"
+	zone=$(cat "$RUN/current/zone")
+	if [ -n "$zone" ]; then
+		json_add_array firewall
+		for rule in udp:5060 tcp:5060 $tls udp:10000-20000; do
+			proto=${rule%:*}; port=${rule#*:}
+			json_add_object ''; json_add_string type rule; json_add_string family ipv4
+			json_add_string src "$zone"; json_add_string proto "$proto"
+			json_add_string dest_port "$port"; json_add_string target ACCEPT
+			json_close_object
+		done
+		json_close_array
+	fi
+	procd_close_data
+	procd_set_param respawn 3600 5 0
+	procd_set_param limits core="0 0"
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+start_service() { configure start; }
+reload_service() { configure reload; }
+service_triggers() { procd_add_reload_trigger voip; }
