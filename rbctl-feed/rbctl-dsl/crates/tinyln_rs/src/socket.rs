@@ -4,7 +4,6 @@
 //! send messages, receive responses, and wait for ACKs.
 
 use std::io;
-use std::os::fd::AsRawFd;
 use std::ptr;
 
 use tinyln_rs_sys::nl_sock;
@@ -54,7 +53,7 @@ impl NlSocket {
     }
 
     /// Send a simple message (type + flags + optional payload).
-    pub fn send_simple(&self, family: i32, msg_type: i32, flags: i32, payload: &[u8]) -> io::Result<()> {
+    pub fn send_simple(&self, msg_type: i32, flags: i32, payload: &[u8]) -> io::Result<()> {
         check(unsafe {
             tinyln_rs_sys::nl_send_simple(
                 self.ptr,
@@ -105,6 +104,7 @@ impl NlSocket {
     }
 
     /// Raw pointer for FFI interop (e.g. with `Unl`).
+    #[allow(dead_code)]
     pub(crate) fn as_ptr(&self) -> *mut nl_sock {
         self.ptr
     }

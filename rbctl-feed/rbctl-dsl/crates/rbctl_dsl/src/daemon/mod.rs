@@ -76,12 +76,12 @@ extern "C" fn handle_sighup(_sig: libc::c_int) {
 fn install_signal_handlers() {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = handle_sigterm as usize;
+        sa.sa_sigaction = handle_sigterm as *const () as usize;
         libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
         libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
 
         let mut sa_hup: libc::sigaction = std::mem::zeroed();
-        sa_hup.sa_sigaction = handle_sighup as usize;
+        sa_hup.sa_sigaction = handle_sighup as *const () as usize;
         libc::sigaction(libc::SIGHUP, &sa_hup, std::ptr::null_mut());
     }
 }
@@ -426,12 +426,6 @@ impl Daemon {
     }
 
     // ── queries ──────────────────────────────────────────────────────────
-
-    /// Requested transport VLAN id — computed here, never in the worker
-    /// (the worker only owns the management transport).
-    fn transport_vlan(&self) -> u16 {
-        self.cfg.transport_vlan_base as u16 + constants::VLAN_TRANSPORT_BASE_OFFSET
-    }
 
     /// Whether a firmware upgrade is in progress (checked under the state
     /// mutex — the same lock the worker uses to publish progress).
