@@ -15,7 +15,7 @@ PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=rbctl-voip contributors
 
 PKG_BUILD_DEPENDS:=rust/host
-PKG_CONFIG_DEPENDS:=CONFIG_PACKAGE_baresip-mod-rbctl-voip
+PKG_CONFIG_DEPENDS:=CONFIG_PACKAGE_baresip-mod-rbctl-voip CONFIG_PACKAGE_rbctl-voip-service-lite
 PKG_BUILD_PARALLEL:=1
 
 # Virtual workspace; the installed binary comes from this crate.
@@ -37,7 +37,8 @@ PKG_SKIP_DOWNLOAD:=1
 
 CMAKE_SOURCE_SUBDIR:=modules/rbctl_voip
 CMAKE_BINARY_SUBDIR:=cmake-module
-module_selected=$(strip $(CONFIG_PACKAGE_baresip-mod-rbctl-voip))
+module_selected=$(strip $(CONFIG_PACKAGE_baresip-mod-rbctl-voip)$(CONFIG_PACKAGE_rbctl-voip-service-lite))
+CMAKE_OPTIONS+= $(if $(CONFIG_PACKAGE_rbctl-voip-service-lite),-DBARESIP_INCLUDE_DIR=$(STAGING_DIR)/usr/include/rbctl-lite -DRE_INCLUDE_DIR=$(STAGING_DIR)/usr/include/rbctl-lite/re)
 CMAKE_OPTIONS+= -DRBCTL_UBUS=ON -DRBCTL_HARNESS=OFF -DBUILD_TESTING=OFF \
 	-DVOICE_INCLUDE_DIR="$(PKG_BUILD_DIR)/crates/rbctl_voip_ffi/include" \
 	-DVOICE_ARCHIVE="$(PKG_BUILD_DIR)/target/$(RUSTC_TARGET_ARCH)/release/librbctl_voip_ffi.a"
@@ -185,3 +186,33 @@ define Package/rbctl-voip-full/install
 endef
 
 $(eval $(call BuildPackage,rbctl-voip-full))
+
+define Package/rbctl-voip-service-lite
+  SECTION:=net
+  CATEGORY:=Network
+  SUBMENU:=Telephony
+  TITLE:=Managed VX830v G.711 voice service (plain RTP)
+  DEPENDS:=$(RUST_ARCH_DEPENDS) +baresip-rbctl-mbedtls +rbctl-voip-led +libubox +libubus +libgcc +ubus +uci +ucode +ucode-mod-uci +ucode-mod-fs
+  CONFLICTS:=rbctl-voip
+  EXTRA_DEPENDS:=$(if $(CONFIG_USE_APK),!rbctl-voip (>=0))
+endef
+Package/rbctl-voip-service-lite/conffiles=$(Package/rbctl-voip/conffiles)
+define Package/rbctl-voip-service-lite/install
+	$(call Package/rbctl-voip/install,$(1))
+	$(INSTALL_DIR) $(1)/usr/lib/rbctl-voip-lite/modules
+	$(INSTALL_BIN) $(CMAKE_BINARY_DIR)/rbctl_voip.so $(1)/usr/lib/rbctl-voip-lite/modules/
+	touch $(1)/usr/libexec/rbctl-voip-lite.profile
+endef
+$(eval $(call BuildPackage,rbctl-voip-service-lite))
+
+define Package/rbctl-voip-lite
+  SECTION:=net
+  CATEGORY:=Network
+  SUBMENU:=Telephony
+  TITLE:=VX830v lite voice profile (mbedcrypto; no SIP/TLS or SRTP)
+  DEPENDS:=+rbctl-voip-service-lite
+endef
+define Package/rbctl-voip-lite/install
+	true
+endef
+$(eval $(call BuildPackage,rbctl-voip-lite))
