@@ -216,3 +216,24 @@ define Package/rbctl-voip-lite/install
 	true
 endef
 $(eval $(call BuildPackage,rbctl-voip-lite))
+
+define Package/luci-app-rbctl-voip
+  VERSION:=$(PKG_VERSION)-r7
+  SECTION:=luci
+  CATEGORY:=LuCI
+  SUBMENU:=3. Applications
+  TITLE:=LuCI telephony configuration for rbctl-voip
+  DEPENDS:=+rbctl-voip +luci-base
+endef
+
+define Package/luci-app-rbctl-voip/install
+	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/admin/services
+	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d $(1)/usr/share/rpcd/acl.d
+	$(INSTALL_DATA) ./luci/view/admin/services/rbctl-voip.js $(1)/www/luci-static/resources/view/admin/services/rbctl-voip.js
+	$(INSTALL_DATA) ./luci/menu.d/luci-app-rbctl-voip.json $(1)/usr/share/luci/menu.d/luci-app-rbctl-voip.json
+	$(INSTALL_DATA) ./luci/acl.d/luci-app-rbctl-voip.json $(1)/usr/share/rpcd/acl.d/luci-app-rbctl-voip.json
+	$(INSTALL_DIR) $(1)/usr/share/rpcd/ucode
+	$(INSTALL_DATA) ./luci/validate.uc $(1)/usr/share/rpcd/ucode/luci.rbctl-voip
+endef
+
+$(eval $(call BuildPackage,luci-app-rbctl-voip))

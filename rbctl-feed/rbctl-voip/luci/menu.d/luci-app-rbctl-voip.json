@@ -1,0 +1,13 @@
+{
+	"admin/services/rbctl-voip": {
+		"title": "Telephony",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "admin/services/rbctl-voip"
+		},
+		"depends": {
+			"acl": [ "luci-app-rbctl-voip" ]
+		}
+	}
+}

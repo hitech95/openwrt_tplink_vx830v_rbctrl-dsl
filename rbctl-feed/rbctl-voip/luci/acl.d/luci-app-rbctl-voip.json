@@ -1,0 +1,15 @@
+{
+	"luci-app-rbctl-voip": {
+		"description": "Allow configuration of rbctl-voip telephony settings",
+		"read": {
+			"uci": [ "voip", "firewall" ],
+			"ubus": {
+				"voip": [ "status", "lines", "calls" ]
+			}
+		},
+		"write": {
+			"uci": [ "voip" ],
+			"ubus": { "luci.rbctl-voip": [ "validate" ] }
+		}
+	}
+}
