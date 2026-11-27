@@ -109,6 +109,14 @@ fn profile_string(profiles: rbctl_proto::oem::pack::Vdsl2Profiles) -> String {
     parts.join(" ")
 }
 
+fn datarate(metric: u32) -> i32 {
+    (metric as i32) * 1000
+}
+
+fn decibel(metric: u32) -> f64 {
+    metric as f64 / 10.0
+}
+
 /// Add upstream or downstream metrics sub-table.
 fn add_direction(bb: &mut BlobBuilder, name: &str, m: &LineMetrics, upstream: bool) {
     bb.open_table(Some(name));
@@ -119,12 +127,14 @@ fn add_direction(bb: &mut BlobBuilder, name: &str, m: &LineMetrics, upstream: bo
         (m.down_rate, m.down_attainable_rate, m.down_noise_margin, m.down_attenuation, m.down_output_power)
     };
 
-    bb.put_i32(Some("data_rate"), rate as i32);
-    bb.put_i32(Some("attndr"), attndr as i32);
-    bb.put_i32(Some("snr"), snr as i32);
-    bb.put_i32(Some("latn"), attn as i32);
-    bb.put_i32(Some("satn"), attn as i32);
-    bb.put_i32(Some("actatp"), power as i32);
+    // Match the Lantiq ubus ABI: rates are bps, while signal and power
+    // measurements are floating-point dB/dBm rather than tenths.
+    bb.put_i32(Some("data_rate"), datarate(rate));
+    bb.put_i32(Some("attndr"), datarate(attndr));
+    bb.put_double(Some("snr"), decibel(snr));
+    bb.put_double(Some("latn"), decibel(attn));
+    bb.put_double(Some("satn"), decibel(attn));
+    bb.put_double(Some("actatp"), decibel(power));
     bb.put_i32(Some("interleave_delay"), 0);
     bb.put_i32(Some("inp"), 0);
 
@@ -136,6 +146,13 @@ fn add_direction(bb: &mut BlobBuilder, name: &str, m: &LineMetrics, upstream: bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ubus_metrics_use_lantiq_units() {
+        assert_eq!(datarate(100_000), 100_000_000);
+        assert_eq!(decibel(63), 6.3);
+        assert_eq!(decibel(142), 14.2);
+    }
     use crate::config::XferMode;
     use rbctl_proto::oem::unpack::{DataPath, LineState};
 
