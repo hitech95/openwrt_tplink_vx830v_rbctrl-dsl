@@ -1,9 +1,8 @@
 # rbctl-voip
 
-FOSS replacement for the VoIP side of the VX830v master board, part of the
-rbctl family (see `../rbctl-dsl` for the xDSL side). It talks to the **stock
-Econet voice board** over raw Ethernet on the management VLAN and will host
-the baresip integration (plan: `plans/voip-baresip-plan.md`, milestone M3).
+Two-port SIP service for the VX830v, shipped alongside [rbctl-dsl](../rbctl-dsl/README.md) in the [OpenWrt feed](../README.md). Baresip 4.9.0 handles SIP and media; its `rbctl_voip` module talks to the **stock EcoNet voice board** over raw Ethernet on the management VLAN. OpenWrt manages the service with procd, UCI and ubus; LuCI is optional.
+
+**Status:** hardware tests cover both analog ports, simultaneous calls, two-way speech, R-button hold/resume and SIP registration after reboot. The full host module suite passed 33/33. M5 and M5.1 await only the deferred clean-image install test. See [features vs OEM](../../docs/voip/feature-status.md) and [test results](../../docs/voip/test-report.md#m5-review-verification).
 
 | Crate | Kind | What it is |
 |---|---|---|
@@ -20,14 +19,14 @@ the baresip integration (plan: `plans/voip-baresip-plan.md`, milestone M3).
 | `0xDD02` | board | `18` | DSP event (hook, digits, results) + master's 4-byte status reply |
 | `0xDD03` | either | `19` | RTP/RTCP datagram with `be16 slot, be16 selector` prefix |
 
-Evidence and every field offset: `docs/voip/board-link.md` (master side),
-`docs/voip/peer.md` (Econet side), as-built design: `docs/voip/foss-design.md`.
+See the [master-side protocol](../../docs/voip/board-link.md), [EcoNet peer](../../docs/voip/peer.md) and [library design](../../docs/voip/foss-design.md).
 
 ## Build and test
 
 ```sh
 cargo build --workspace
-scripts/check.sh            # everything below in one go
+scripts/check.sh            # Rust, ABI and available optional checks
+BARESIP_PREFIX=/path/to/host-4.9 scripts/check.sh  # include the full module suite
 cargo test --workspace --features rbctl_voicectl/fixture
 ```
 
@@ -58,7 +57,7 @@ cd crates/rbctl_voip_ffi && cbindgen --config cbindgen.toml --output include/rbc
 
 ## Using rbctl-voicectl on the router
 
-Needs root or `CAP_NET_RAW`, and the VLAN device (default `lan0.500`).
+Needs root or `CAP_NET_RAW`, and the VLAN device (default `lan0.500`). Use these bring-up commands only when the managed voice service is stopped and no calls are active.
 
 ```sh
 rbctl-voicectl init --locale 10          # cold or warm initialization
@@ -82,18 +81,13 @@ and acoustic results are in `docs/voip/peer.md`. With the mic on the earpiece,
 prints estimated peaks and on/off intervals, without saving raw audio. Stop any
 other board owner first. Confirm tone names separately with the receiver at the ear.
 
-## Baresip integration (M3)
+## Baresip integration
 
-See the [single-line module, host tests and router configuration](modules/rbctl_voip/README.md)
-for analog handset to SIP call integration using the Rust C ABI.
+See the [module README](modules/rbctl_voip/README.md) for the two-line call logic and how to build the matching host test prefix.
 
 ## OpenWrt
 
-`Makefile` builds with the feed's `rust-package.mk` (as rbctl-dsl does),
-installs `rbctl-voicectl` (package `rbctl-voicectl`) and stages
-`librbctl_voip_ffi.a` + `rbctl_voip.h` for the baresip module build. The
-shared `af_packet` crate is copied from `../rbctl-dsl` during
-`Build/Prepare`.
+Select `rbctl-voip` for the full service, or `luci-app-rbctl-voip` to install both the service and its web interface. The default configuration enables no SIP accounts. Provision one in **LuCI → Services → Telephony** or `/etc/config/voip`; check board, account and line state with `ubus call voip status`. See the [package profiles](../README.md) and [deployment and troubleshooting guide](../../docs/voip/m5-integration.md).
 
 ## Licence
 

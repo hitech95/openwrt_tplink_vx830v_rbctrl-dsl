@@ -1,4 +1,6 @@
-# remote_board — Reverse Engineering Documentation
+# VX830v xDSL and VoIP documentation
+
+For the OpenWrt packages, start with the [feed guide](../rbctl-feed/README.md). For analog telephony, see [voice features and OEM comparison](voip/feature-status.md) or the [VoIP engineering index](voip/index.md). The architecture overview below describes the xDSL control and data paths.
 
 Analysis of the `remote_board` ELF binary, its shared library `libcmm.so`, and
 the DSL board they manage. **Two architectures are in play** (confirmed from the

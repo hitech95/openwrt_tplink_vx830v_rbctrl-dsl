@@ -1,10 +1,13 @@
-# rbctl-dsl
+# rbctl: xDSL and VoIP for the TP-Link VX830v
 
-Rust daemon that replaces the proprietary `remote_board` + `libcmm.so` stack
-for managing an EcoNet xDSL board over a proprietary `0x88B5` Ethernet
-protocol on mainline OpenWrt.
+The [rbctl OpenWrt feed](rbctl-feed/README.md) provides two independently selectable services for the VX830v. Both run on the router's main CPU and communicate with the stock EcoNet board over Ethernet.
 
-## Status
+| Service | Verified on the VX830v | Start here |
+|---|---|---|
+| **xDSL** (`rbctl-dsl`) | DSL line management and board-side VLAN provisioning, including a working PPPoE connection. | [Configuration and CLI](rbctl-feed/rbctl-dsl/README.md) |
+| **VoIP** (`rbctl-voip`) | Both analog phone ports carry SIP calls with two-way speech. Registration after reboot, call waiting, R-button hold/resume and the LuCI account editor have been tested. M5/M5.1 await only **T5.1**, installation on a clean image; the live tests used package upgrades. | [Setup](docs/voip/m5-integration.md) · [Features and OEM comparison](docs/voip/feature-status.md) |
+
+## xDSL implementation status
 
 | Phase | Status | Description |
 |-------|--------|-------------|
@@ -19,7 +22,9 @@ protocol on mainline OpenWrt.
 ## Repository layout
 
 ```
-rbctl-feed/rbctl-dsl/          Cargo workspace (the OpenWrt package)
+rbctl-feed/rbctl-voip/         Voice service, baresip module, LuCI app and diagnostics
+rbctl-feed/baresip-rbctl-mbedtls/  Private baresip runtime for the lite voice profile
+rbctl-feed/rbctl-dsl/          xDSL daemon and shared raw Ethernet crate
 ├── crates/
 │   ├── rbctl_proto/           Protocol core (no_std, pure Rust)
 │   ├── af_packet/             AF_PACKET raw Ethernet socket (libc-only)
@@ -34,7 +39,7 @@ examples/                      Reference implementations (Python: checksum, pack
 plans/                         Implementation plans (RE + daemon build)
 ```
 
-## Crates
+## xDSL crates
 
 ### `rbctl_proto` — Protocol core
 
@@ -82,29 +87,11 @@ The binary that ties everything together:
 
 ## Building
 
-Requires the [OpenWrt SDK](https://openwrt.org/docs/guide-developer/toolchain)
-with a `aarch64_cortex-a53` (Filogic) or `aarch64_generic` (armsr) target.
-
-```bash
-# Clone the OpenWrt SDK
-git clone https://git.openwrt.org/openwrt/openwrt.git
-cd openwrt
-
-# Configure for your target
-./scripts/feeds update -a && ./scripts/feeds install -a
-make menuconfig    # select Target (e.g. MediaTek Filogic) + rust/host
-
-# Add the rbctl feed
-echo 'src-link rbctl /path/to/this-repo/rbctl-feed' >> feeds.conf
-./scripts/feeds update rbctl && ./scripts/feeds install rbctl-dsl
-
-# Build
-make package/rbctl-dsl/compile V=s
-```
-
-Output: `bin/packages/<arch>/rbctl/rbctl-dsl-<version>-r1.apk`
+Follow the [feed registration and build instructions](rbctl-feed/README.md#build-in-openwrt) for the matching VX830v OpenWrt buildroot or SDK. Select xDSL, voice, or both. The optional `luci-app-rbctl-voip` pulls in the full voice service; xDSL does not require baresip or LuCI.
 
 ## Testing
+
+For voice, see the [host and module tests](rbctl-feed/rbctl-voip/README.md#build-and-test) and [hardware results](docs/voip/test-report.md#m5-review-verification). The checks below cover xDSL.
 
 ### Host-side tests (no SDK needed)
 
@@ -208,4 +195,4 @@ not imply endorsement or affiliation.
 
 ## License
 
-GPL-2.0-only
+The xDSL daemon is GPL-2.0-only; the VoIP implementation is GPL-2.0-or-later. The shared `af_packet` crate is MIT. See the package manifests for component licences.

@@ -1,9 +1,6 @@
 # AArch64 VoIP — analysis index
 
-Initial reverse engineering of the VX830v master-board VoIP stack, with the
-goal of replacing its closed components with open-source software. This is a
-first pass: observations from static analysis are distinguished from hypotheses;
-no live packet capture or on-device behavior has been validated yet.
+The [OpenWrt voice service](../../rbctl-feed/rbctl-voip/README.md) replaces the VX830v master-side telephony stack and drives both analog ports on the stock board. For current behavior, start with the [feature status](feature-status.md) and [on-device test results](test-report.md). The OEM analysis below documents the protocol evidence behind the implementation.
 
 ## Documents
 
