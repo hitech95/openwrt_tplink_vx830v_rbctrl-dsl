@@ -161,6 +161,10 @@ struct DaemonArgs {
     /// own defaults without the daemon disrupting it.
     #[arg(long)]
     monitor: bool,
+
+    /// Log one warning after a continuous NoSignal period (disabled by default).
+    #[arg(long)]
+    nosignal_watchdog: bool,
 }
 
 /// Accept the transport VLAN as a full id (2000–2007), optionally with an
@@ -225,6 +229,7 @@ fn main() {
                 args.notify.as_deref(),
                 &overrides,
                 args.monitor,
+                args.nosignal_watchdog,
             );
             std::process::exit(code);
         }
@@ -296,3 +301,23 @@ fn ipc_exit(cmd: daemon::ipc::IpcCmd) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Command};
+    use clap::Parser;
+
+    #[test]
+    fn nosignal_watchdog_is_opt_in() {
+        let cli = Cli::try_parse_from(["rbctl-dsl", "daemon"]).unwrap();
+        let Command::Daemon(args) = cli.command else {
+            panic!("expected daemon command");
+        };
+        assert!(!args.nosignal_watchdog);
+
+        let cli = Cli::try_parse_from(["rbctl-dsl", "daemon", "--nosignal-watchdog"]).unwrap();
+        let Command::Daemon(args) = cli.command else {
+            panic!("expected daemon command");
+        };
+        assert!(args.nosignal_watchdog);
+    }
+}
